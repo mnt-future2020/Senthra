@@ -156,6 +156,11 @@ export function listOnHire(
     rentalItemId?: string;
     /** Item, order code or supplier. NARROWS the chosen window; it never escapes it. */
     search?: string;
+    /** ONE supplier's live hires — matched through the parent order. */
+    supplierId?: string;
+    /** Inclusive calendar days ("YYYY-MM-DD"). The SERVER resolves the day boundaries. */
+    endsFrom?: string;
+    endsTo?: string;
   } = {},
 ): Promise<PagedOnHire> {
   return api<PagedOnHire>(`/purchase-orders/rental-lines/on-hire${qs({ ...params })}`);
@@ -389,7 +394,18 @@ export function exportRentalItemsCsv(
 }
 
 export function exportOnHireCsv(
-  params: { status?: OnHireFilter; search?: string } = {},
+  // EVERY filter the register carries. It used to take status + search only, so a warehouse's
+  // receiving pane or one item's page downloaded the whole company's register while the screen
+  // showed a handful of rows — with nothing in the file to say so.
+  params: {
+    status?: OnHireFilter;
+    search?: string;
+    warehouseId?: string;
+    rentalItemId?: string;
+    supplierId?: string;
+    endsFrom?: string;
+    endsTo?: string;
+  } = {},
 ): Promise<{ capped: boolean }> {
   return downloadCsv(`/purchase-orders/rental-lines/on-hire/export${qs({ ...params })}`, "rentals-on-hire");
 }

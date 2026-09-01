@@ -2,6 +2,7 @@ import { Prisma, type Role, type User } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
 import { escapeRegex } from "../../utils/search.js";
+import { isEmptyWindow, type DayWindow } from "../../utils/filter-date.js";
 
 // Data-access layer for the User model. The ONLY place Prisma is touched for
 // users. Soft-deleted users (deletedAt set) are excluded from normal reads.
@@ -12,12 +13,15 @@ export interface UserListFilters {
   search?: string;
   status?: string;
   roleId?: string;
+  /** Half-open window on `createdAt` — an INSTANT, so built with `instantDayWindow`. */
+  addedWindow?: DayWindow;
 }
 
 function buildWhere(filters: UserListFilters): Prisma.UserWhereInput {
   const where: Prisma.UserWhereInput = { deletedAt: null };
   if (filters.status) where.status = filters.status;
   if (filters.roleId) where.roleId = filters.roleId;
+  if (filters.addedWindow && !isEmptyWindow(filters.addedWindow)) where.createdAt = filters.addedWindow;
   if (filters.search) {
     const q = escapeRegex(filters.search);
     where.OR = [

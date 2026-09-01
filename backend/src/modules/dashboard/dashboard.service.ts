@@ -40,6 +40,11 @@ export function isSpendPeriod(v: unknown): v is SpendPeriod {
   return typeof v === "string" && (SPEND_PERIODS as readonly string[]).includes(v);
 }
 
+/** A UTC-midnight Date as the `YYYY-MM-DD` a list's date filter accepts. */
+function isoDay(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
 function daysBetween(from: Date, to: Date): number {
   return Math.max(0, Math.floor((to.getTime() - from.getTime()) / 86_400_000));
 }
@@ -107,9 +112,14 @@ export async function buildDashboardSummary(
       : spendPeriod === "90d"
         ? bucketValueByWeek(rows, SPEND_90D_WEEKS, now)
         : bucketValueByDay(rows, SPEND_30D_DAYS, now);
-  const grnPulseSince = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - GRN_PULSE_DAYS),
-  );
+
+  // THREE sections need the company's day boundary (jobs due, deliveries expected, goods received in
+  // the last 7 days) and each used to read Settings for itself — three round trips per dashboard load
+  // for one singleton value that cannot change mid-request. Resolved once, lazily: the promise is
+  // created by whichever section gets there first and awaited by the rest, so the fan-out below stays
+  // fully concurrent and a viewer with none of those three permissions still pays nothing.
+  let timeZonePromise: Promise<string> | undefined;
+  const companyTimezone = () => (timeZonePromise ??= settingsService.getCompanyTimezone());
 
   const can = (key: string) => principalGrants(actor, key);
   const canPrf = can("purchase_requests.view");
@@ -159,7 +169,7 @@ export async function buildDashboardSummary(
       const [count, created, due] = await Promise.all([
         jobRepo.countActive(),
         jobRepo.createdSince(sparkSince),
-        jobRepo.dueBreakdown(now, await settingsService.getCompanyTimezone()),
+        jobRepo.dueBreakdown(now, await companyTimezone()),
       ]);
       return {
         count,
@@ -175,14 +185,30 @@ export async function buildDashboardSummary(
     // Delivery windows share the company-timezone day boundary with jobs + goods-management, so an
     // "overdue" delivery and an "overdue" job flip at the same moment.
     section("expectedThisWeek", canPo, async () =>
-      poRepo.expectedDeliveries(now, startOfDayIn(await settingsService.getCompanyTimezone(), now), scope),
+      poRepo.expectedDeliveries(now, startOfDayIn(await companyTimezone(), now), scope),
     ),
     section("goodsReceived", canGrn, async () => {
+      // `receivedDate` is a CALENDAR-DAY column and "the last 7 days" is a calendar question, so the
+      // window is anchored on the COMPANY's today — the same boundary the jobs, delivery and
+      // overdue-holdings numbers turn over on. It was anchored on UTC's, which for the first hour of
+      // every BST day put this card a day behind every other date on the screen.
+      const pulseSince = new Date(
+        startOfDayIn(await companyTimezone(), now).getTime() - GRN_PULSE_DAYS * 86_400_000,
+      );
       // One read covers both figures: the 8-week spark and the 7-day pulse count.
       const rows = await grnRepo.completedReceiptsSince(sparkSince, scope);
       return {
-        count: rows.filter((r) => r.at >= grnPulseSince).length,
+        count: rows.filter((r) => r.at >= pulseSince).length,
         weeklyReceived: bucketByWeek(rows, SPARK_WEEKS, now),
+        // The window the count was TAKEN with, as the calendar day the Goods In list filters by, so
+        // the card's link opens exactly these receipts. Reported rather than re-derived in the
+        // browser for the same reason getOverdueView reports its own `days`: a client that computed
+        // "seven days ago" from its own clock would open a different set in another timezone.
+        //
+        // A lower bound ONLY — the count has no upper bound either (a receipt dated ahead is a data
+        // entry to look at, not one to hide), and a `receivedTo` here would make the list narrower
+        // than the number above it.
+        receivedSince: isoDay(pulseSince),
       };
     }),
     // Shares the Goods Management definition rather than reimplementing it. It used to hold its own

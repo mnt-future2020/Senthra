@@ -15,7 +15,7 @@ import * as rentalPool from "#modules/purchase-order/rentalHire.pool.js";
 import { allocateFromHires } from "#modules/purchase-order/rentalHire.allocation.js";
 import { emitHireUpdated } from "#modules/purchase-order/rentalHire.realtime.js";
 import { getCloudinaryCreds, getCompanyTimezone } from "#modules/settings/settings.service.js";
-import { startOfDayIn } from "../../utils/filter-date.js";
+import { resolveInstantWindow, startOfDayIn } from "../../utils/filter-date.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
@@ -1801,19 +1801,30 @@ function paged(result: { requests: RequestWithLines[]; total: number }, page: nu
   return { requests: result.requests.map((r) => toPublic(r, now, scope)), total: result.total, page, pageSize, totalPages: Math.max(1, Math.ceil(result.total / pageSize)) };
 }
 
-export async function listMine(engineerId: string, params: { status?: string; type?: string; createdVia?: string; search?: string; sort?: string; page?: number; pageSize?: number }): Promise<PagedVanStockRequests> {
-  const pageSize = Math.min(Math.max(params.pageSize ?? 20, 1), 100);
-  const page = Math.max(params.page ?? 1, 1);
-  // Engineer's own list — scope null ⇒ isMine false, myProgress null (they have no warehouse role).
-  return paged(await vsrRepo.listRequests({ ...params, engineerId, page, pageSize }), page, pageSize, null);
+// A request's `createdAt` is a real instant, so "raised on the 3rd" is the COMPANY's 3rd — the same
+// day boundary `todayStart()` in this file already resolves for hire dates.
+async function raisedWindowFor(from: string | undefined, to: string | undefined) {
+  if (!from && !to) return undefined;
+  return resolveInstantWindow(from, to, () => getCompanyTimezone());
 }
 
-export async function listAll(actor: AuditActor, params: { status?: string; type?: string; priority?: string; createdVia?: string; search?: string; sort?: string; warehouseId?: string; page?: number; pageSize?: number }): Promise<PagedVanStockRequests> {
+export async function listMine(engineerId: string, params: { status?: string; type?: string; createdVia?: string; search?: string; sort?: string; raisedFrom?: string; raisedTo?: string; page?: number; pageSize?: number }): Promise<PagedVanStockRequests> {
+  const pageSize = Math.min(Math.max(params.pageSize ?? 20, 1), 100);
+  const page = Math.max(params.page ?? 1, 1);
+  const raisedWindow = await raisedWindowFor(params.raisedFrom, params.raisedTo);
+  // Engineer's own list — scope null ⇒ isMine false, myProgress null (they have no warehouse role).
+  return paged(await vsrRepo.listRequests({ ...params, raisedWindow, engineerId, page, pageSize }), page, pageSize, null);
+}
+
+export async function listAll(actor: AuditActor, params: { status?: string; type?: string; priority?: string; createdVia?: string; search?: string; sort?: string; warehouseId?: string; engineerId?: string; raisedFrom?: string; raisedTo?: string; page?: number; pageSize?: number }): Promise<PagedVanStockRequests> {
   const pageSize = Math.min(Math.max(params.pageSize ?? 20, 1), 100);
   const page = Math.max(params.page ?? 1, 1);
   if (params.warehouseId) assertWarehouseAccess(actor, params.warehouseId);
   const scope = warehouseScopeFilter(actor);
-  return paged(await vsrRepo.listRequests({ ...params, warehouseScope: scope, page, pageSize }), page, pageSize, scope);
+  const raisedWindow = await raisedWindowFor(params.raisedFrom, params.raisedTo);
+  // The engineer filter NARROWS within `warehouseScope`, never around it — both land in the same
+  // AND list in the repository, so a reviewer picking an engineer still only sees their warehouses.
+  return paged(await vsrRepo.listRequests({ ...params, raisedWindow, warehouseScope: scope, page, pageSize }), page, pageSize, scope);
 }
 
 export function countPending(actor: AuditActor): Promise<number> {

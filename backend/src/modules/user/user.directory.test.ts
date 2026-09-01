@@ -181,9 +181,12 @@ describe("GET /users — directory projection", () => {
   it("passes the caller's filters, paging and sort straight through to the repository", async () => {
     vi.mocked(userRepo.count).mockResolvedValue(40);
     await listUsers({ search: "kar", status: "active", roleId: ROLE_ID, page: 2, pageSize: 10, sort: "name" });
-    expect(userRepo.count).toHaveBeenCalledWith({ search: "kar", status: "active", roleId: ROLE_ID });
+    // `addedWindow` is empty because no date filter was passed — and it stays EMPTY rather than
+    // absent so the count and the page provably describe the same filter object.
+    const expected = { search: "kar", status: "active", roleId: ROLE_ID, addedWindow: {} };
+    expect(userRepo.count).toHaveBeenCalledWith(expected);
     expect(userRepo.findMany).toHaveBeenCalledWith(
-      { search: "kar", status: "active", roleId: ROLE_ID },
+      expected,
       10, // skip = (page 2 - 1) * 10
       10,
       "name",

@@ -13,6 +13,17 @@ export const JOB_STATUS_LABELS: Record<JobStatus, string> = {
   cancelled: "Cancelled",
 };
 
+// DERIVED pseudo-statuses — filter values the list accepts that are not stored on a job. Each is
+// resolved server-side in job.repository's buildWhere, and each is the exact predicate a dashboard
+// card or attention badge counts by, so clicking one opens precisely the rows it counted.
+export const JOB_DERIVED_STATUS_OPTIONS = [
+  // Work in flight: Assigned, Accepted and In progress. What the Overview's "Active Jobs" card
+  // counts — it opened the unfiltered list before, so "Active Jobs 18" landed on every job ever
+  // raised with nothing on screen saying which 18 were meant.
+  { value: "active", label: "Active (in flight)" },
+  { value: "overdue", label: "Overdue" },
+];
+
 const JOB_STATUS_CLASSES: Record<JobStatus, string> = {
   draft: "bg-[var(--surface-2)] text-[var(--muted)]",
   assigned: "bg-amber-500/12 text-amber-600",

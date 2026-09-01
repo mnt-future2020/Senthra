@@ -13,6 +13,8 @@ router.use(requireAuth);
 router.get("/", requirePermission("jobs.view"), jobController.listJobs);
 // BEFORE "/:idOrCode" — otherwise "export.csv" is parsed as a job code and 404s on lookup.
 router.get("/export.csv", requirePermission("jobs.export"), exportLimiter, jobController.exportJobsCsv);
+// Also before "/:idOrCode" — "site-options" is not a job code.
+router.get("/site-options", requirePermission("jobs.view"), jobController.listJobSiteOptions);
 router.get("/:idOrCode", requirePermission("jobs.view"), jobController.getJob);
 
 router.post("/", requirePermission("jobs.create"), writeLimiter, validateBody(createJobSchema), jobController.createJob);
@@ -38,6 +40,8 @@ portalRouter.use(requireAuth, requireCustomer);
 portalRouter.get("/", jobController.getOwnJobs);
 // BEFORE "/:id" — otherwise "export.csv" is parsed as a job id and 404s on lookup.
 portalRouter.get("/export.csv", exportLimiter, jobController.exportOwnJobsCsv);
+// Before "/:id" for the same reason.
+portalRouter.get("/site-options", jobController.getOwnJobSiteOptions);
 portalRouter.get("/:id", jobController.getOwnJob);
 
 export { portalRouter };

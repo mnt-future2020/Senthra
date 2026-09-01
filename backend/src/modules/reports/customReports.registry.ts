@@ -21,6 +21,7 @@ export const CUSTOM_REPORT_FILTERS = [
   "warehouseId",
   "irmItemId",
   "engineerId",
+  "siteId",
   "itemKind",
 ] as const;
 export type CustomReportFilter = (typeof CUSTOM_REPORT_FILTERS)[number];
@@ -127,10 +128,11 @@ const PROJECT_ACTIVITY: CustomReportDef = {
   key: "project_activity",
   label: "Project Activity",
   description: "Stock movements attributed to a project, through the jobs raised under it. Quantities only — project COST lives in Finance.",
-  filters: ["dateFrom", "dateTo", "customerId", "projectId", "warehouseId", "irmItemId"],
+  filters: ["dateFrom", "dateTo", "customerId", "projectId", "siteId", "warehouseId", "irmItemId"],
   columns: [
     { key: "date", header: "Date" },
     { key: "projectName", header: "Project" },
+    { key: "siteName", header: "Site" },
     { key: "jobNumber", header: "Job" },
     { key: "itemName", header: "Item" },
     { key: "quantity", header: "Quantity", numeric: true },

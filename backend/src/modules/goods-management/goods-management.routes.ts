@@ -28,6 +28,10 @@ router.post("/damaged/restore", requirePermission("goods_management.reconcile"),
 // that already means "may reduce stock in their warehouse", which is exactly what this does — so it
 // needs no new permission and no role/seed change. Warehouse-scoped in the service.
 router.post("/damaged/report", requirePermission("inventory.adjust"), writeLimiter, validateBody(reportDamageSchema), controller.reportDamage);
+// BEFORE "/overdue" would be wrong the other way round is not a risk here (Express matches the
+// literal path, not a prefix), but the two are kept together so the pair is obvious: one lists the
+// rows, one summarises the same selection per warehouse / per engineer for the dashboard drill-down.
+router.get("/overdue/groups", requirePermission("goods_management.view"), controller.listOverdueGroups);
 router.get("/overdue", requirePermission("goods_management.view"), controller.listOverdue);
 // Photo upload for BOTH damage capture paths: the field return (goods_management.receive_return)
 // and the warehouse damage report (inventory.adjust). Both make a photo mandatory, so a holder of

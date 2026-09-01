@@ -14,6 +14,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Select } from "@/components/ui/Select";
+import { listSupplierTypes } from "@/services/supplier-type.service";
 import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
 import type { Supplier, SupplierStatus } from "@/types/supplier";
 import type { UserStatus } from "@/types/user";
@@ -210,6 +211,7 @@ export function SuppliersView() {
   const search = searchParams.get("q") ?? "";
   const statusFilter = (searchParams.get("status") ?? "all") as "all" | SupplierStatus;
   const sort = (searchParams.get("sort") as Sort) ?? "newest";
+  const typeFilter = searchParams.get("type") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
   // Local text-box value (debounced into ?q)
@@ -261,13 +263,26 @@ export function SuppliersView() {
   // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
   // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
   // was taken from, and nothing about the resulting file looks wrong.
+
+  // The type list. Degrades to an empty array — which renders as "All types" alone — because the
+  // master-data read is its own permission and a list user need not hold it.
+  const [types, setTypes] = React.useState<{ id: string; name: string }[]>([]);
+  React.useEffect(() => {
+    let alive = true;
+    listSupplierTypes()
+      .then((rows) => alive && setTypes(rows.filter((t) => t.status !== "inactive").map((t) => ({ id: t.id, name: t.name }))))
+      .catch(() => alive && setTypes([]));
+    return () => { alive = false; };
+  }, []);
+
   const exportParams = React.useMemo(
     () => ({
       search: search || undefined,
       status: statusFilter === "all" ? undefined : statusFilter,
+      type: typeFilter || undefined,
       sort: sort === "newest" ? undefined : sort,
     }),
-    [search, statusFilter, sort],
+    [search, statusFilter, typeFilter, sort],
   );
 
   React.useEffect(() => {
@@ -295,7 +310,7 @@ export function SuppliersView() {
 
   const suppliers = data?.suppliers ?? [];
   const showSkeleton = loading && suppliers.length === 0;
-  const isFiltered = statusFilter !== "all" || Boolean(search);
+  const isFiltered = statusFilter !== "all" || Boolean(search) || Boolean(typeFilter);
 
   const toggleStatus = async (s: Supplier) => {
     const next = s.status === "active" ? "inactive" : "active";
@@ -358,6 +373,15 @@ export function SuppliersView() {
             { value: "code", label: "Code" },
           ]}
           ariaLabel="Sort"
+        />
+        {/* Supplier TYPE. The API has always accepted it; the toolbar simply never offered it, so a
+            list of every supplier could only be narrowed by active/inactive. */}
+        <Select
+          size="sm"
+          value={typeFilter}
+          onChange={(v) => patch({ type: v || null })}
+          options={[{ value: "", label: "All types" }, ...types.map((t) => ({ value: t.id, label: t.name }))]}
+          ariaLabel="Filter by supplier type"
         />
         {/* Before "New supplier" and outside its ml-auto, so the primary action stays hard right. */}
         {can("suppliers.export") && (

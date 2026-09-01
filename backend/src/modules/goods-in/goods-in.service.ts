@@ -17,6 +17,7 @@ import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse
 import { withTransaction } from "../../lib/prisma.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
+import { calendarDayWindow } from "../../utils/filter-date.js";
 import type { CreateGoodsReceiptInput, GRNLineInput, UpdateGoodsReceiptInput } from "./goods-in.validation.js";
 import { GRN_ATTACHMENT_MAX_COUNT, GRN_ATTACHMENT_MAX_TOTAL_BYTES } from "./goods-in.validation.js";
 
@@ -337,6 +338,14 @@ export interface ListGoodsReceiptsParams {
   purchaseOrder?: string;
   /** Narrows to one supplier's receipts — the supplier detail page's Goods In tab. */
   supplier?: string;
+  /**
+   * Inclusive calendar days on `receivedDate` — the day the goods physically arrived.
+   *
+   * A CALENDAR DAY: the form sends "YYYY-MM-DD" and the service stores `new Date(...)`, i.e. UTC
+   * midnight. So the window is plain date arithmetic, with no timezone conversion to get wrong.
+   */
+  receivedFrom?: string;
+  receivedTo?: string;
   page?: number;
   pageSize?: number;
   sort?: string;
@@ -347,7 +356,15 @@ export interface ListGoodsReceiptsParams {
 export async function listGoodsReceipts(params: ListGoodsReceiptsParams = {}, actor?: AuditActor): Promise<PagedGoodsReceipts> {
   // `warehouseIds` (the actor's warehouse scope) still applies alongside every other filter — a
   // supplier filter must narrow the caller's permitted set, never widen it.
-  const filters = { search: params.search, status: params.status, warehouseId: params.warehouse, warehouseIds: warehouseScopeFilter(actor), purchaseOrderId: params.purchaseOrder, supplierId: params.supplier };
+  const filters = {
+    search: params.search,
+    status: params.status,
+    warehouseId: params.warehouse,
+    warehouseIds: warehouseScopeFilter(actor),
+    purchaseOrderId: params.purchaseOrder,
+    supplierId: params.supplier,
+    receivedWindow: calendarDayWindow(params.receivedFrom, params.receivedTo),
+  };
   const total = await grnRepo.count(filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const rows = await grnRepo.findMany(filters, skip, pageSize, params.sort);

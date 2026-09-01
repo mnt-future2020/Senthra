@@ -33,6 +33,11 @@ import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { WorkspaceToolbar } from "@/components/ui/WorkspaceToolbar";
 import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
+import { SitePicker, siteOptionLabel } from "@/components/ui/SitePicker";
+import { searchJobSites } from "@/services/job.service";
+import { listEngineerOptions } from "@/services/warehouse.service";
+import { listCustomers } from "@/services/customer.service";
 import { toolbarBtn, toolbarDateCls } from "@/components/ui/styles";
 import { JobScanPanel } from "./JobScanPanel";
 import { OverdueHoldingsView } from "./OverdueHoldingsView";
@@ -244,12 +249,51 @@ export function GoodsManagementTab({
   const dueFilter = DUE_VALUES.includes(rawDue) ? rawDue : "";
   const activityFrom = searchParams.get("gmFrom") ?? "";
   const activityTo = searchParams.get("gmTo") ?? "";
+  // The EXACT due window, alongside the today/this-week/overdue buckets above. The buckets answer
+  // "what is late"; this answers "what is due between these dates", which is what a manager
+  // reconciling a period needs. `completionDate` is a calendar day — no timezone conversion.
+  const dueFrom = searchParams.get("gmDueFrom") ?? "";
+  const dueTo = searchParams.get("gmDueTo") ?? "";
+  // Whose work it is. `engineerId` here is the JOB's ASSIGNED engineer — the person the warehouse
+  // hands kit to and chases it from, which is the same name the Engineer column shows.
+  const engineerFilter = searchParams.get("gmEngineer") ?? "";
+  const customerFilter = searchParams.get("gmCustomer") ?? "";
+  const siteFilter = searchParams.get("gmSite") ?? "";
   const showAllLines = searchParams.get("gmLines") === "all";
   const rawSort = searchParams.get("gmSort");
   const queueSort = (rawSort && SORT_VALUES.includes(rawSort) ? rawSort : "newest") as QueueSort;
 
   // Local search input — seeded from URL, debounce-writes back to ?gmq.
   const [searchInput, setSearchInput] = React.useState(urlSearch);
+
+  // Option lists for the three id filters. Each degrades to an empty array — `goods_management.view`
+  // implies neither `customers.view` nor the engineer roster — which renders as "All …" alone.
+  const [engineerOptions, setEngineerOptions] = React.useState<{ value: string; label: string }[]>([]);
+  const [customerOptions, setCustomerOptions] = React.useState<{ value: string; label: string }[]>([]);
+  const [siteLabel, setSiteLabel] = React.useState<string | null>(null);
+  // Keyed on the customer ID STRING, not the searchParams object — the same dependency shape the
+  // other three SitePicker call sites use. SitePicker re-runs its fetch effect whenever this
+  // callback's identity changes, so depending on an object whose stability is a framework guarantee
+  // (rather than on a primitive that plainly cannot change) is a refetch loop waiting for a
+  // framework change. It also means the callback is recreated only when the customer really moves.
+  const searchSites = React.useCallback(
+    (term: string) => searchJobSites(term, customerFilter || undefined).then((r) => r.sites),
+    [customerFilter],
+  );
+  React.useEffect(() => {
+    let alive = true;
+    void Promise.all([
+      listEngineerOptions().then((us) => us.map((u) => ({ value: u.id, label: u.name }))).catch(() => []),
+      listCustomers({ status: "active", pageSize: 200 })
+        .then((r) => r.customers.map((c) => ({ value: c.id, label: c.name })))
+        .catch(() => []),
+    ]).then(([eng, cust]) => {
+      if (!alive) return;
+      setEngineerOptions(eng);
+      setCustomerOptions(cust);
+    });
+    return () => { alive = false; };
+  }, []);
 
   const [data, setData] = React.useState<QueuePage | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -335,6 +379,15 @@ export function GoodsManagementTab({
         // Mirror image of the window above: due belongs to the ACTIVE queue only. On Closed every job
         // is finished, so "what's due" has nothing left to answer.
         due: isClosed ? undefined : (dueFilter || undefined) as "overdue" | "today" | "week" | undefined,
+        // The exact due window travels with the bucket and, like it, belongs to the ACTIVE queue —
+        // on Closed every job is finished and "what's due" has nothing left to answer.
+        dueFrom: isClosed ? undefined : dueFrom || undefined,
+        dueTo: isClosed ? undefined : dueTo || undefined,
+        // These three narrow the JOB and apply to BOTH views: "everything Dave still owes us" and
+        // "everything Dave closed last month" are equally real questions.
+        engineerId: engineerFilter || undefined,
+        customerId: customerFilter || undefined,
+        siteId: siteFilter || undefined,
         // Closed always reads most-recently-closed first — "what did we finish last?" is the question
         // there, and ordering it by when the JOB was raised (the default) put an old job that closed
         // yesterday below a new one that closed last month, right beside the date now on screen.
@@ -354,7 +407,12 @@ export function GoodsManagementTab({
     return () => {
       active = false;
     };
-  }, [warehouseId, section, isClosed, showsTable, urlSearch, statusFilter, activityFrom, activityTo, dueFilter, queueSort, page, loadTick]);
+  }, [
+    warehouseId, section, isClosed, showsTable, urlSearch, statusFilter,
+    activityFrom, activityTo, dueFilter, dueFrom, dueTo,
+    engineerFilter, customerFilter, siteFilter,
+    queueSort, page, loadTick,
+  ]);
 
   const goToSection = (key: GmSection) => {
     setSearchInput("");
@@ -663,9 +721,26 @@ export function GoodsManagementTab({
                     onChange={(v) => patch({ gmStatus: v === "active" ? null : v })}
                     options={STATUS_FILTER_OPTIONS}
                   />
+                  {/* ENGINEER stays out beside the stage filter. This queue is read engineer-first on
+                      a hand-over — "what is Dave collecting" — so burying it would make the commonest
+                      use of the screen a two-click one. */}
+                  <Select
+                    size="sm"
+                    ariaLabel="Filter by engineer"
+                    value={engineerFilter}
+                    onChange={(v) => patch({ gmEngineer: v || null })}
+                    options={[{ value: "", label: "All engineers" }, ...engineerOptions]}
+                  />
                   <FilterPopover
-                    activeCount={dueFilter ? 1 : 0}
-                    onClear={() => patch({ gmDue: null, gmLines: null, gmSort: null })}
+                    activeCount={
+                      (dueFilter ? 1 : 0) +
+                      (dueFrom || dueTo ? 1 : 0) +
+                      (customerFilter ? 1 : 0) +
+                      (siteFilter ? 1 : 0)
+                    }
+                    onClear={() =>
+                      patch({ gmDue: null, gmDueFrom: null, gmDueTo: null, gmCustomer: null, gmSite: null, gmLines: null, gmSort: null })
+                    }
                   >
                     <Select
                       size="sm"
@@ -673,6 +748,32 @@ export function GoodsManagementTab({
                       value={dueFilter}
                       onChange={(v) => patch({ gmDue: v || null })}
                       options={DUE_OPTIONS}
+                    />
+                    {/* The exact range, beside the buckets rather than instead of them — both narrow
+                        the same column and both apply. */}
+                    <DateRangeFilter
+                      label="Due date"
+                      showLabel
+                      from={dueFrom}
+                      to={dueTo}
+                      onChange={({ from, to }) => patch({ gmDueFrom: from || null, gmDueTo: to || null })}
+                    />
+                    <Select
+                      size="sm"
+                      ariaLabel="Filter by customer"
+                      value={customerFilter}
+                      onChange={(v) => patch({ gmCustomer: v || null, gmSite: null })}
+                      options={[{ value: "", label: "All customers" }, ...customerOptions]}
+                    />
+                    {/* A SEARCH, not a dropdown — sites are bulk-imported in the thousands. */}
+                    <SitePicker
+                      value={siteFilter}
+                      selectedLabel={siteLabel}
+                      search={searchSites}
+                      onChange={(id, option) => {
+                        setSiteLabel(option ? siteOptionLabel(option) : null);
+                        patch({ gmSite: id || null });
+                      }}
                     />
                     {/* Purely how much of each kit is drawn — no refetch, so it isn't in the fetch deps. */}
                     <Select

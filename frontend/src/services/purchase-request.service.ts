@@ -16,6 +16,12 @@ export interface PrfListParams {
   supplier?: string;
   warehouse?: string;
   job?: string;
+  /** Inclusive calendar days ("YYYY-MM-DD"), as the user picked them. The SERVER decides which
+   *  day that is for a timestamp column, in the company timezone. */
+  requiredFrom?: string;
+  requiredTo?: string;
+  validFrom?: string;
+  validTo?: string;
   page?: number;
   pageSize?: number;
   sort?: string;
@@ -83,6 +89,10 @@ function qs(params: PrfListParams): string {
   if (params.supplier) sp.set("supplier", params.supplier);
   if (params.warehouse) sp.set("warehouse", params.warehouse);
   if (params.job) sp.set("job", params.job);
+  if (params.requiredFrom) sp.set("requiredFrom", params.requiredFrom);
+  if (params.requiredTo) sp.set("requiredTo", params.requiredTo);
+  if (params.validFrom) sp.set("validFrom", params.validFrom);
+  if (params.validTo) sp.set("validTo", params.validTo);
   if (params.sort) sp.set("sort", params.sort);
   if (params.page) sp.set("page", String(params.page));
   if (params.pageSize) sp.set("pageSize", String(params.pageSize));
@@ -92,8 +102,19 @@ function qs(params: PrfListParams): string {
 
 const listCache = new Map<string, PagedPurchaseRequests>();
 registerClientCache(() => listCache.clear());
-const listCacheKey = (p: PrfListParams): string =>
-  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${(p.statuses ?? []).join(",")}|${p.supplier ?? ""}|${p.warehouse ?? ""}|${p.job ?? ""}|${p.sort ?? ""}`;
+/**
+ * Cache identity = the QUERY STRING actually sent.
+ *
+ * A hand-written key is a SECOND copy of the parameter list, kept in step with the serialiser by
+ * memory — and memory failed: Goods In sent `receivedFrom`/`receivedTo` and keyed neither, so a
+ * date-filtered read and an unfiltered one hashed identically and overwrote each other's page.
+ *
+ * Deriving the key from the serialiser removes the second list entirely: a parameter that affects
+ * the response is in the key BECAUSE it is in the request, so the two can never drift again.
+ * `URLSearchParams` preserves insertion order and the serialiser sets keys in a fixed order, so
+ * equivalent filters always produce byte-identical keys.
+ */
+export const listCacheKey = (p: PrfListParams): string => qs(p);
 
 export const getCachedPurchaseRequests = (params: PrfListParams = {}): PagedPurchaseRequests | undefined =>
   listCache.get(listCacheKey(params));

@@ -106,6 +106,13 @@ export interface StockRequest {
   reviewedBy: string | null;
   adminResponse: string | null;
   reviewedAt: string | null;
+  // What the CUSTOMER asked for at submission — a preference, never the destination. The
+  // destination is `warehouseAssignments`, which a reviewer sets and may split.
+  preferredWarehouseId: string | null;
+  preferredWarehouseName: string | null;
+  // False once that warehouse has been deactivated since submission — the preference is still
+  // worth showing, but must not be offered as a pre-fill.
+  preferredWarehouseActive: boolean;
   warehouseAssignments: WarehouseAssignment[];
   createdAt: string;
 }
@@ -152,6 +159,8 @@ export interface PortalStockRequest {
   reason: string | null;
   status: StockRequestStatus;
   adminResponse: string | null;
+  // The preference the customer expressed, echoed back. Name only.
+  preferredWarehouseName: string | null;
   warehouseAssignments: PortalWarehouseAssignment[];
   createdAt: string;
 }

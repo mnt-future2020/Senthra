@@ -20,7 +20,6 @@ import type {
   PortalStockRequest,
   ProjectStatus,
   StockRequest,
-  StockRequestStatus,
   WarehouseAssignment,
 } from "@/types/customer";
 
@@ -131,8 +130,19 @@ function qs(params: CustomerListParams): string {
 // skeleton. Cleared on logout.
 const listCache = new Map<string, PagedCustomers>();
 registerClientCache(() => listCache.clear());
-const listCacheKey = (p: CustomerListParams): string =>
-  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${p.sort ?? ""}`;
+/**
+ * Cache identity = the QUERY STRING actually sent.
+ *
+ * A hand-written key is a SECOND copy of the parameter list, kept in step with the serialiser by
+ * memory — and memory failed: Goods In sent `receivedFrom`/`receivedTo` and keyed neither, so a
+ * date-filtered read and an unfiltered one hashed identically and overwrote each other's page.
+ *
+ * Deriving the key from the serialiser removes the second list entirely: a parameter that affects
+ * the response is in the key BECAUSE it is in the request, so the two can never drift again.
+ * `URLSearchParams` preserves insertion order and the serialiser sets keys in a fixed order, so
+ * equivalent filters always produce byte-identical keys.
+ */
+export const listCacheKey = (p: CustomerListParams): string => qs(p);
 
 export const getCachedCustomers = (params: CustomerListParams = {}): PagedCustomers | undefined =>
   listCache.get(listCacheKey(params));
@@ -336,6 +346,9 @@ export interface StockRequestPayload {
   // When topping up an existing received stock line, the id of that line. The backend
   // derives the item name from it and adds to its quantity instead of duplicating it.
   linkedStockEntryId?: string;
+  // The customer's preferred receiving warehouse. Optional and advisory — the server
+  // re-checks it is active + non-deleted, and it never becomes the final assignment.
+  preferredWarehouseId?: string;
 }
 
 // Admin creates a submission on behalf of a customer (e.g. taken over the phone).
@@ -345,6 +358,7 @@ export interface AdminStockRequestPayload {
   requestedByName?: string;
   notes?: string;
   linkedStockEntryId?: string;
+  preferredWarehouseId?: string;
 }
 
 export function createStockRequestForCustomer(
@@ -357,14 +371,39 @@ export function createStockRequestForCustomer(
   }).then((r) => r.request);
 }
 
+export interface AdminStockRequestParams {
+  status?: string;
+  search?: string;
+  /** Inclusive calendar days on when the customer SUBMITTED. Server-resolved in company time. */
+  raisedFrom?: string;
+  raisedTo?: string;
+  page?: number;
+  pageSize?: number;
+}
+export type PagedAdminStockRequests = Paged & {
+  requests: StockRequest[];
+  /** Per-status totals for the searched set, ignoring the status filter — the status menu's source. */
+  statusCounts: Record<string, number>;
+};
+
+/**
+ * ADMIN: a customer's stock submissions — filtered, counted and PAGED at the server.
+ *
+ * This used to hand back every submission the account had ever made (they rode along inside the
+ * customer detail payload) and the tab searched, filtered and paged them in the browser.
+ */
 export function listStockRequests(
   customerId: string,
-  status?: StockRequestStatus,
-): Promise<StockRequest[]> {
-  const q = status ? `?status=${status}` : "";
-  return api<{ requests: StockRequest[] }>(`/customers/${customerId}/stock-requests${q}`).then(
-    (r) => r.requests,
-  );
+  params: AdminStockRequestParams = {},
+): Promise<PagedAdminStockRequests> {
+  const q = new URLSearchParams();
+  if (params.status) q.set("status", params.status);
+  if (params.search) q.set("search", params.search);
+  if (params.raisedFrom) q.set("raisedFrom", params.raisedFrom);
+  if (params.raisedTo) q.set("raisedTo", params.raisedTo);
+  if (params.page) q.set("page", String(params.page));
+  if (params.pageSize) q.set("pageSize", String(params.pageSize));
+  return api<PagedAdminStockRequests>(`/customers/${customerId}/stock-requests${q.size ? `?${q}` : ""}`);
 }
 
 // Approve → status move only (records the reviewer + optional response note). It
@@ -558,14 +597,57 @@ export function exportCustomerStockCsv(
   );
 }
 
+export interface AdminStockEntryParams {
+  status?: string;
+  search?: string;
+  warehouseId?: string;
+  /** Inclusive calendar days on when we physically RECEIVED it. Server-resolved in company time. */
+  receivedFrom?: string;
+  receivedTo?: string;
+  page?: number;
+  pageSize?: number;
+}
+export type PagedAdminStockEntries = Paged & { entries: CustomerStockEntry[] };
+
+/** One pickable stock entry — what the job form groups by item and caps quantities against. */
+export interface CustomerStockOption {
+  id: string;
+  itemName: string;
+  sku: string | null;
+  quantity: number;
+  warehouseId: string;
+  warehouseName: string;
+}
+
+/**
+ * A customer's stock as PICKER OPTIONS — its own endpoint, COMPLETE and lean.
+ *
+ * Briefly this was one 100-row page of the list read, which capped the job form's picker: entries
+ * past the hundredth could not be chosen, and the per-warehouse quantity sums the form's cap is
+ * enforced against were computed from a partial set — so an edit could accept more stock than the
+ * customer holds. The server clamps pageSize to 100, so there was no way to ask for the rest.
+ *
+ * It stays unpaged because the grouping SUMS across entries; see the backend repository for why
+ * paging it would be incorrect rather than merely inconvenient.
+ */
+export function listCustomerStockOptions(customerId: string): Promise<CustomerStockOption[]> {
+  return api<{ options: CustomerStockOption[] }>(`/customers/${customerId}/stock-options`).then((r) => r.options);
+}
+
+/** ADMIN: a customer's consignment stock — filtered and PAGED at the server (was: the whole set). */
 export function listCustomerStockEntries(
   customerId: string,
-  status?: string,
-): Promise<CustomerStockEntry[]> {
-  const q = status ? `?status=${status}` : "";
-  return api<{ entries: CustomerStockEntry[] }>(
-    `/customers/${customerId}/stock-entries${q}`,
-  ).then((r) => r.entries);
+  params: AdminStockEntryParams = {},
+): Promise<PagedAdminStockEntries> {
+  const q = new URLSearchParams();
+  if (params.status) q.set("status", params.status);
+  if (params.search) q.set("search", params.search);
+  if (params.warehouseId) q.set("warehouseId", params.warehouseId);
+  if (params.receivedFrom) q.set("receivedFrom", params.receivedFrom);
+  if (params.receivedTo) q.set("receivedTo", params.receivedTo);
+  if (params.page) q.set("page", String(params.page));
+  if (params.pageSize) q.set("pageSize", String(params.pageSize));
+  return api<PagedAdminStockEntries>(`/customers/${customerId}/stock-entries${q.size ? `?${q}` : ""}`);
 }
 
 export function listWarehouseStockEntries(
@@ -598,6 +680,16 @@ export interface PortalListParams {
   sort?: string;
   /** Stock lists only — narrows to one warehouse, by id so a rename can't break a saved link. */
   warehouseId?: string;
+  /** Stock lists only — inclusive calendar days on when we RECEIVED it. */
+  receivedFrom?: string;
+  receivedTo?: string;
+  /** Submissions only — inclusive calendar days on when the customer SUBMITTED. */
+  raisedFrom?: string;
+  raisedTo?: string;
+  /** Jobs only — inclusive calendar days on the DUE date, and one of the customer's own sites. */
+  dueFrom?: string;
+  dueTo?: string;
+  site?: string;
   page?: number;
   pageSize?: number;
 }
@@ -616,6 +708,13 @@ export const portalQs = (p: PortalListParams): string => {
   if (p.status) qs.set("status", p.status);
   if (p.sort) qs.set("sort", p.sort);
   if (p.warehouseId) qs.set("warehouseId", p.warehouseId);
+  if (p.receivedFrom) qs.set("receivedFrom", p.receivedFrom);
+  if (p.receivedTo) qs.set("receivedTo", p.receivedTo);
+  if (p.raisedFrom) qs.set("raisedFrom", p.raisedFrom);
+  if (p.raisedTo) qs.set("raisedTo", p.raisedTo);
+  if (p.dueFrom) qs.set("dueFrom", p.dueFrom);
+  if (p.dueTo) qs.set("dueTo", p.dueTo);
+  if (p.site) qs.set("site", p.site);
   if (p.page) qs.set("page", String(p.page));
   if (p.pageSize) qs.set("pageSize", String(p.pageSize));
   return qs.size ? `?${qs.toString()}` : "";
@@ -684,6 +783,18 @@ export function getOwnStockWarehouses(): Promise<{ id: string; name: string; cod
 export type PagedStockRequests = Paged & { requests: PortalStockRequest[] };
 export function getOwnStockRequests(params: PortalListParams = {}): Promise<PagedStockRequests> {
   return api<PagedStockRequests>(`/customer/stock-requests${portalQs(params)}`);
+}
+
+/**
+ * The warehouses a customer may name as their PREFERRED destination on a new submission: EVERY
+ * active, non-deleted warehouse (id/name/code only — no address, contact or internal notes).
+ * Distinct from getOwnStockWarehouses above, which is My Stock's filter facet and IS scoped to
+ * warehouses actually holding their stock.
+ */
+export function getOwnSubmissionWarehouses(): Promise<{ id: string; name: string; code: string }[]> {
+  return api<{ warehouses: { id: string; name: string; code: string }[] }>(
+    "/customer/submission-warehouses",
+  ).then((r) => r.warehouses);
 }
 
 export function submitStockRequest(payload: StockRequestPayload): Promise<PortalStockRequest> {

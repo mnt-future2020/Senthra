@@ -2,7 +2,7 @@ import type { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 
 import { daysBetween, toCalendarDay } from "../../utils/calendar-day.js";
-import { parseFilterDate } from "../../utils/filter-date.js";
+import { calendarDayWindow, resolveInstantWindow } from "../../utils/filter-date.js";
 import { computeNotifyOnDate, isIssuableHire, isTerminalHireStatus } from "./rentalHire.predicate.js";
 import { hireIssuable } from "./rentalHire.allocation.js";
 import { emitHireUpdated } from "./rentalHire.realtime.js";
@@ -596,6 +596,12 @@ export interface ListPurchaseOrdersParams {
   warehouse?: string;
   pm?: string; // assigned PM user id — the "Awaiting my action" worklist
   job?: string;
+  /** Inclusive calendar days on when the order was PLACED (`orderDate`, an instant). */
+  orderedFrom?: string;
+  orderedTo?: string;
+  /** Inclusive calendar days on the PROMISED delivery day (`expectedDeliveryDate`, a calendar day). */
+  expectedFrom?: string;
+  expectedTo?: string;
   page?: number;
   pageSize?: number;
   sort?: string;
@@ -620,11 +626,19 @@ export async function listPurchaseOrders(params: ListPurchaseOrdersParams = {}, 
     warehouseId: params.warehouse,
     pmUserId: params.pm,
     jobId: params.job,
+    // orderDate is an INSTANT (it defaults to now on create), so its window is the COMPANY's day.
+    // expectedDeliveryDate is a CALENDAR DAY the buyer typed, so its window is plain date arithmetic.
+    orderedWindow: await resolveInstantWindow(params.orderedFrom, params.orderedTo, () => getCompanyTimezone()),
+    expectedWindow: calendarDayWindow(params.expectedFrom, params.expectedTo),
     // Unrestricted actor → undefined → no filter (unchanged). Scoped actor → their warehouse ids.
     warehouseIds: warehouseScopeFilter(actor),
     // "Overdue" is derived, not stored — the service owns settings, so the company-timezone day
     // boundary is resolved here and handed down (same contract as the jobs list).
     overdueBefore: params.status === "overdue" ? startOfDayIn(await getCompanyTimezone(), new Date()) : undefined,
+    // "Expected this week" is derived from the SAME company-timezone day start — the card counts
+    // forward from it (expectedDeliveries) and this list filters forward from it, so a delivery
+    // becomes "this week" on both surfaces at the same midnight.
+    dayStart: params.status === "due_this_week" ? startOfDayIn(await getCompanyTimezone(), new Date()) : undefined,
     // "awaiting_send" is likewise derived, and its pm_review half is PERSONAL: only the assigned PM
     // may send (see sendPurchaseOrder), so a caller without the override sees only their own. The
     // same rule the attention badge counts by, resolved here so the badge and this list agree.
@@ -2404,22 +2418,36 @@ function onHireCtx(r: {
  * reading 3 opens exactly those 3 rows. Two copies of "expiring" is how a count and its list drift
  * apart — the failure the attention registry already documents for `?status=rework`.
  */
+/**
+ * The on-hire register's filter set — ONE declaration, shared by the list and its CSV.
+ *
+ * It was written out on the list and re-declared as `{ status, search }` on the export. That is only
+ * a type, so nothing failed to compile and nothing threw: the export still forwarded the rest by
+ * spreading its runtime object. It was one refactor away from real, though — destructure instead of
+ * spread and four filters vanish from the download in silence. Naming the set removes the chance.
+ */
+export interface ListOnHireParams {
+  status?: string;
+  page?: number;
+  pageSize?: number;
+  warehouseId?: string;
+  rentalItemId?: string;
+  search?: string;
+  supplierId?: string;
+  /** Inclusive calendar days on when the hire ENDS (`hireEndDate`). */
+  endsFrom?: string;
+  endsTo?: string;
+  /**
+   * Raises the 200-row page cap for a SERVER-INITIATED read — only the CSV export sets it.
+   * Not reachable from the wire: the controller builds these params field by field out of
+   * `req.query` and never copies this one, so a client cannot ask for an unbounded page.
+   * See EXPORT_PAGING in utils/csv.ts, and `paginate`'s `maxPageSize` for the same argument.
+   */
+  maxPageSize?: number;
+}
+
 export async function listOnHire(
-  params: {
-    status?: string;
-    page?: number;
-    pageSize?: number;
-    warehouseId?: string;
-    rentalItemId?: string;
-    search?: string;
-    /**
-     * Raises the 200-row page cap for a SERVER-INITIATED read — only the CSV export sets it.
-     * Not reachable from the wire: the controller builds these params field by field out of
-     * `req.query` and never copies this one, so a client cannot ask for an unbounded page.
-     * See EXPORT_PAGING in utils/csv.ts, and `paginate`'s `maxPageSize` for the same argument.
-     */
-    maxPageSize?: number;
-  },
+  params: ListOnHireParams,
   // Company-wide, deliberately: a hire is chased by the PM on the order, not by whoever holds the
   // warehouse it was delivered to. The actor is taken so the signature matches every other list
   // and a future scope rule has somewhere to land.
@@ -2453,6 +2481,10 @@ export async function listOnHire(
     // A box holding only spaces is not a filter — it would narrow the list to nothing while the
     // screen showed an empty-looking search.
     search: params.search?.trim() ? params.search.trim() : undefined,
+    // Same id guard as rentalItemId above: a malformed ObjectId reaches Prisma as a 500 otherwise.
+    supplierId: /^[a-f0-9]{24}$/i.test(params.supplierId ?? "") ? params.supplierId : undefined,
+    // `hireEndDate` is a CALENDAR DAY (the hire period the buyer agreed), so no timezone applies.
+    endsWindow: calendarDayWindow(params.endsFrom, params.endsTo),
   });
   // Who is holding each row's issued units, batched for the whole page — a per-row lookup would be a
   // round trip per row on a remote cluster, which is the reason the repository query is batched at all.
@@ -2582,6 +2614,12 @@ export interface PublicHireExtension {
   agreedAt: string;
 }
 
+/** The agreed-on window for hire extensions, resolved in the company timezone. Half-open. */
+async function agreedWindow(from: string | undefined, to: string | undefined): Promise<{ dateFrom?: Date; dateTo?: Date }> {
+  const w = await resolveInstantWindow(from, to, () => getCompanyTimezone());
+  return { dateFrom: w.gte, dateTo: w.lt };
+}
+
 export interface ListHireExtensionsParams {
   search?: string;
   purchaseOrder?: string;
@@ -2650,8 +2688,10 @@ export async function listHireExtensions(
     // uses — including the audit log, whose `createdAt` is a timestamp exactly like `agreedAt` here.
     // The "end" edge widens to 23:59:59.999, which is what stops a To date from dropping every
     // extension agreed after midnight on the last day of the period — i.e. all of them.
-    dateFrom: parseFilterDate(params.from, "start"),
-    dateTo: parseFilterDate(params.to, "end"),
+    // `createdAt` on a HireExtension is a real INSTANT, so "agreed on the 3rd" is the COMPANY's 3rd.
+    // It used to widen to the UTC day, which is an hour out for every BST date — see the same fix in
+    // audit.service. The repository's bound is exclusive, matching the half-open window.
+    ...(await agreedWindow(params.from, params.to)),
   };
   const total = await poRepo.countExtensions(filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
@@ -2722,7 +2762,9 @@ export async function exportHireExtensionsCsv(
  * exactly the rows that view showed.
  */
 export async function exportOnHireCsv(
-  params: { status?: string; search?: string },
+  // The list's OWN filter type, minus paging — an export is the whole filtered set. See
+  // ListOnHireParams for why the narrower literal that used to sit here was a latent filter drop.
+  params: Omit<ListOnHireParams, "page" | "pageSize" | "maxPageSize">,
   actor?: AuditActor,
 ): Promise<{ csv: string; capped: boolean }> {
   const regional = await getRegionalSettings();

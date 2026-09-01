@@ -251,7 +251,7 @@ export function MovementFeed({
       const [wh, cust, eng, items] = await Promise.all([
         listWarehouses({ status: "active", pageSize: 200 }).then((r) => r.warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))).catch(() => []),
         listCustomers({ pageSize: 200 }).then((r) => r.customers.map((c) => ({ value: c.id, label: c.name }))).catch(() => []),
-        svc.listEngineerInventory().then((r) => r.map((e) => ({ value: e.engineerId, label: e.name }))).catch(() => []),
+        svc.listEngineerOptions().then((r) => r.map((e) => ({ value: e.engineerId, label: e.name }))).catch(() => []),
         listIrmItems({ status: "active", pageSize: 200 }).then((r) =>
           r.items
             .map((i) => ({ value: i.id, label: i.code ? `${i.code} — ${i.name}` : i.name }))

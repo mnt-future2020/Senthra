@@ -18,6 +18,8 @@ import type { AssignedWarehouse } from "./user-warehouse.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
 import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
+import * as settingsService from "#modules/settings/settings.service.js";
+import { resolveInstantWindow } from "../../utils/filter-date.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
@@ -459,6 +461,9 @@ export interface ListUsersParams {
   search?: string;
   status?: string;
   roleId?: string;
+  /** Inclusive calendar days on when the account was ADDED (`createdAt`, an instant). */
+  addedFrom?: string;
+  addedTo?: string;
   page?: number;
   pageSize?: number;
   sort?: string; // newest (default) | oldest | name
@@ -493,6 +498,9 @@ async function listUserRows(params: ListUsersParams = {}): Promise<{
     search: params.search,
     status: params.status,
     roleId: params.roleId,
+    // createdAt is an INSTANT, so "added on the 3rd" is the COMPANY's 3rd — the same day boundary
+    // every other "today" in this app resolves against, never the browser's.
+    addedWindow: await resolveInstantWindow(params.addedFrom, params.addedTo, () => settingsService.getCompanyTimezone()),
   };
   const total = await userRepo.count(filters);
   // Clamp the requested page so an out-of-range page returns the last page.

@@ -4,7 +4,8 @@ import * as auditLogRepo from "./audit.repository.js";
 import type { AuditListFilters } from "./audit.repository.js";
 import { getAccessibleWarehouseIds } from "../../lib/warehouse-access.js";
 import { csvEscape, EXPORT_MAX } from "../../utils/csv.js";
-import { parseFilterDate } from "../../utils/filter-date.js";
+import { resolveInstantWindow } from "../../utils/filter-date.js";
+import { getCompanyTimezone } from "#modules/settings/settings.service.js";
 import { getRegionalSettings } from "#modules/settings/settings.service.js";
 import { formatDateTime } from "#modules/document/document.formatter.js";
 
@@ -92,6 +93,8 @@ export interface ListAuditParams {
   targetId?: string;
   from?: string;
   to?: string;
+  /** One acting principal's email — "what did this person do". */
+  actorEmail?: string;
   page?: number;
   pageSize?: number;
 }
@@ -107,19 +110,28 @@ export interface PagedAuditLogs {
 // SINGLE source of filter normalization — used by BOTH list and export so they
 // can never diverge. Invalid values are dropped (no filter) rather than throwing:
 // a typo'd query returns an unfiltered result, never a 500.
-function normalizeFilters(params: ListAuditParams): AuditListFilters {
+async function normalizeFilters(params: ListAuditParams): Promise<AuditListFilters> {
   const actorType =
     params.actorType && (ACTOR_TYPES as readonly string[]).includes(params.actorType)
       ? params.actorType
       : undefined;
+  // `createdAt` is an INSTANT, so "3 August" is the COMPANY's 3 August — the same day boundary every
+  // other "today" in this app resolves against.
+  //
+  // This used to widen the raw value to the UTC day (parseFilterDate), which is an hour out for the
+  // seven months of the year the UK is on BST: asking for 3 August returned 01:00 on the 3rd through
+  // 00:59 on the 4th in local terms, so the first hour of the day was missing and the last hour
+  // belonged to the next. Small, silent, and exactly the kind of gap that erodes trust in a log.
+  const window = await resolveInstantWindow(params.from, params.to, () => getCompanyTimezone());
   return {
     search: params.search?.trim() || undefined,
     action: params.action?.trim() || undefined,
     actorType,
     targetType: params.targetType?.trim() || undefined,
     targetId: params.targetId?.trim() || undefined,
-    from: parseFilterDate(params.from, "start"),
-    to: parseFilterDate(params.to, "end"),
+    actorEmail: params.actorEmail?.trim() || undefined,
+    from: window.gte,
+    to: window.lt,
   };
 }
 
@@ -160,7 +172,7 @@ function warehouseScope(actor?: AuditActor): string[] | undefined {
 
 export async function listAuditLogs(params: ListAuditParams = {}, actor?: AuditActor): Promise<PagedAuditLogs> {
   const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? 25), 1), 100);
-  const filters: AuditListFilters = { ...normalizeFilters(params), scopeWarehouseIds: warehouseScope(actor) };
+  const filters: AuditListFilters = { ...(await normalizeFilters(params)), scopeWarehouseIds: warehouseScope(actor) };
   const total = await auditLogRepo.count(filters);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
@@ -174,16 +186,19 @@ export interface AuditFacets {
   actions: string[];
   actorTypes: string[];
   targetTypes: string[];
+  /** Distinct acting principals (email snapshots) — the "who did this" filter's options. */
+  actors: string[];
 }
 
 export async function listFacets(actor?: AuditActor): Promise<AuditFacets> {
   const scope = warehouseScope(actor);
-  const [actions, actorTypes, targetTypes] = await Promise.all([
+  const [actions, actorTypes, targetTypes, actors] = await Promise.all([
     auditLogRepo.distinctActions(scope),
     auditLogRepo.distinctActorTypes(scope),
     auditLogRepo.distinctTargetTypes(scope),
+    auditLogRepo.distinctActors(scope),
   ]);
-  return { actions, actorTypes, targetTypes };
+  return { actions, actorTypes, targetTypes, actors };
 }
 
 export interface AuditCsvResult {
@@ -195,7 +210,7 @@ export interface AuditCsvResult {
 // Serialize the filtered entries to a CSV string. Reuses the SAME filter
 // normalization as listAuditLogs. `capped` is true when the result hit the cap.
 export async function exportAuditCsv(params: ListAuditParams = {}, actor?: AuditActor): Promise<AuditCsvResult> {
-  const filters: AuditListFilters = { ...normalizeFilters(params), scopeWarehouseIds: warehouseScope(actor) };
+  const filters: AuditListFilters = { ...(await normalizeFilters(params)), scopeWarehouseIds: warehouseScope(actor) };
   const rows = await auditLogRepo.findForExport(filters, AUDIT_EXPORT_MAX);
   // Timestamps render in the COMPANY timezone with the configured date format, like every other
   // generated artifact. The column names the zone rather than saying "UTC", because a reader who

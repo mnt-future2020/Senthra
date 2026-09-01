@@ -19,7 +19,7 @@ import type {
 // rows on screen — a second copy is a second place for a filter to be forgotten, and the resulting
 // file gives no sign that it is wider or narrower than the list it came from.
 function listParamsFrom(req: Request): prfService.ListPurchaseRequestsParams {
-  const { search, status, statuses, supplier, warehouse, job, sort, page, pageSize } = req.query;
+  const { search, status, statuses, supplier, warehouse, job, requiredFrom, requiredTo, validFrom, validTo, sort, page, pageSize } = req.query;
   return {
     search: queryStr(search),
     status: queryStr(status),
@@ -27,6 +27,10 @@ function listParamsFrom(req: Request): prfService.ListPurchaseRequestsParams {
     supplier: queryStr(supplier),
     warehouse: queryStr(warehouse),
     job: queryStr(job),
+    requiredFrom: queryStr(requiredFrom),
+    requiredTo: queryStr(requiredTo),
+    validFrom: queryStr(validFrom),
+    validTo: queryStr(validTo),
     sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),

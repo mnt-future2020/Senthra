@@ -290,6 +290,51 @@ const LOSS_REASON_LABEL: Record<string, string> = {
   other: "Other",
 };
 
+/**
+ * Whether the damaged-stock export may run, why not when it may not, and what its tooltip says.
+ *
+ * ONE decision behind three pieces of UI, so the greyed button, the visible reason and the tooltip
+ * cannot drift apart.
+ *
+ * TWO independent reasons to stand down:
+ *
+ *   · an ACTIVE SEARCH, because this box and the export search different things. The box matches
+ *     item name, damage reason, order and job; the stock-position ledger the export reads matches
+ *     item name, SKU and item code — and a damaged position carries neither a reason nor a code.
+ *     Forwarding the term would answer a different question in silence.
+ *   · NOTHING TO EXPORT, the convention every other export in this dashboard follows.
+ *
+ * `reason` is returned as text for the PAGE, not only as a tooltip: a disabled button cannot take
+ * focus and nothing hovers on the warehouse tablet this screen is used on, so a `title` alone leaves
+ * a greyed control with no explanation anyone can reach.
+ */
+export function damagedExportState(input: {
+  /** The DEBOUNCED search term — the one the list actually queried with. */
+  search: string;
+  /** Rows the file would hold: the OWNED pools only, since a hire has no position row. */
+  exportableCount: number;
+  /** Whether this instance is pinned to one warehouse or customer (changes the wording only). */
+  scoped: boolean;
+}): { disabled: boolean; reason: string | null; title: string } {
+  if (input.search.trim()) {
+    return {
+      disabled: true,
+      reason: "Export can’t match reason, order or job — clear the search to export.",
+      title: "Clear the search to export — it matches damage details the export cannot carry",
+    };
+  }
+  if (input.exportableCount === 0) {
+    return { disabled: true, reason: null, title: "Nothing to export in this pool" };
+  }
+  return {
+    disabled: false,
+    reason: null,
+    title: input.scoped
+      ? "Export this warehouse's owned damaged stock to CSV (hired equipment is on its own order)"
+      : "Export every owned damaged-stock holding to CSV (hired equipment is on its own order)",
+  };
+}
+
 export function DamagedStockView({
   warehouseId,
   customerId,
@@ -314,6 +359,13 @@ export function DamagedStockView({
 }) {
   const { can } = useAuth();
   const [search, setSearch] = React.useState("");
+  // The term the SERVER is asked for. The box updates on every keystroke (the owned pool is filtered
+  // server-side now), so without this each letter would be a request.
+  const [debouncedSearch, setDebouncedSearch] = React.useState("");
+  React.useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(t);
+  }, [search]);
   /**
    * Which pool the reader is looking at.
    *
@@ -324,6 +376,11 @@ export function DamagedStockView({
    */
   const [owner, setOwner] = React.useState<"all" | "company" | "customer" | "rental">("all");
   const [rows, setRows] = React.useState<DamagedRow[] | null>(null);
+  // Per-pool totals for the OWNED pools, from the response — stable whichever pool is selected. The
+  // hire count is derived from the exits below, which are fetched unfiltered by owner for the same
+  // reason: a pool switcher whose options depend on the current selection cannot be navigated.
+  const [ownedCounts, setOwnedCounts] = React.useState<{ company: number; customer: number }>({ company: 0, customer: 0 });
+  const [rentalCount, setRentalCount] = React.useState(0);
   const [error, setError] = React.useState<string | null>(null);
   const [preview, setPreview] = React.useState<PhotoSubject | null>(null); // open damage-photo lightbox
   const [page, setPage] = React.useState(1);
@@ -335,7 +392,20 @@ export function DamagedStockView({
   React.useEffect(() => {
     let active = true;
     Promise.all([
-      gmService.listDamaged({ warehouseId, customerId }),
+      // Owner and search are applied SERVER-side now, after the warehouse scope — the pool used to
+      // arrive whole and be narrowed in the browser. The hire side below is a different source with
+      // its own scope, so its rows are filtered against the same two values once merged.
+      gmService.listDamaged({
+        warehouseId,
+        customerId,
+        ownerType: owner === "company" || owner === "customer" ? owner : undefined,
+        search: debouncedSearch || undefined,
+        // Looking at the HIRE pool: those rows come from the custody-exit source below, so the owned
+        // query is asked for its COUNTS ONLY. That is what keeps the pool switcher populated without
+        // transferring rows this view will not draw — and without inventing an ownerType that means
+        // "neither", which is a filter that breaks the moment the real values are validated.
+        countsOnly: owner === "rental",
+      }),
       // The hire side, folded into the SAME list. Fetched only where there is a hire pool to belong to
       // — the customer page has none — and a failure here yields an empty list rather than taking the
       // owned pool down with it: two sources, and one being unavailable must not hide the other.
@@ -360,12 +430,17 @@ export function DamagedStockView({
       .then(([owned, exits]) => {
         if (!active) return;
         setError(null);
+        // Counts come from the RESPONSE, computed across both owned pools before ownerType narrowed
+        // anything. Deriving them from the rows on screen is what made the switcher delete itself:
+        // pick Company and the other pools read zero, so the row that offers them stopped rendering.
+        setOwnedCounts(owned.counts);
+        setRentalCount(toDamagedRows(exits).length);
         // NEWEST FIRST across both sources. Appending the hired rows after the owned ones parked
         // yesterday's broken tester below a write-off from June, purely because of where the data came
         // from — an ordering the reader has no way to guess and no reason to want. The owned query
         // already sorts by recency; this extends the same rule over the merged list.
         setRows(
-          [...owned, ...toDamagedRows(exits)].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
+          [...owned.rows, ...toDamagedRows(exits)].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
         );
         setPage(1); // reset paging when the scope (warehouse/customer) changes
       })
@@ -381,7 +456,7 @@ export function DamagedStockView({
     // `hiredEquipmentHref` is in here because it decides WHETHER the hire side is fetched at all — it
     // is the "this context has a hire pool" signal, not decoration. Leaving it out would leave the
     // rental rows missing on a re-render that turned it on.
-  }, [warehouseId, customerId, hiredEquipmentHref]);
+  }, [warehouseId, customerId, hiredEquipmentHref, owner, debouncedSearch]);
 
   // Opening a row clears the previous row's result HERE rather than in the effect below: an event
   // handler may setState freely, whereas a synchronous setState in an effect body triggers a
@@ -422,13 +497,46 @@ export function DamagedStockView({
 
   // Photo, Item, Owner, [Warehouse], Latest reason, Qty, Last updated, History
   const cols = warehouseId ? 7 : 8;
-  // Counts for the pills come from the UNFILTERED rows — a pill showing "0" is a fact, and hiding it
-  // once the pool empties would make the control move under the cursor.
-  const ownerCounts = React.useMemo(() => {
-    const c = { company: 0, customer: 0, rental: 0 };
-    for (const r of rows ?? []) c[r.ownerType] += 1;
-    return c;
-  }, [rows]);
+  // Counts for the pills, and the pills' own right to exist, come from the RESPONSE — never from the
+  // rows on screen.
+  //
+  // They used to be counted off `rows`, which is the set AFTER the owner filter. Selecting Company
+  // therefore zeroed the customer and rental counts, and the switcher (which only renders when more
+  // than one pool is non-empty) removed itself — leaving the reader inside a filter with no control
+  // to leave it by. The server now returns owned counts computed before `ownerType` is applied, and
+  // the hire side is fetched unfiltered by owner, so these numbers do not move when the pick does.
+  const ownerCounts = React.useMemo(
+    () => ({ company: ownedCounts.company, customer: ownedCounts.customer, rental: rentalCount }),
+    [ownedCounts, rentalCount],
+  );
+
+  /**
+   * How many rows the export would actually hold — the OWNED pools only, since a hire has no
+   * position row to export.
+   *
+   * Read off the counts the list already returned rather than the rows on screen: those are paged,
+   * and the counts are computed server-side across both owned pools before `ownerType` narrows
+   * anything. No extra query, and it is correct on the "rental" pool too, where the file is the owned
+   * stock the screen is not currently showing.
+   */
+  const exportableCount =
+    owner === "company" ? ownedCounts.company : owner === "customer" ? ownedCounts.customer : ownedCounts.company + ownedCounts.customer;
+
+  const exportState = damagedExportState({
+    search: debouncedSearch,
+    exportableCount,
+    scoped: Boolean(warehouseId || customerId),
+  });
+  /** Is the reader looking at a narrowed view? Drives every "you can still get back" affordance. */
+  const anyFilterActive = owner !== "all" || search.trim() !== "";
+  /** Anything at all to show, before this filter narrowed it. */
+  const hasAnyDamage = ownerCounts.company + ownerCounts.customer + ownerCounts.rental > 0 || (rows?.length ?? 0) > 0;
+  /** Every pool the SEARCHED set contains, plus whichever is selected — see the switcher below. */
+  const poolsPresent =
+    (ownerCounts.company > 0 ? 1 : 0) + (ownerCounts.customer > 0 ? 1 : 0) + (ownerCounts.rental > 0 ? 1 : 0);
+  // The OWNED rows already arrive filtered — this pass exists for the HIRE rows, which come from a
+  // different endpoint and are merged in the browser. It is idempotent on the owned ones, and it also
+  // keeps the list honest while a keystroke is still in flight to the server.
   const matched = React.useMemo(
     () => (rows ? searchDamagedRows(owner === "all" ? rows : rows.filter((r) => r.ownerType === owner), search) : null),
     [rows, search, owner],
@@ -477,11 +585,11 @@ export function DamagedStockView({
                   <div className="flex flex-col items-center justify-center gap-2 text-center">
                     <AlertTriangle className="h-7 w-7 text-[var(--faint)]" />
                     <p className="text-sm font-semibold text-[var(--ink)]">
-                      {search.trim() ? "No matching damaged stock" : "No damaged stock"}
+                      {anyFilterActive ? "No matching damaged stock" : "No damaged stock"}
                     </p>
                     <p className="text-xs text-[var(--muted)]">
-                      {search.trim()
-                        ? `${rows.length} damaged item${rows.length === 1 ? "" : "s"} here, none match “${search.trim()}”.`
+                      {anyFilterActive
+                        ? `Nothing here matches ${[search.trim() && `“${search.trim()}”`, owner !== "all" && "this pool"].filter(Boolean).join(" in ")}.`
                         : "Damaged company and customer stock returned from engineers will appear here."}
                     </p>
                     {/* Hired equipment is damaged in the same building by the same people, and it is
@@ -492,9 +600,15 @@ export function DamagedStockView({
                         Hired-in equipment is listed separately below, and on its hire
                       </Link>
                     )}
-                    {search.trim() && (
-                      <button type="button" onClick={() => { setSearch(""); setPage(1); }} className={`${secondaryBtn} mt-1`}>
-                        Clear search
+                    {/* An owner filter can empty this table with no search involved — that dead end
+                        used to offer nothing at all, because only a search got a way out. */}
+                    {anyFilterActive && (
+                      <button
+                        type="button"
+                        onClick={() => { setSearch(""); setOwner("all"); setPage(1); }}
+                        className={`${secondaryBtn} mt-1`}
+                      >
+                        {search.trim() && owner !== "all" ? "Clear filters" : search.trim() ? "Clear search" : "Show all pools"}
                       </button>
                     )}
                   </div>
@@ -599,24 +713,35 @@ export function DamagedStockView({
 
   return (
     <div className={fill ? "flex h-full flex-col gap-4" : "space-y-4"}>
-      {/* Shown once there's data to search — a clean pool gets its empty table, not a dead control. */}
-      {rows && rows.length > 0 && (
+      {/* Shown once there is data to search — a genuinely clean pool gets its empty table, not a row
+          of dead controls — OR whenever a filter is active, whatever that filter left behind.
+          
+          That second clause is the whole point. This used to be `rows.length > 0`, which was fine
+          while `rows` meant "everything in this pool": now the owner and the search are applied at
+          the server, so a filter that matches nothing emptied `rows` and took the entire toolbar —
+          pills, search box and all — off screen with it. A filter must never be able to remove the
+          controls that clear it. */}
+      {rows && (hasAnyDamage || anyFilterActive) && (
         <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
           {/* WHOSE damaged stock. Shown only when the tab actually holds more than one pool — a control
               that cannot change the list is a control the reader has to test to learn that. Ordered
               company → customer → rental, the same order as the Inventory pills above it, so the two
               rows of controls do not disagree about what this warehouse is made of. */}
-          {(ownerCounts.company > 0 ? 1 : 0) + (ownerCounts.customer > 0 ? 1 : 0) + (ownerCounts.rental > 0 ? 1 : 0) > 1 && (
+          {/* Rendered whenever there is more than one pool to choose between — OR whenever a pool is
+              already selected. That second clause is the escape hatch: a filter must never be able to
+              remove the control that clears it, and a search narrow enough to leave one pool standing
+              would otherwise do exactly that. */}
+          {(poolsPresent > 1 || owner !== "all") && (
             <div className="flex shrink-0 items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-1">
               {([
-                ["all", "All", (rows ?? []).length],
+                ["all", "All", ownerCounts.company + ownerCounts.customer + ownerCounts.rental],
                 ["company", "Company (IRM)", ownerCounts.company],
                 ["customer", "Customer", ownerCounts.customer],
                 ["rental", "Rental (hired in)", ownerCounts.rental],
               ] as const).map(([id, label, count]) =>
-                // A pool this warehouse has never had is not offered at all; one that is merely empty
-                // right now still is, so the reader can see it is empty rather than wonder where it went.
-                id !== "all" && count === 0 ? null : (
+                // A pool this warehouse has never had is not offered — unless it is the one currently
+                // selected, which must stay visible so the reader can see what they picked and unpick it.
+                id !== "all" && count === 0 && owner !== id ? null : (
                   <button
                     key={id}
                     type="button"
@@ -655,16 +780,47 @@ export function DamagedStockView({
               button sitting on one customer's page. The service's params are `warehouse`/`customer`,
               not the prop names, which is exactly how the omission went unnoticed.
 
-              The search box filters the loaded rows in memory, so it is NOT sent. */}
+              The OWNER pool goes with it too — company/customer map one-for-one onto the positions
+              ledger's `ownership`, so selecting a pool and exporting no longer returns both. "Rental"
+              is not sent because a hire has no position row at all; the file is owned-stock only and
+              the title says so.
+
+              SEARCH is deliberately NOT sent, and it is the one filter that cannot be forwarded
+              honestly. This box searches item name, damage REASON, order and job (see its
+              placeholder); the positions ledger the export reads searches item name, SKU and item
+              code — and a damaged position carries neither a reason nor a code, so most of what this
+              box matches simply does not exist on the other side. Forwarding the term would be a
+              SECOND interpretation of one control: "cracked screen" would come back empty and look
+              like a bug in the data rather than in the query. Making it match for real means joining
+              the damage TRANSACTION for its reason on every exported row, which is a query this
+              download does not otherwise need.
+
+              So the export stands down while a search is active — and SAYS SO IN THE PAGE. A `title`
+              alone was not enough: this screen is used on a warehouse tablet, where nothing hovers, a
+              disabled button cannot take focus, and a greyed control with no visible reason reads as
+              broken. The note below is real text in the flow, so it is announced in document order
+              and legible on a phone. */}
           {can("inventory.export") && (
-            <ExportButton
-              label="Export damaged"
-              // OWNED stock only. The export walks the stock-position ledger, which a hire has no row
-              // in by design, so the title says so rather than handing someone a file that looks like
-              // the whole screen and quietly is not.
-              title={warehouseId || customerId ? "Export this warehouse's owned damaged stock to CSV (hired equipment is on its own order)" : "Export every owned damaged-stock holding to CSV (hired equipment is on its own order)"}
-              onExport={() => stockPositionService.exportPositionsCsv({ location: "damaged", warehouse: warehouseId, customer: customerId })}
-            />
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 sm:ml-auto">
+              {exportState.reason && (
+                // Real text in the flow, not a tooltip — see damagedExportState for why.
+                <span className="text-xs leading-snug text-[var(--muted)]">{exportState.reason}</span>
+              )}
+              <ExportButton
+                label="Export damaged"
+                // Disabled state and wording from one decision — see damagedExportState.
+                title={exportState.title}
+                disabled={exportState.disabled}
+                onExport={() =>
+                  stockPositionService.exportPositionsCsv({
+                    location: "damaged",
+                    warehouse: warehouseId,
+                    customer: customerId,
+                    ownership: owner === "company" || owner === "customer" ? owner : undefined,
+                  })
+                }
+              />
+            </div>
           )}
         </div>
       )}

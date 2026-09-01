@@ -164,6 +164,21 @@ describe("stockRequestSchema", () => {
     expect(stockRequestSchema.safeParse({ name: "SFP-LX", quantity: 0 }).success).toBe(false);
     expect(stockRequestSchema.safeParse({ name: "SFP-LX" }).success).toBe(false);
   });
+
+  // The customer's preferred warehouse: optional, shape-checked here. Whether the id is one they
+  // are ALLOWED to name is a question only the service can answer, and it does (see
+  // customer.preferred-warehouse.service.test.ts) — this layer just refuses malformed input.
+  it("accepts a submission with no preferred warehouse — the field is optional", () => {
+    const r = stockRequestSchema.safeParse({ name: "SFP-LX", quantity: 5 });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.preferredWarehouseId).toBeUndefined();
+  });
+  it("accepts a well-formed preferred warehouse id", () => {
+    expect(stockRequestSchema.safeParse({ name: "SFP-LX", quantity: 5, preferredWarehouseId: OID }).success).toBe(true);
+  });
+  it("rejects a malformed preferred warehouse id", () => {
+    expect(stockRequestSchema.safeParse({ name: "SFP-LX", quantity: 5, preferredWarehouseId: "nope" }).success).toBe(false);
+  });
 });
 
 describe("adminStockRequestSchema", () => {

@@ -14,6 +14,10 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Select } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
+import { listIrmTypes } from "@/services/irm-type.service";
+import { listIrmCategories } from "@/services/irm-category.service";
+import { listSuppliers } from "@/services/supplier.service";
 import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
 import type { IrmItem, IrmStatus } from "@/types/irm";
 import type { UserStatus } from "@/types/user";
@@ -199,6 +203,9 @@ export function IrmItemsView() {
   const search = searchParams.get("q") ?? "";
   const statusFilter = (searchParams.get("status") ?? "all") as "all" | IrmStatus;
   const sort = (searchParams.get("sort") as Sort) ?? "newest";
+  const typeFilter = searchParams.get("type") ?? "";
+  const categoryFilter = searchParams.get("category") ?? "";
+  const supplierFilter = searchParams.get("supplier") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
   // Local input state for debouncing — seeded from URL q.
@@ -237,13 +244,38 @@ export function IrmItemsView() {
   // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
   // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
   // was taken from, and nothing about the resulting file looks wrong.
+  // Option lists for the three folded filters. Each degrades to an empty array — `irm.view` implies
+  // none of the master-data reads, and a control that 403s on use is worse than one that cannot narrow.
+  const [irmTypes, setIrmTypes] = React.useState<{ id: string; name: string }[]>([]);
+  const [irmCategories, setIrmCategories] = React.useState<{ id: string; name: string }[]>([]);
+  const [supplierOptions, setSupplierOptions] = React.useState<{ id: string; name: string }[]>([]);
+  React.useEffect(() => {
+    let alive = true;
+    const keep = <T extends { id: string; name: string; status?: string }>(rows: T[]) =>
+      rows.filter((r) => r.status !== "inactive").map((r) => ({ id: r.id, name: r.name }));
+    void Promise.all([
+      listIrmTypes().then(keep).catch(() => []),
+      listIrmCategories().then(keep).catch(() => []),
+      listSuppliers({ status: "active", pageSize: 200 }).then((r) => keep(r.suppliers)).catch(() => []),
+    ]).then(([t, c, sup]) => {
+      if (!alive) return;
+      setIrmTypes(t);
+      setIrmCategories(c);
+      setSupplierOptions(sup);
+    });
+    return () => { alive = false; };
+  }, []);
+
   const exportParams = React.useMemo(
     () => ({
       search: search || undefined,
       status: statusFilter === "all" ? undefined : statusFilter,
+      type: typeFilter || undefined,
+      category: categoryFilter || undefined,
+      supplier: supplierFilter || undefined,
       sort: sort === "newest" ? undefined : sort,
     }),
-    [search, statusFilter, sort],
+    [search, statusFilter, typeFilter, categoryFilter, supplierFilter, sort],
   );
 
   React.useEffect(() => {
@@ -343,6 +375,35 @@ export function IrmItemsView() {
           ]}
           ariaLabel="Sort"
         />
+        {/* Type, category and primary supplier are all DISPLAYED COLUMNS the API has always accepted
+            as filters — the catalogue could only be narrowed by active/inactive and a search box.
+            Folded behind a count because they are set once and left. */}
+        <FilterPopover
+          activeCount={(typeFilter ? 1 : 0) + (categoryFilter ? 1 : 0) + (supplierFilter ? 1 : 0)}
+          onClear={() => patch({ type: null, category: null, supplier: null })}
+        >
+          <Select
+            size="sm"
+            value={typeFilter}
+            onChange={(v) => patch({ type: v || null })}
+            options={[{ value: "", label: "All types" }, ...irmTypes.map((t) => ({ value: t.id, label: t.name }))]}
+            ariaLabel="Filter by type"
+          />
+          <Select
+            size="sm"
+            value={categoryFilter}
+            onChange={(v) => patch({ category: v || null })}
+            options={[{ value: "", label: "All categories" }, ...irmCategories.map((c) => ({ value: c.id, label: c.name }))]}
+            ariaLabel="Filter by category"
+          />
+          <Select
+            size="sm"
+            value={supplierFilter}
+            onChange={(v) => patch({ supplier: v || null })}
+            options={[{ value: "", label: "All suppliers" }, ...supplierOptions.map((s) => ({ value: s.id, label: s.name }))]}
+            ariaLabel="Filter by supplier"
+          />
+        </FilterPopover>
         {/* Before "New item" and outside its ml-auto, so the primary action stays hard right. */}
         {can("irm.export") && (
           <ExportButton

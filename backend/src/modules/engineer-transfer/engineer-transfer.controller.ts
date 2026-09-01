@@ -15,7 +15,7 @@ export const createTransfer = asyncHandler(async (req, res) => {
 
 // GET /engineer-transfers  (admin oversight — all transfers)
 export const listAll = asyncHandler(async (req, res) => {
-  const { status, engineerId, ownership, sort, search, page, pageSize } = req.query;
+  const { status, engineerId, ownership, sort, search, raisedFrom, raisedTo, page, pageSize } = req.query;
   const result = await transferService.listAll(
     {
       status: queryStr(status),
@@ -23,6 +23,8 @@ export const listAll = asyncHandler(async (req, res) => {
       ownership: queryStr(ownership),
       sort: queryStr(sort),
       search: queryStr(search),
+      raisedFrom: queryStr(raisedFrom),
+      raisedTo: queryStr(raisedTo),
       page: queryInt(page),
       pageSize: queryInt(pageSize),
     },
@@ -39,13 +41,15 @@ export const listMine = asyncHandler(async (req, res) => {
     res.status(400).json({ error: "Could not determine engineer identity." });
     return;
   }
-  const { role, status, sort, search, page, pageSize } = req.query;
+  const { role, status, sort, search, raisedFrom, raisedTo, page, pageSize } = req.query;
   const roleVal = queryStr(role) as "incoming" | "outgoing" | "all" | undefined;
   const result = await transferService.listMine(engineerId, {
     role: roleVal,
     status: queryStr(status),
     sort: queryStr(sort),
     search: queryStr(search),
+    raisedFrom: queryStr(raisedFrom),
+    raisedTo: queryStr(raisedTo),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
   });

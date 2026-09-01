@@ -42,6 +42,8 @@ router.get("/items/:irmItemId/holders", requirePermission("inventory.view"), inv
 router.get("/items/:irmItemId/jobs", requirePermission("inventory.view"), inventoryController.getItemJobs);
 
 // Engineer lens — engineers overview + one engineer's holdings/jobs (static paths before /:id).
+// BEFORE "/engineers/:engineerId" — "engineer-options" is not an engineer id.
+router.get("/engineer-options", requirePermission("inventory.view"), inventoryController.listEngineerOptions);
 router.get("/engineers", requirePermission("inventory.view"), inventoryController.listEngineers);
 router.get("/engineers/:engineerId", requirePermission("inventory.view"), inventoryController.getEngineerInventory);
 

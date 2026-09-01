@@ -1,3 +1,5 @@
+import type { Request } from "express";
+
 import * as rentalItemService from "./rental-item.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
@@ -11,16 +13,25 @@ const num = (v: unknown): number | undefined => {
   return Number.isFinite(n) ? n : undefined;
 };
 
+// The catalogue's filters, parsed ONCE and shared with the CSV export below. It was two literals
+// that happened to agree — which is not the same as being unable to disagree, and every module in
+// this codebase that has lost a filter from a download lost it exactly this way.
+function listParamsFrom(req: Request) {
+  const q = req.query;
+  return {
+    status: str(q.status),
+    categoryId: str(q.categoryId),
+    search: str(q.search),
+  };
+}
+
 // GET /rental-items
 export const listRentalItems = asyncHandler(async (req, res) => {
-  const q = req.query;
   res.json(
     await rentalItemService.listRentalItems({
-      status: str(q.status),
-      categoryId: str(q.categoryId),
-      search: str(q.search),
-      page: num(q.page),
-      pageSize: num(q.pageSize),
+      ...listParamsFrom(req),
+      page: num(req.query.page),
+      pageSize: num(req.query.pageSize),
     }),
   );
 });
@@ -68,15 +79,7 @@ export const deleteRentalItem = asyncHandler(async (req, res) => {
   res.json({ ok: true });
 });
 
-// GET /rental-items/export — the catalogue as CSV.
+// GET /rental-items/export — the SAME filtered catalogue as CSV (paging ignored).
 export const exportRentalItemsCsv = asyncHandler(async (req, res) => {
-  const q = req.query;
-  sendCsv(
-    res,
-    "rental-items",
-    await rentalItemService.exportRentalItemsCsv(
-      { status: str(q.status), categoryId: str(q.categoryId), search: str(q.search) },
-      actorFrom(req),
-    ),
-  );
+  sendCsv(res, "rental-items", await rentalItemService.exportRentalItemsCsv(listParamsFrom(req), actorFrom(req)));
 });

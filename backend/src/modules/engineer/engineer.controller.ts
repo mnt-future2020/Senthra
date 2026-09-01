@@ -29,12 +29,15 @@ export const getOwnStock = asyncHandler(async (req, res) => {
 
 // GET /engineer/jobs — jobs assigned to the signed-in engineer (filtered + paged).
 export const listOwnJobs = asyncHandler(async (req, res) => {
-  const { status, q, sort, page, pageSize } = req.query;
+  const { status, q, sort, dueFrom, dueTo, site, page, pageSize } = req.query;
   res.json(
     await engineerService.getOwnJobs(ownId(req), {
       status: queryStr(status),
       search: queryStr(q),
       sort: queryStr(sort),
+      dueFrom: queryStr(dueFrom),
+      dueTo: queryStr(dueTo),
+      site: queryStr(site),
       page: queryInt(page),
       pageSize: queryInt(pageSize),
     }),

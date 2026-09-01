@@ -29,6 +29,8 @@ import { assertWarehouseAccess } from "../../lib/warehouse-access.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
+import { resolveInstantWindow } from "../../utils/filter-date.js";
+import * as settingsService from "#modules/settings/settings.service.js";
 import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import { hashPassword } from "../../utils/password.js";
 import * as audit from "#modules/audit/audit.service.js";
@@ -172,6 +174,13 @@ export interface PublicStockRequest {
   reviewedBy: string | null;
   adminResponse: string | null;
   reviewedAt: string | null;
+  // What the CUSTOMER asked for — never the destination. The destination is
+  // `warehouseAssignments` below, which the reviewer sets and may split across warehouses.
+  preferredWarehouseId: string | null;
+  preferredWarehouseName: string | null;
+  // False once the preferred warehouse has been deactivated OR soft-deleted since submission, so
+  // the UI can show the preference without offering to act on a warehouse that is no longer usable.
+  preferredWarehouseActive: boolean;
   warehouseAssignments: PublicWarehouseAssignment[];
   createdAt: string;
 }
@@ -204,6 +213,9 @@ export interface PortalStockRequest {
   reason: string | null;
   status: string;
   adminResponse: string | null;
+  // Echoed back so the customer can see the preference they expressed. Name only — the id is
+  // internal, and `warehouseAssignments` remains what actually happened to their stock.
+  preferredWarehouseName: string | null;
   warehouseAssignments: PortalWarehouseAssignment[];
   createdAt: string;
 }
@@ -361,7 +373,12 @@ function toWarehouseAssignment(a: { id: string; warehouseId: string; warehouse: 
   };
 }
 
-type StockRequestRow = CustomerStockRequest & { warehouseAssignments?: Array<{ id: string; warehouseId: string; warehouse: { id: string; name: string; code: string }; quantity: number; receivedQuantity: number; status: string; receivedBy: string | null; receivedAt: Date | null; notes: string | null }> };
+type StockRequestRow = CustomerStockRequest & {
+  warehouseAssignments?: Array<{ id: string; warehouseId: string; warehouse: { id: string; name: string; code: string }; quantity: number; receivedQuantity: number; status: string; receivedBy: string | null; receivedAt: Date | null; notes: string | null }>;
+  // Optional on the type: a row read through a path that doesn't include the relation still maps,
+  // reporting a null preference rather than crashing.
+  preferredWarehouse?: { id: string; name: string; code: string; status: string; deletedAt?: Date | null } | null;
+};
 
 function toStockRequest(r: StockRequestRow): PublicStockRequest {
   return {
@@ -378,6 +395,15 @@ function toStockRequest(r: StockRequestRow): PublicStockRequest {
     reviewedBy: r.reviewedBy,
     adminResponse: r.adminResponse,
     reviewedAt: r.reviewedAt ? r.reviewedAt.toISOString() : null,
+    preferredWarehouseId: r.preferredWarehouseId ?? null,
+    preferredWarehouseName: r.preferredWarehouse?.name ?? null,
+    // BOTH flags, matching what every warehouse query actually filters on (status + deletedAt).
+    // Checking status alone made a soft-deleted warehouse — which keeps status "active" — read as
+    // usable, so the reviewer got no "(no longer available)" hint while the assign modal refused to
+    // pre-fill it: two contradictory signals about the same warehouse.
+    preferredWarehouseActive: r.preferredWarehouse
+      ? r.preferredWarehouse.status === "active" && !r.preferredWarehouse.deletedAt
+      : false,
     warehouseAssignments: (r.warehouseAssignments ?? []).map(toWarehouseAssignment),
     createdAt: r.createdAt.toISOString(),
   };
@@ -415,6 +441,7 @@ function toPortalStockRequest(r: StockRequestRow): PortalStockRequest {
     status: r.status,
     // `adminResponse` is written FOR the customer; `reviewedBy` (who wrote it) is not theirs.
     adminResponse: r.adminResponse,
+    preferredWarehouseName: r.preferredWarehouse?.name ?? null,
     warehouseAssignments: (r.warehouseAssignments ?? []).map(toPortalWarehouseAssignment),
     createdAt: r.createdAt.toISOString(),
   };
@@ -1387,6 +1414,39 @@ export interface StockRequestInput {
   quantity: number;
   reason?: string;
   notes?: string;
+  // The warehouse the customer would LIKE the stock received at. Optional, advisory, and
+  // eligibility-checked below — never the destination (see resolveStockRequestData).
+  preferredWarehouseId?: string;
+}
+
+// The warehouses a customer may name as their preferred destination: EVERY active, non-deleted
+// warehouse. There is deliberately no customer-history filter — the business decided a customer
+// may ask for any warehouse we actually operate, and the ask is only ever a preference (a reviewer
+// still sets the real destination), so scoping it bought nothing.
+//
+// `findOptions()` with no argument is the app's existing unrestricted active-warehouse picker
+// query — the same one every other warehouse dropdown is built from. Reused rather than
+// reimplemented so "active, non-deleted" has ONE definition, and so it already returns only
+// id/code/name: no address, contact, notes or operational metadata can reach the portal.
+export async function listSelectableWarehouses(): Promise<{ id: string; code: string; name: string }[]> {
+  return warehouseRepo.findOptions();
+}
+
+// Resolve the optional preferred warehouse for a submission. A client-supplied id is NEVER
+// trusted — `findActiveByIds` re-applies the SAME active + non-deleted rule the dropdown was built
+// from, so a forged, unknown, inactive or soft-deleted id fails here whatever the UI offered.
+// One indexed lookup on the single id, not a fetch of the whole list.
+//
+// Deliberately a hard 400 rather than a silent drop: silently discarding it would tell the
+// customer their preference was recorded when it wasn't, and would hide a probe.
+async function resolvePreferredWarehouseId(
+  preferredWarehouseId: string | undefined,
+): Promise<string | null> {
+  const wanted = trimToNull(preferredWarehouseId);
+  if (!wanted) return null;
+  const [match] = await warehouseRepo.findActiveByIds([wanted]);
+  if (!match) throw badRequest("That warehouse isn't available.");
+  return wanted;
 }
 
 // Turn a portal/admin submission into the row to persist. The item is EITHER a
@@ -1405,6 +1465,9 @@ async function resolveStockRequestData(
     quantity: Math.trunc(input.quantity),
     reason: trimToNull(input.reason),
     notes: trimToNull(input.notes),
+    // Stored on the request and nowhere else. Nothing downstream — assignment, receiving,
+    // CustomerStockEntry, reporting — reads it; it exists to pre-fill the reviewer's choice.
+    preferredWarehouseId: await resolvePreferredWarehouseId(input.preferredWarehouseId),
   };
 
   const linkedId = trimToNull(input.linkedStockEntryId);
@@ -1475,10 +1538,32 @@ export async function createStockRequestForCustomer(
 
 // ── Portal paged lists ────────────────────────────────────────────────────────────────────────
 // Shared param/clamping shape for the portal's paged lists (same maths as every other paged list).
+/** The submission date window for a portal list — resolved in the company timezone, once. */
+function portalRaisedWindow(params: { raisedFrom?: string; raisedTo?: string }) {
+  return resolveInstantWindow(params.raisedFrom, params.raisedTo, () => settingsService.getCompanyTimezone());
+}
+
+/**
+ * The RECEIVED date window, resolved the one way — company-timezone calendar days over an instant.
+ *
+ * `receivedAt` is a timestamp, not a calendar date, so its bounds are start-of-day and end-of-day IN
+ * COMPANY TIME rather than UTC; `resolveInstantWindow` is the shared engine that already knows this
+ * and is what both stock lists call. Named here so the export cannot resolve it a second way.
+ */
+function portalReceivedWindow(params: { receivedFrom?: string; receivedTo?: string }) {
+  return resolveInstantWindow(params.receivedFrom, params.receivedTo, () => settingsService.getCompanyTimezone());
+}
+
 export interface PortalListParams {
   search?: string;
   status?: string;
   sort?: string;
+  /** Stock lists only — inclusive calendar days on `receivedAt`. */
+  receivedFrom?: string;
+  receivedTo?: string;
+  /** Submissions only — inclusive calendar days on `createdAt`. */
+  raisedFrom?: string;
+  raisedTo?: string;
   /** Stock lists only — narrows to one warehouse. An id, so a rename can't break a saved link. */
   warehouseId?: string;
   page?: number;
@@ -1496,21 +1581,71 @@ export interface PagedStockRequests {
 }
 export async function getOwnStockRequests(customerId: string, params: PortalListParams = {}): Promise<PagedStockRequests> {
   // ONE filters object for both reads — the count and the page must describe the same set.
-  const filters = { status: params.status, search: params.search };
+  const filters = { status: params.status, search: params.search, raisedWindow: await portalRaisedWindow(params) };
   const total = await customerRepo.countStockRequestsByCustomer(customerId, filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
   const requests = await customerRepo.findStockRequestsByCustomer(customerId, filters, { skip, take: pageSize });
   return { requests: requests.map(toPortalStockRequest), total, page, pageSize, totalPages };
 }
 
-// ADMIN: a customer's stock requests (optionally filtered by status).
+export interface ListStockRequestsParams {
+  status?: string;
+  search?: string;
+  /** Inclusive calendar days on when the customer SUBMITTED (`createdAt`, an instant). */
+  raisedFrom?: string;
+  raisedTo?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface PagedAdminStockRequests {
+  requests: PublicStockRequest[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  /**
+   * Per-status totals for the searched set, IGNORING the status filter — the tab's status menu and
+   * its empty-state copy are built from this instead of from the full collection, which is what let
+   * the customer detail payload stop carrying every submission.
+   */
+  statusCounts: Record<string, number>;
+}
+
+/**
+ * ADMIN: a customer's stock submissions — filtered, counted and PAGED at the database.
+ *
+ * This is the only internal surface for reviewing submissions, and they accumulate for the life of
+ * an account. It used to ride along inside the customer detail payload and be searched, filtered and
+ * paged in the browser, which meant the whole history was fetched on every visit to the tab and the
+ * "filters" narrowed a set that had already been transferred. The customer's OWN portal view of the
+ * same data was already server-paged — the internal review screen was the weaker of the two.
+ *
+ * ONE filters object for the count and the page, so the paginator can never walk off the end of a
+ * set the count did not describe.
+ */
 export async function listStockRequests(
   customerId: string,
-  status?: string,
-): Promise<PublicStockRequest[]> {
+  params: ListStockRequestsParams = {},
+): Promise<PagedAdminStockRequests> {
   await requireCustomer(customerId);
-  const requests = await customerRepo.findStockRequestsByCustomer(customerId, { status });
-  return requests.map(toStockRequest);
+  const filters = {
+    status: params.status,
+    search: params.search,
+    // `createdAt` is a real INSTANT, so "submitted on the 3rd" is the COMPANY's 3rd.
+    raisedWindow: await resolveInstantWindow(params.raisedFrom, params.raisedTo, () => settingsService.getCompanyTimezone()),
+  };
+  const [total, statusCounts] = await Promise.all([
+    customerRepo.countStockRequestsByCustomer(customerId, filters),
+    // WITHOUT the status filter, and stated here rather than stripped inside the repository: the
+    // menu these counts build must say what the OTHER statuses hold, so passing the selected one
+    // would make every other option read zero and vanish. An argument that the callee silently
+    // ignores is a contract nobody can read at the call site.
+    customerRepo.countStockRequestsByStatus(customerId, { ...filters, status: undefined }),
+  ]);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const requests = await customerRepo.findStockRequestsByCustomer(customerId, filters, { skip, take: pageSize });
+  return { requests: requests.map(toStockRequest), total, page, pageSize, totalPages, statusCounts };
 }
 
 // ADMIN: approve a pending request. This is a STATUS MOVE ONLY — it records the
@@ -1652,11 +1787,22 @@ export async function assignStockRequestWarehouses(
     throw badRequest("Each warehouse can only appear once.");
   }
 
-  // Verify every target warehouse exists before creating assignments (no FK on Mongo,
-  // so a stale/foreign id would otherwise create orphan assignments).
+  // Verify every target warehouse exists AND is still usable before creating assignments (no FK on
+  // Mongo, so a stale/foreign id would otherwise create orphan assignments). `findById` already
+  // excludes soft-deleted rows; `status` is the part a stale tab can still get wrong — the modal's
+  // dropdown holds the warehouses that were active when it OPENED, so one deactivated since then is
+  // still selectable in that tab. An assignment written to it strands the customer's stock in the
+  // Incoming queue of a warehouse nobody is scoped to any more, with no way to receive or close it.
   const warehouses = await Promise.all([...warehouseIds].map((id) => warehouseRepo.findById(id)));
   if (warehouses.some((w) => !w)) {
     throw badRequest("One or more selected warehouses no longer exist.");
+  }
+  // Named, not counted: on a split the reviewer has to know WHICH row to change.
+  const inactive = warehouses.filter((w) => w && w.status !== "active");
+  if (inactive.length) {
+    throw badRequest(
+      `No longer active: ${inactive.map((w) => w!.name).join(", ")}. Choose another warehouse.`,
+    );
   }
 
   try {
@@ -2625,12 +2771,71 @@ export async function transferCustomerStock(
   };
 }
 
+/** One pickable stock entry: what the job form needs to group by item and cap by quantity. */
+export interface PublicStockOption {
+  id: string;
+  itemName: string;
+  sku: string | null;
+  quantity: number;
+  warehouseId: string;
+  warehouseName: string;
+}
+
+/**
+ * A customer's stock as PICKER OPTIONS — complete, and lean enough to be so.
+ *
+ * The job form used to build this from `listCustomerStockEntries`, which was unpaged. Paging that
+ * read for the LIST view silently capped the picker at 100 entries: options past it were unpickable,
+ * and — worse — the per-warehouse quantity sums the form caps against were computed from a partial
+ * set, so an edit could accept more than the customer actually has. See the repository for why this
+ * one stays complete.
+ */
+export async function listCustomerStockOptions(customerId: string): Promise<PublicStockOption[]> {
+  await requireCustomer(customerId);
+  return customerRepo.findStockOptionsByCustomer(customerId);
+}
+
+export interface ListStockEntriesParams {
+  status?: string;
+  search?: string;
+  warehouseId?: string;
+  /** Inclusive calendar days on when we physically RECEIVED it (`receivedAt`, an instant). */
+  receivedFrom?: string;
+  receivedTo?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface PagedAdminStockEntries {
+  entries: PublicStockEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+/**
+ * ADMIN: a customer's consignment stock — filtered, counted and PAGED at the database.
+ *
+ * The tab used to fetch every entry for the customer and then search and page it in the browser. A
+ * consignment history grows for the life of the account, so that transferred the whole set on every
+ * visit and the controls narrowed something already paid for. Same treatment as the portal's own
+ * paged view of the same rows, and the same ONE-filters-object rule so count and page agree.
+ */
 export async function listCustomerStockEntries(
   customerId: string,
-  status?: string,
-): Promise<PublicStockEntry[]> {
-  const entries = await customerRepo.findStockEntriesByCustomer(customerId, { status });
-  return entries.map((e) => toStockEntry(e as StockEntryRow));
+  params: ListStockEntriesParams = {},
+): Promise<PagedAdminStockEntries> {
+  const filters = {
+    status: params.status,
+    search: params.search,
+    warehouseId: params.warehouseId,
+    receivedWindow: await portalReceivedWindow(params),
+  };
+  const total = await customerRepo.countStockEntriesByCustomer(customerId, filters);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const rows = await customerRepo.findStockEntriesByCustomer(customerId, filters, { skip, take: pageSize });
+  return { entries: rows.map((e) => toStockEntry(e as StockEntryRow)), total, page, pageSize, totalPages };
 }
 
 // PORTAL: the customer's own stock entries, PAGED (consignment history grows forever). The
@@ -2645,7 +2850,12 @@ export interface PagedStockEntries {
 export async function listCustomerStockEntriesPaged(customerId: string, params: PortalListParams = {}): Promise<PagedStockEntries> {
   // ONE filters object shared by the count and the page read, so the two can never drift apart —
   // counting a different set than you page through gives a paginator that runs off the end.
-  const filters = { status: params.status, search: params.search, warehouseId: params.warehouseId };
+  const filters = {
+    status: params.status,
+    search: params.search,
+    warehouseId: params.warehouseId,
+    receivedWindow: await portalReceivedWindow(params),
+  };
   const total = await customerRepo.countStockEntriesByCustomer(customerId, filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
   const rows = await customerRepo.findStockEntriesByCustomer(customerId, filters, { skip, take: pageSize });
@@ -2668,7 +2878,17 @@ export async function exportOwnStockCsv(
 ): Promise<{ csv: string; capped: boolean }> {
   const rows = await customerRepo.findStockEntriesByCustomer(
     customerId,
-    { status: params.status, search: params.search, warehouseId: params.warehouseId },
+    // The SAME filters object the two list functions build — the received-date window INCLUDED.
+    // It was omitted here while both lists applied it, so the admin Stock tab's date range narrowed
+    // the screen and not the download: filter to one week, export, and the file held the customer's
+    // entire consignment history with nothing in it to say so. The submissions export next door
+    // already passed its own window; this one simply never did.
+    {
+      status: params.status,
+      search: params.search,
+      warehouseId: params.warehouseId,
+      receivedWindow: await portalReceivedWindow(params),
+    },
     { skip: 0, take: PORTAL_EXPORT_MAX },
   );
   const entries = rows.map((e) => toPortalStockEntry(e as StockEntryRow));
@@ -2724,7 +2944,9 @@ export async function exportOwnStockRequestsCsv(
 ): Promise<{ csv: string; capped: boolean }> {
   const rows = await customerRepo.findStockRequestsByCustomer(
     customerId,
-    { status: params.status, search: params.search },
+    // The SAME filters as the list, date window included — an export that quietly held more rows
+    // than the screen it was taken from would give no sign of it.
+    { status: params.status, search: params.search, raisedWindow: await portalRaisedWindow(params) },
     { skip: 0, take: PORTAL_EXPORT_MAX },
   );
   const requests = rows.map(toPortalStockRequest);
@@ -2739,6 +2961,10 @@ export async function exportOwnStockRequestsCsv(
       r.status,
       // Company timezone, not the UTC slice — same off-by-one-day trap as the stock-entry export.
       formatDate(r.createdAt, regional.dateFormat, regional.timezone) || null,
+      // Sits immediately before the leg's actual `Warehouse` column so the two read as a pair:
+      // what was asked for, then where it went. Without it the export contradicts the detail modal,
+      // which shows the preference — and the export is the copy people reconcile against offline.
+      r.preferredWarehouseName,
     ];
     if (r.warehouseAssignments.length === 0) {
       body.push([...base, null, null, null, null]);
@@ -2758,7 +2984,7 @@ export async function exportOwnStockRequestsCsv(
     }
   }
   const csv = toCsv(
-    ["Item", "Submitted as", "Quantity", "Status", "Submitted", "Warehouse", "Assigned", "Received", "Not received"],
+    ["Item", "Submitted as", "Quantity", "Status", "Submitted", "Preferred warehouse", "Warehouse", "Assigned", "Received", "Not received"],
     body,
   );
   return { csv, capped: requests.length >= PORTAL_EXPORT_MAX };

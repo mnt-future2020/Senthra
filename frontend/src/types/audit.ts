@@ -30,4 +30,6 @@ export interface AuditFacets {
   actions: string[];
   actorTypes: string[];
   targetTypes: string[];
+  /** Distinct acting principals (email snapshots) — options for the "who did this" filter. */
+  actors: string[];
 }

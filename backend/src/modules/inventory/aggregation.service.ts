@@ -54,11 +54,74 @@ async function assembleAll(filters: PositionFilters): Promise<StockPosition[]> {
   return positions;
 }
 
+/**
+ * Narrow assembled positions to what this actor is allowed to see. THE authorization boundary for
+ * the Hub's position reads, and deliberately its own function so the list and the export cannot
+ * answer it differently.
+ *
+ * They used to. `exportAllPositionsCsv` scoped its rows; `listStockPositions` took no actor at all,
+ * so a warehouse-restricted user holding `inventory.view` could read every warehouse's positions
+ * from the list endpoint while its own CSV of the same data came back correctly narrowed. Adding a
+ * warehouse FILTER on top of that would have turned a latent gap into a one-click one — a filter
+ * must only ever narrow what authorization already allows, never reach past it.
+ *
+ * A scoped actor sees WAREHOUSE-located rows (and their damaged counterparts) for their own
+ * warehouses only. Engineer- and customer-held positions carry no warehouseId to test, so they are
+ * excluded rather than passed through: handing a warehouse-restricted user the company-wide field
+ * ledger would be a wider leak than the one the scope exists to prevent. This is exactly the rule
+ * `selectLedgers` already applies to the movement feed.
+ */
+function scopePositions(all: StockPosition[], actor?: WarehouseScopedActor): StockPosition[] {
+  const scope = warehouseScopeFilter(actor);
+  if (scope === undefined) return all;
+  return all.filter((p) => (p.locationType === "warehouse" || p.locationType === "damaged") && scope.includes(p.locationId));
+}
+
+/**
+ * The engineer lens's OWN predicate — name/email search plus "holding something".
+ *
+ * Exported and shared rather than written twice: the lens's screen and the lens's CSV both narrow by
+ * it, and the download used to apply NEITHER filter. A user who searched one engineer and pressed
+ * "Export field stock" got every engineer's holdings in the file, with nothing in it to say so.
+ */
+export function matchesEngineerLens(row: EngineerOverviewRow, params: { search?: string; holdingOnly?: boolean }): boolean {
+  const term = params.search?.trim().toLowerCase();
+  if (params.holdingOnly && row.itemsHeld <= 0) return false;
+  return !term || [row.name, row.email].some((f) => f?.toLowerCase().includes(term));
+}
+
+/**
+ * Turn the lens's free-text engineer search into the exact engineer ids it matches.
+ *
+ * Returns `undefined` when no engineer filter was asked for — NOT an empty array, which means
+ * "asked, and nobody matched". See PositionFilters.engineerIds for why that distinction is
+ * load-bearing.
+ *
+ * Only `engineerSearch` triggers the roster read. `holdingOnly` deliberately does NOT: it removes
+ * engineers whose `itemsHeld` is zero, and `itemsHeld` counts exactly the engineer-balance and
+ * customer-holding rows that assembleAll turns INTO that engineer's positions — so every engineer it
+ * would remove already contributes no rows. Resolving it bought a provably identical result for four
+ * extra collection reads. The lens's own list still applies it, where it decides which engineers are
+ * listed rather than which positions exist.
+ *
+ * One round trip, shared by the list and the export, so both resolve the same text to the same set.
+ */
+async function resolveEngineerIds(f: PositionFilters): Promise<string[] | undefined> {
+  if (f.engineerIds) return f.engineerIds;
+  if (!f.engineerSearch?.trim()) return undefined;
+  const roster = await listEngineerInventory();
+  return roster.filter((r) => matchesEngineerLens(r, { search: f.engineerSearch })).map((r) => r.engineerId);
+}
+
 export async function listStockPositions(
   params: PositionFilters & { page?: number; pageSize?: number } = {},
+  actor?: WarehouseScopedActor,
 ) {
-  const all = await assembleAll(params);
-  const filtered = sortPositions(filterPositions(all, params));
+  // Order matters and is the whole point: permission scope, THEN the user's filters, THEN sort, THEN
+  // the page. Filtering first would let a filter widen the set the scope was meant to bound.
+  const engineerIds = await resolveEngineerIds(params);
+  const all = scopePositions(await assembleAll(params), actor);
+  const filtered = sortPositions(filterPositions(all, { ...params, engineerIds }));
   const { slice, total, page, pageSize, totalPages } = paginate(filtered, params.page, params.pageSize ?? 25);
   return { positions: slice, total, page, pageSize, totalPages };
 }
@@ -211,17 +274,15 @@ export async function exportAllPositionsCsv(
   filters: PositionFilters,
   actor?: WarehouseScopedActor,
 ): Promise<AllPositionsCsvResult> {
-  const scope = warehouseScopeFilter(actor);
-  const assembled = await assembleAll(filters);
-  const all =
-    scope === undefined
-      ? assembled
-      : assembled.filter((p) => (p.locationType === "warehouse" || p.locationType === "damaged") && scope.includes(p.locationId));
+  // Same boundary as the list — see scopePositions for why this is shared rather than repeated.
+  // The engineer filter is resolved by the SAME helper the list uses, for the same reason.
+  const engineerIds = await resolveEngineerIds(filters);
+  const all = scopePositions(await assembleAll(filters), actor);
   // Capped like every other export. This one alone rendered EVERY matching row into one string: the
   // set grows with the business and an unfiltered request would eventually be asked to hold all of
   // it in memory. It also reported a `count` header nothing on the client read, while the flag that
   // actually matters — "this file is not the whole answer" — was the one it never sent.
-  const matched = sortPositions(filterPositions(all, filters));
+  const matched = sortPositions(filterPositions(all, { ...filters, engineerIds }));
   const rows = matched.slice(0, EXPORT_MAX);
 
   // Company timezone + configured date format, like every generated artifact; the column names the
@@ -268,6 +329,86 @@ export interface EngineerOverviewRow {
 }
 
 // Every active field engineer with a roll-up of what they're holding + how many active jobs they have.
+/**
+ * The engineer lens's filters + paging. The list took NO parameters at all: every engineer, every
+ * time, with no way to narrow it and no ceiling as the field team grows.
+ *
+ * Filtering and paging both happen after the roll-up because the numbers a reader filters ON
+ * (`itemsHeld`, `totalQty`, `activeJobs`) are computed here, not stored — so `total` counts exactly
+ * the rows the pager walks, which is the property that keeps a paginator from running off the end.
+ */
+export interface EngineerLensParams {
+  /** Engineer name or email. */
+  search?: string;
+  /** Only engineers actually holding something — the operational reading of this list. */
+  holdingOnly?: boolean;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface PagedEngineerOverview {
+  rows: EngineerOverviewRow[];
+  total: number;
+  /** Matched engineers holding at least one item — the field-stock export's true row source. */
+  holdingCount: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+const ENGINEER_LENS_PAGE_SIZE = 25;
+
+/** One engineer, as a filter option. Deliberately narrower than EngineerOverviewRow — a picker
+ *  needs an id and a name, and the roll-up numbers are the LIST view's business, not an option's. */
+export interface EngineerOption {
+  engineerId: string;
+  name: string;
+  email: string;
+}
+
+/**
+ * Every field engineer, for the OPTION PICKERS (movement feed, custom reports, transfer composer).
+ *
+ * COMPLETE and unpaged, deliberately. This started as `listEngineerInventory()`, which returned the
+ * whole roster; making the lens paged briefly turned the pickers into "the first 100 engineers", and
+ * an option list that silently omits people is worse than one that is slow — an engineer past the
+ * cap simply could not be picked, with nothing on screen saying so.
+ *
+ * It is also far cheaper than what it replaced: one indexed user query returning three columns, with
+ * none of the balance/holding/job roll-ups the lens needs. Bounded by the size of the field team,
+ * which is the same bound the identical picker on the jobs side has always had.
+ */
+export async function listEngineerOptions(): Promise<EngineerOption[]> {
+  const users = await engineerRepo.findEngineers();
+  return users
+    .map((e) => ({ engineerId: e.id, name: engineerName(e), email: e.email }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function listEngineerInventoryPaged(params: EngineerLensParams = {}): Promise<PagedEngineerOverview> {
+  const all = await listEngineerInventory();
+  // The shared predicate — see matchesEngineerLens. The lens's screen and the lens's CSV narrow by
+  // the same search through it, so the two can no longer disagree about who is in scope.
+  const matched = all.filter((r) => matchesEngineerLens(r, params));
+  const total = matched.length;
+  const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? ENGINEER_LENS_PAGE_SIZE), 1), 100);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
+  return {
+    rows: matched.slice((page - 1) * pageSize, page * pageSize),
+    total,
+    // How many of the MATCHED engineers actually hold something — i.e. exactly how many will
+    // contribute rows to the field-stock export. `total` cannot answer that: an engineer holding
+    // nothing is a legitimate row on this list and zero rows in that file, so a screen showing one
+    // such engineer would otherwise offer an export that downloads a header and nothing else.
+    // Derived from rows already in memory, so it costs no query.
+    holdingCount: matched.reduce((n, r) => n + (r.itemsHeld > 0 ? 1 : 0), 0),
+    page,
+    pageSize,
+    totalPages,
+  };
+}
+
 export async function listEngineerInventory(): Promise<EngineerOverviewRow[]> {
   const [engineers, engBalances, custHoldings, jobCounts] = await Promise.all([
     engineerRepo.findEngineers(),

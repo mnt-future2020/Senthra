@@ -5,7 +5,7 @@ import * as React from "react";
 import { listCustomers, listCustomerProjects } from "@/services/customer.service";
 import { listWarehouses } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
-import { listEngineerInventory } from "@/services/stockPosition.service";
+import { listEngineerOptions } from "@/services/stockPosition.service";
 
 // ── Option lists for the Custom Reports filter bar ────────────────────────────────────────────
 //
@@ -66,7 +66,7 @@ export function useReportFilterOptions(enabled = true): FilterOptions {
               .sort((a, b) => a.label.localeCompare(b.label)),
           )
           .catch(() => []),
-        listEngineerInventory()
+        listEngineerOptions()
           .then((r) => r.map((e) => ({ value: e.engineerId, label: e.name })))
           .catch(() => []),
       ]);

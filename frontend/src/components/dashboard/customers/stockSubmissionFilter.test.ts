@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+/** The menu is built from per-status COUNTS now (page metadata), so these fixtures tally the rows. */
+const countsOf = (rows: { status: string }[]): Record<string, number> =>
+  rows.reduce<Record<string, number>>((acc, r) => ({ ...acc, [r.status]: (acc[r.status] ?? 0) + 1 }), {});
+
 import {
   ALL,
   DEFAULT_SUBMISSION_FILTERS,
@@ -115,7 +119,7 @@ describe("hasActiveSubmissionFilter", () => {
 describe("submissionStatusOptions", () => {
   it("offers Open first, then All, then each status by review urgency", () => {
     // TWO open statuses here (pending + approved), so both stay — Open is a genuine superset.
-    expect(submissionStatusOptions(ROWS)).toEqual([
+    expect(submissionStatusOptions(countsOf(ROWS))).toEqual([
       { value: OPEN, label: "Open (2)" },
       { value: ALL, label: "All statuses (4)" },
       { value: "pending", label: "Pending (1)" },
@@ -133,7 +137,7 @@ describe("submissionStatusOptions", () => {
       sub({ status: "partially_received" }),
       sub({ status: "completed" }),
     ];
-    expect(submissionStatusOptions(onlyPartial)).toEqual([
+    expect(submissionStatusOptions(countsOf(onlyPartial))).toEqual([
       { value: OPEN, label: "Open (2)" },
       { value: ALL, label: "All statuses (3)" },
       { value: "completed", label: "Completed (1)" },
@@ -148,7 +152,7 @@ describe("submissionStatusOptions", () => {
       sub({ status: "pending" }),
       sub({ status: "completed" }),
     ];
-    expect(submissionStatusOptions(mixed).map((o) => o.value)).toEqual([
+    expect(submissionStatusOptions(countsOf(mixed)).map((o) => o.value)).toEqual([
       OPEN,
       // Open holds both of them; only `pending` is waiting on this screen, so the two select
       // different rows and both are worth offering.
@@ -164,30 +168,30 @@ describe("submissionStatusOptions", () => {
     // The de-duplication is about the OPEN superset only — `completed` has no superset to collapse
     // into, so it must never be dropped.
     const oneCompleted = [sub({ status: "completed" })];
-    expect(submissionStatusOptions(oneCompleted).map((o) => o.value)).toEqual([OPEN, ALL, "completed"]);
+    expect(submissionStatusOptions(countsOf(oneCompleted)).map((o) => o.value)).toEqual([OPEN, ALL, "completed"]);
   });
 
   it("always offers Open even at zero — it's where Clear returns to", () => {
     const finishedOnly = [sub({ status: "completed" })];
-    expect(submissionStatusOptions(finishedOnly)[0]).toEqual({ value: OPEN, label: "Open (0)" });
+    expect(submissionStatusOptions(countsOf(finishedOnly))[0]).toEqual({ value: OPEN, label: "Open (0)" });
   });
 
   it("omits a status no row has, so the menu can't filter to nothing", () => {
     // Only `pending` has rows, and it's the lone open status — Open (1) already selects it, so the
     // individual entry collapses away and nothing else is offered.
-    expect(submissionStatusOptions([sub({ status: "pending" })]).map((o) => o.value)).toEqual([OPEN, ALL]);
+    expect(submissionStatusOptions(countsOf([sub({ status: "pending" })])).map((o) => o.value)).toEqual([OPEN, ALL]);
   });
 
   it("still surfaces an unrecognised status instead of hiding those rows", () => {
     // `on_hold` isn't a known open status, so it can't collapse into Open and must stay reachable —
     // otherwise those rows would be unfilterable. (`pending` collapses: it's the lone open one.)
     const odd = [sub({ status: "pending" }), sub({ status: "on_hold" })];
-    expect(submissionStatusOptions(odd).map((o) => o.value)).toEqual([OPEN, ALL, "on_hold"]);
+    expect(submissionStatusOptions(countsOf(odd)).map((o) => o.value)).toEqual([OPEN, ALL, "on_hold"]);
   });
 });
 
 describe("effectiveSubmissionFilters", () => {
-  const opts = submissionStatusOptions(ROWS);
+  const opts = submissionStatusOptions(countsOf(ROWS));
 
   it("keeps a pick that still has an option", () => {
     const f = { search: "x", status: "pending" };
@@ -196,7 +200,7 @@ describe("effectiveSubmissionFilters", () => {
 
   it("falls back to the DEFAULT view when the picked status no longer has rows", () => {
     // Not to ALL — a vanished pick shouldn't silently widen the tab to the whole history.
-    const noPending = submissionStatusOptions(ROWS.filter((r) => r.status !== "pending"));
+    const noPending = submissionStatusOptions(countsOf(ROWS.filter((r) => r.status !== "pending")));
     expect(effectiveSubmissionFilters({ search: "", status: "pending" }, noPending).status).toBe(OPEN);
   });
 
@@ -267,27 +271,27 @@ describe("Needs you — the tab's count, made selectable", () => {
 
   it("offers the option with its count, right under Open", () => {
     const rows = [row("pending"), row("approved"), row("partially_received"), row("completed")];
-    const opts = submissionStatusOptions(rows);
+    const opts = submissionStatusOptions(countsOf(rows));
     expect(opts[0].value).toBe(OPEN);
     expect(opts[1]).toEqual({ value: NEEDS_YOU, label: "Needs you (2)" });
   });
 
   // An option that can only ever produce an empty list is not a choice.
   it("is hidden when nothing needs you", () => {
-    const opts = submissionStatusOptions([row("completed"), row("partially_received")]);
+    const opts = submissionStatusOptions(countsOf([row("completed"), row("partially_received")]));
     expect(opts.some((o) => o.value === NEEDS_YOU)).toBe(false);
   });
 
   // Two entries selecting the same rows read as a bug — the same reasoning that drops a redundant
   // single open status. Open wins because it is the default and where Clear returns to.
   it("is hidden when it would select the same rows as Open", () => {
-    const opts = submissionStatusOptions([row("pending"), row("approved")]);
+    const opts = submissionStatusOptions(countsOf([row("pending"), row("approved")]));
     expect(opts.some((o) => o.value === NEEDS_YOU)).toBe(false);
     expect(opts[0]).toEqual({ value: OPEN, label: "Open (2)" });
   });
 
   it("comes back as soon as Open holds something it doesn't", () => {
-    const opts = submissionStatusOptions([row("pending"), row("approved"), row("assigned")]);
+    const opts = submissionStatusOptions(countsOf([row("pending"), row("approved"), row("assigned")]));
     expect(opts.some((o) => o.value === NEEDS_YOU)).toBe(true);
   });
 

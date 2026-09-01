@@ -27,6 +27,8 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Modal } from "@/components/ui/Modal";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { inputCls, labelCls, primaryBtn, secondaryBtn, toolbarActionsCls, toolbarPrimaryBtn } from "@/components/ui/styles";
 import type { EngineerTransfer, PagedTransfers } from "@/services/engineerTransfer.service";
 import { backingSize, isBlank, normalisePoint, type Stroke } from "./signaturePad";
@@ -605,6 +607,9 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
   const status = searchParams.get("status") ?? "";
   const sortOldest = searchParams.get("sort") === "oldest"; // default: newest first (matches every other list)
   const search = searchParams.get("q") ?? "";
+  // WHEN the transfer was raised — an instant, windowed in company time by the server.
+  const raisedFrom = searchParams.get("from") ?? "";
+  const raisedTo = searchParams.get("to") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
   const [paged, setPaged] = React.useState<PagedTransfers | null>(null);
@@ -654,6 +659,8 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
         const r = await transferSvc.listMyTransfers({
           role,
           status: status || undefined,
+          raisedFrom: raisedFrom || undefined,
+          raisedTo: raisedTo || undefined,
           sort: sortOldest ? "oldest" : "newest",
           search: search || undefined,
           page,
@@ -669,7 +676,7 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
       }
     })();
     return () => { active = false; };
-  }, [role, status, sortOldest, search, page, refreshKey]);
+  }, [role, status, raisedFrom, raisedTo, sortOldest, search, page, refreshKey]);
 
   const data = paged?.transfers ?? [];
   const filtered = !!(search || status);
@@ -728,6 +735,18 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
           ]}
           ariaLabel="Sort order"
         />
+        <FilterPopover
+          activeCount={raisedFrom || raisedTo ? 1 : 0}
+          onClear={() => patchParams({ from: null, to: null }, true)}
+        >
+          <DateRangeFilter
+            label="Raised"
+            showLabel
+            from={raisedFrom}
+            to={raisedTo}
+            onChange={({ from, to }) => patchParams({ from: from || null, to: to || null }, true)}
+          />
+        </FilterPopover>
 
         {/* The page's action, at the right-hand end of the row rather than in the top bar — up there
             it sat against the browser's own chrome, a screen's width from the list it acts on.

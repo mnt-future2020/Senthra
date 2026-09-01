@@ -12,7 +12,6 @@ import { Notice } from "@/components/ui/Notice";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { EngineerHoldingOption, TransferOwnership } from "@/services/engineerTransfer.service";
-import type { EngineerOverviewRow } from "@/services/stockPosition.service";
 import type { Msg } from "@/components/ui/types";
 import { uploadDirectForUrl } from "@/lib/upload";
 
@@ -383,7 +382,9 @@ export function TransferComposer({ mode, returnUrl }: { mode: "admin" | "enginee
   const fileRef = React.useRef<HTMLInputElement>(null);
 
   // Admin-only: source + recipient engineers
-  const [engineers, setEngineers] = React.useState<EngineerOverviewRow[]>([]);
+  // The lean OPTION shape, not the lens row: this picker reads only the id and the name, and typing
+  // it as the roll-up row is what tied it to an endpoint that later became paged.
+  const [engineers, setEngineers] = React.useState<stockSvc.EngineerOption[]>([]);
   const [fromId, setFromId] = React.useState("");
   const [toId, setToId] = React.useState("");
   const [holdings, setHoldings] = React.useState<EngineerHoldingOption[] | null>(null);
@@ -391,7 +392,7 @@ export function TransferComposer({ mode, returnUrl }: { mode: "admin" | "enginee
 
   React.useEffect(() => {
     if (mode !== "admin") return;
-    stockSvc.listEngineerInventory().then(setEngineers).catch(() => setEngineers([]));
+    stockSvc.listEngineerOptions().then(setEngineers).catch(() => setEngineers([]));
   }, [mode]);
 
   const addedKeys = React.useMemo(() => new Set(lines.map(lineKey)), [lines]);

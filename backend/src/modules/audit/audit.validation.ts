@@ -20,6 +20,7 @@ export function parseAuditQuery(req: Request): ListAuditParams {
     actorType: str(q.actorType),
     targetType: str(q.targetType),
     targetId: str(q.targetId),
+    actorEmail: str(q.actorEmail),
     from: str(q.from),
     to: str(q.to),
     page: queryInt(q.page),

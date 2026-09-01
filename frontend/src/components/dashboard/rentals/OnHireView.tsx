@@ -14,6 +14,9 @@ import { Modal } from "@/components/ui/Modal";
 import { ExportButton } from "@/components/ui/ExportButton";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
+import { listSuppliers } from "@/services/supplier.service";
 import { extensionChargePence, periodsFor, type RatePeriod } from "@/lib/rentalPricing";
 import { formatMoney } from "@/components/dashboard/purchase-orders/poStatus";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -123,6 +126,11 @@ export function OnHireView() {
   // Both terminal pills are read-only — a cancelled hire has even less to act on than a returned one.
   const finished = status === "returned" || status === "cancelled";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
+  // Two DISPLAYED columns that had no filter. `hireEndDate` is a calendar day (the agreed period),
+  // and "what comes back this week" is the register's second-most-asked question after "what's late".
+  const supplierFilter = searchParams.get("supplier") ?? "";
+  const endsFrom = searchParams.get("endsFrom") ?? "";
+  const endsTo = searchParams.get("endsTo") ?? "";
 
   // Memoised because the debounced search effect depends on it — a fresh function every render would
   // restart that timer on every keystroke's re-render, and the box would never settle.
@@ -138,6 +146,16 @@ export function OnHireView() {
     },
     [router],
   );
+
+  // Supplier options — degrades to empty, which reads as "All suppliers".
+  const [supplierOptions, setSupplierOptions] = React.useState<{ value: string; label: string }[]>([]);
+  React.useEffect(() => {
+    let alive = true;
+    listSuppliers({ status: "active", pageSize: 200 })
+      .then((r) => alive && setSupplierOptions(r.suppliers.map((x) => ({ value: x.id, label: x.name }))))
+      .catch(() => alive && setSupplierOptions([]));
+    return () => { alive = false; };
+  }, []);
 
   const [searchInput, setSearchInput] = React.useState(search);
   // Re-seeded during render when ?q changes outside typing (browser back/forward) — the
@@ -200,7 +218,15 @@ export function OnHireView() {
     (async () => {
       setLoading(true);
       try {
-        const res = await rentalService.listOnHire({ status, search: search || undefined, page, pageSize: PAGE_SIZE });
+        const res = await rentalService.listOnHire({
+          status,
+          search: search || undefined,
+          supplierId: supplierFilter || undefined,
+          endsFrom: endsFrom || undefined,
+          endsTo: endsTo || undefined,
+          page,
+          pageSize: PAGE_SIZE,
+        });
         if (cancelled) return;
         setRows(res.rows);
         setTotal(res.total);
@@ -214,7 +240,7 @@ export function OnHireView() {
     return () => {
       cancelled = true;
     };
-  }, [status, search, page, reloadKey]);
+  }, [status, search, supplierFilter, endsFrom, endsTo, page, reloadKey]);
 
   // Somebody in the yard books a hire in or hands one back while this board is open. Without it the
   // row keeps offering "Receive" for equipment that is already here.
@@ -305,11 +331,40 @@ export function OnHireView() {
             options={FILTERS.map((f) => ({ value: f.id, label: f.label }))}
             ariaLabel="Filter hires"
           />
+          <FilterPopover
+            activeCount={(supplierFilter ? 1 : 0) + (endsFrom || endsTo ? 1 : 0)}
+            onClear={() => patch({ supplier: null, endsFrom: null, endsTo: null })}
+          >
+            <Select
+              size="sm"
+              value={supplierFilter}
+              onChange={(v) => patch({ supplier: v || null })}
+              options={[{ value: "", label: "All suppliers" }, ...supplierOptions]}
+              ariaLabel="Filter by supplier"
+            />
+            {/* The hire's END date — a calendar day, so no timezone applies. It NARROWS whichever
+                state pill is selected; it never escapes it. */}
+            <DateRangeFilter
+              label="Hire ends"
+              showLabel
+              from={endsFrom}
+              to={endsTo}
+              onChange={({ from, to }) => patch({ endsFrom: from || null, endsTo: to || null })}
+            />
+          </FilterPopover>
           {can("rentals.export") && (
             <div className="sm:ml-auto">
               <ExportButton
-                // BOTH filters, or the file quietly holds more rows than the list it was taken from.
-                onExport={() => rentalService.exportOnHireCsv({ status, search: search || undefined })}
+                // EVERY filter, or the file quietly holds more rows than the list it was taken from.
+                onExport={() =>
+                  rentalService.exportOnHireCsv({
+                    status,
+                    search: search || undefined,
+                    supplierId: supplierFilter || undefined,
+                    endsFrom: endsFrom || undefined,
+                    endsTo: endsTo || undefined,
+                  })
+                }
                 disabled={rows.length === 0}
                 title={
                   finished

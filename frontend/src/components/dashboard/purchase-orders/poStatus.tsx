@@ -22,6 +22,10 @@ export const PO_STATUS_LABELS: Record<PoStatus, string> = {
 // QUEUES so they read as distinct from the real statuses above (a "Send queue" spans Approved and
 // PM Review; an "Approval queue" spans PRF-born drafts and Pending Approval).
 export const PO_DERIVED_STATUS_OPTIONS = [
+  // Everything still in flight — every non-terminal, not-fully-received status. What the Overview's
+  // "Open POs" card counts (openSummary reads the same list on the server); the card used to open the
+  // module list unfiltered, so a count of 12 landed on every PO ever raised, closed ones included.
+  { value: "open", label: "Open (in flight)" },
   { value: "awaiting_approval", label: "Approval queue" },
   { value: "awaiting_send", label: "Send queue" },
   // Everything the warehouse can still book in — Sent, Supplier Accepted and Partially Received.
@@ -29,6 +33,10 @@ export const PO_DERIVED_STATUS_OPTIONS = [
   // said 14 and the list showed 7.
   { value: "receivable", label: "Receiving queue" },
   { value: "overdue", label: "Delivery overdue" },
+  // Receivable orders whose ETA falls inside the planning window and has NOT passed — the exact split
+  // "Expected This Week" counts. That card opened `?status=sent`, one of the three receivable statuses
+  // and blind to the date, so it named 4 deliveries and listed every sent order regardless of when.
+  { value: "due_this_week", label: "Due this week" },
   // Arrived AND nothing left on hire — what the "Received — ready to close" badge opens. NOT the raw
   // `fully_received` status it used to: a rental order stays fully received forever once its kit
   // turned up, but it cannot be closed until the kit goes back, so the badge listed rows whose Close

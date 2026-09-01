@@ -1,6 +1,6 @@
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
-import { parseFilterDate, startOfDayIn } from "../../utils/filter-date.js";
+import { calendarDayWindow, resolveInstantWindow, startOfDayIn } from "../../utils/filter-date.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { getCompanyTimezone, getOverdueAfterDays } from "#modules/settings/settings.service.js";
 import * as jobRepo from "#modules/job/job.repository.js";
@@ -1842,6 +1842,19 @@ export interface QueueParams {
   activityFrom?: string;
   activityTo?: string;
   due?: string; // one of QUEUE_DUE_FILTERS — active queue only
+  /**
+   * EXACT window on the job's due date (`Job.completionDate`), as calendar days.
+   *
+   * Composes with `due` rather than replacing it: the buckets answer "what is late / due this week"
+   * and this answers "what is due between these two dates", and a manager reconciling a period wants
+   * the second. Both narrow the same column, so both apply.
+   */
+  dueFrom?: string;
+  dueTo?: string;
+  /** The job's ASSIGNED engineer — the person the warehouse is handing kit to or chasing it from. */
+  engineerId?: string;
+  customerId?: string;
+  siteId?: string;
   sort?: string; // one of QUEUE_SORTS; defaults to "newest"
   page?: number;
   pageSize?: number;
@@ -2014,7 +2027,15 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   // and is returnable at ANY of them, so a van return must be findable here even though its kit line
   // is homed elsewhere. Widening adds candidates, not noise: step 2c keeps such a job only while it
   // still has van stock out here.
-  const jobs = await jobRepo.findActiveForGoodsManagement(params.warehouseId, search);
+  // Every filter that lives on the JOB goes to the DB, so the per-job enrichment below (goods status,
+  // movements, balances) runs over the narrowed set rather than over every active job here.
+  const jobs = await jobRepo.findActiveForGoodsManagement(params.warehouseId, {
+    search,
+    assignedEngineerId: params.engineerId?.trim() || undefined,
+    customerId: params.customerId?.trim() || undefined,
+    siteId: params.siteId?.trim() || undefined,
+    dueWindow: calendarDayWindow(params.dueFrom, params.dueTo),
+  });
 
   // 2) goodsStatus per job (one batched query) → active / closed / exact-status filter.
   const summaries = await goodsManagementRepo.getSummariesByJobs(jobs.map((j) => j.id));
@@ -2026,15 +2047,22 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   // pushed into the job query: the timestamp lives on JobStockSummary, not Job. A job with no summary
   // (or no movement yet) has no activity at all, so it can't fall inside any window — excluded rather
   // than passed through, otherwise "reconciled in July" would also hand back never-touched jobs.
-  const activityFrom = parseFilterDate(params.activityFrom, "start");
-  const activityTo = parseFilterDate(params.activityTo, "end");
+  //
+  // `lastMovementAt` is a real INSTANT, so the window's edges are COMPANY-timezone day boundaries —
+  // the same clock the due filter below and every "today" in this app use. It previously widened to
+  // the UTC day, which is an hour out for every BST date: "closed in July" quietly missed the first
+  // hour of 1 July and swept in the last hour of 31 July. Half-open (`< activityTo`), so consecutive
+  // months tile exactly instead of overlapping on the midnight between them.
+  const activityWindow = await resolveInstantWindow(params.activityFrom, params.activityTo, () => getCompanyTimezone());
+  const activityFrom = activityWindow.gte;
+  const activityTo = activityWindow.lt;
   const activityByJob = new Map(summaries.map((s) => [s.jobId, s.lastMovementAt]));
   const inActivityWindow = (jobId: string) => {
     if (!activityFrom && !activityTo) return true;
     const at = activityByJob.get(jobId);
     if (!at) return false;
     if (activityFrom && at < activityFrom) return false;
-    if (activityTo && at > activityTo) return false;
+    if (activityTo && at >= activityTo) return false;
     return true;
   };
 
@@ -3024,10 +3052,62 @@ export interface DamagedRow {
   photoUrl: string | null; // from latest DamagedStockTransaction
 }
 
+/**
+ * Filters for the damaged pool. `ownerType` and `search` are applied HERE, after the warehouse scope
+ * and before anything is returned — the screen used to fetch every row and narrow them in the
+ * browser, which meant a "filter" that only ever hid data already transferred.
+ *
+ * NO date filter, deliberately. The rows are rolling BALANCES whose only timestamp is
+ * `DamagedStockBalance.updatedAt` ("when this balance last moved"), while the operationally useful
+ * date is when the damage was REPORTED — which lives on DamagedStockTransaction, a different table
+ * and a different query. Which of the two a date filter should mean is a business decision that has
+ * not been made, and guessing it would give a filter that looks right and answers the wrong
+ * question. See the audit's section J.
+ */
+/** The two OWNED pools. Hired kit is a different source entirely (custody exits), never this one. */
+export const DAMAGED_OWNER_TYPES = ["company", "customer"] as const;
+export type DamagedOwnerType = (typeof DAMAGED_OWNER_TYPES)[number];
+
+export interface DamagedFilters {
+  warehouseId?: string;
+  customerId?: string;
+  /**
+   * Narrow to ONE owned pool. Validated strictly against DAMAGED_OWNER_TYPES — an unknown value is
+   * rejected, not silently ignored, so a typo can never quietly widen the list.
+   *
+   * There is deliberately no value here meaning "neither pool". A caller looking at the HIRE pool
+   * wants counts without rows, and asks for that with `countsOnly` below rather than by inventing an
+   * ownerType that matches nothing — a fake enum member is a filter that breaks the moment anyone
+   * validates the real ones.
+   */
+  ownerType?: string;
+  /** Item name, the latest report's reason, or the warehouse. */
+  search?: string;
+  /**
+   * Return the COUNTS but no rows.
+   *
+   * The screen shows a pool switcher whose pills carry per-pool counts. Those counts must not depend
+   * on which pool is selected — deriving them from the filtered rows made the switcher delete itself
+   * (every other pool read zero, and the row only renders when more than one pool is non-empty).
+   * So counts are always computed across BOTH owned pools, and a caller who needs only the counts
+   * says so instead of transferring rows it will not draw.
+   */
+  countsOnly?: boolean;
+}
+
+export interface DamagedResult {
+  rows: DamagedRow[];
+  /**
+   * Per-pool totals for the SEARCHED, SCOPED set — computed BEFORE `ownerType` is applied, so they
+   * are stable whichever pool is selected. This is what makes the pool switcher navigable.
+   */
+  counts: Record<DamagedOwnerType, number>;
+}
+
 export async function listDamaged(
-  filter: { warehouseId?: string; customerId?: string },
+  filter: DamagedFilters,
   actor?: AuditActor,
-): Promise<DamagedRow[]> {
+): Promise<DamagedResult> {
   const scopeIds = warehouseScopeFilter(actor);
 
   // Step 1: collect raw balance rows (now includes warehouse relation).
@@ -3077,7 +3157,27 @@ export async function listDamaged(
     };
   });
 
-  return rows;
+  // Applied AFTER the warehouse scope above, never instead of it: a filter may only ever narrow what
+  // the actor is already allowed to see.
+  const owner = filter.ownerType?.trim() || undefined;
+  if (owner && !(DAMAGED_OWNER_TYPES as readonly string[]).includes(owner)) {
+    throw badRequest(`Invalid owner filter "${owner}".`);
+  }
+  const term = filter.search?.trim().toLowerCase();
+  const searched = rows.filter(
+    (r) => !term || [r.itemName, r.reason, r.warehouseName].some((f) => f?.toLowerCase().includes(term)),
+  );
+
+  // Counts span BOTH pools regardless of `ownerType` — see DamagedFilters.countsOnly for why.
+  const counts: Record<DamagedOwnerType, number> = { company: 0, customer: 0 };
+  for (const r of searched) {
+    if (r.ownerType === "company" || r.ownerType === "customer") counts[r.ownerType] += 1;
+  }
+
+  return {
+    rows: filter.countsOnly ? [] : searched.filter((r) => !owner || r.ownerType === owner),
+    counts,
+  };
 }
 
 // ── Damaged history (drill-down behind one damaged row) ───────────────────────────────────────
@@ -3184,6 +3284,15 @@ export interface OverdueParams {
   warehouseId?: string;
   /** Job number, job name or engineer name. */
   search?: string;
+  /**
+   * The engineer STILL HOLDING the kit — `JobStockMovement.engineerId` on the first issue, which is
+   * the row this list is built from. Deliberately NOT the job's assigned engineer: a job can be
+   * reassigned after issue, and the person to chase is whoever the stock actually went out to.
+   */
+  engineerId?: string;
+  /** Inclusive calendar days on when the kit was ISSUED (`JobStockMovement.createdAt`, an instant). */
+  issuedFrom?: string;
+  issuedTo?: string;
   page?: number;
   pageSize?: number;
 }
@@ -3217,6 +3326,25 @@ export interface OverdueRow {
   lines: { source: string; irmItemId: string | null; customerStockEntryId: string | null; itemName: string; qty: number }[];
 }
 
+/** One issue movement as the overdue pipeline selects it, before it becomes a row or a group. */
+type OverdueMovement = Awaited<ReturnType<typeof goodsManagementRepo.findOldIssueMovementsForJobs>>[number];
+
+/**
+ * The overdue SELECTION — every job whose first issue is older than the window and still has stock
+ * out, after the caller's own narrowing, plus the clock it was measured against.
+ *
+ * Split out of `listOverdueWithin` so the paged list, the count and the dashboard's drill-down are
+ * three views of ONE computation. A second implementation of this pipeline is precisely how a card
+ * reading 6 and a breakdown summing to 5 come about — the failure this module already documents for
+ * the two overdue counters it deleted.
+ */
+interface OverdueSelection {
+  matched: OverdueMovement[];
+  goodsStatusByJob: Map<string, string>;
+  /** `Date.now()` at selection time — every `daysOut` is measured from it, never from a second clock. */
+  now: number;
+}
+
 // `warehouseId` scopes the read to one warehouse's issues. The per-warehouse Goods Management tab
 // passes it; without it the tab showed every warehouse the actor could reach, so an admin standing
 // in Warehouse A's tab was chasing Warehouse B's overdue jobs. The actor's own warehouse-access
@@ -3231,11 +3359,10 @@ export interface OverdueRow {
  * "overdue" means one thing everywhere. If an audit report ever needs a different window, add a
  * parameter then, deliberately, with the window shown on whatever renders it.
  */
-async function listOverdueWithin(days: number, actor?: AuditActor, opts: OverdueParams = {}): Promise<OverduePage> {
+async function selectOverdue(days: number, actor?: AuditActor, opts: OverdueParams = {}): Promise<OverdueSelection> {
   const now = Date.now();
   const cutoff = new Date(now - days * 24 * 60 * 60 * 1000);
-  const pageSize = Math.min(Math.max(Math.trunc(opts.pageSize ?? DEFAULT_OVERDUE_PAGE_SIZE), 1), MAX_OVERDUE_PAGE_SIZE);
-  const empty = (): OverduePage => ({ rows: [], total: 0, page: 1, pageSize, totalPages: 1 });
+  const empty = (): OverdueSelection => ({ matched: [], goodsStatusByJob: new Map(), now });
 
   // 1) Start from OPEN jobs, not from the ledger. This is the read's cost ceiling: work in flight,
   // rather than every issue movement ever posted. Reversing these two steps is what used to make the
@@ -3314,12 +3441,27 @@ async function listOverdueWithin(days: number, actor?: AuditActor, opts: Overdue
   // the hazard escapeRegex exists to neutralise. If this ever moves DB-side, it must move BELOW the
   // still-out filter, which means denormalising outstanding quantity first.
   const term = opts.search?.trim().toLowerCase();
+  // The issue timestamp is a real INSTANT, so its day boundaries come from the COMPANY timezone —
+  // the same clock `days` above is measured against. Half-open, like every other window here.
+  const issuedWindow = await resolveInstantWindow(opts.issuedFrom, opts.issuedTo, () => getCompanyTimezone());
+  const engineerId = opts.engineerId?.trim() || undefined;
   const matched = [...firstIssueByJob.values()]
     .filter((m) => stillOut.has(m.jobId))
+    .filter((m) => !engineerId || m.engineerId === engineerId)
+    .filter((m) => !issuedWindow.gte || m.createdAt >= issuedWindow.gte)
+    .filter((m) => !issuedWindow.lt || m.createdAt < issuedWindow.lt)
     .filter((m) =>
       !term ||
       [m.job?.jobNumber, m.job?.name, m.engineerName].some((f) => f?.toLowerCase().includes(term)),
     );
+
+  return { matched, goodsStatusByJob, now };
+}
+
+/** One page of the selection above — the Overdue tab's list. */
+async function listOverdueWithin(days: number, actor?: AuditActor, opts: OverdueParams = {}): Promise<OverduePage> {
+  const pageSize = Math.min(Math.max(Math.trunc(opts.pageSize ?? DEFAULT_OVERDUE_PAGE_SIZE), 1), MAX_OVERDUE_PAGE_SIZE);
+  const { matched, goodsStatusByJob, now } = await selectOverdue(days, actor, opts);
 
   const total = matched.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -3389,6 +3531,91 @@ export async function getOverdueView(
 ): Promise<{ days: number } & OverduePage> {
   const days = await getOverdueAfterDays();
   return { days, ...(await listOverdueWithin(days, actor, opts)) };
+}
+
+// ── Overdue drill-down: "where is it, and who has it?" ────────────────────────────────────────
+//
+// The dashboard's Overdue Holdings card is a company-wide number spanning every warehouse the actor
+// can reach, and the work is done inside ONE warehouse's Goods tab. Sending the card to the bare
+// warehouse list navigated somewhere that does not contain the rows it counted — the exact failure
+// the attention catalog refuses an href for. This is the fan-out that makes the card openable: the
+// same number, split by the two dimensions anyone chasing stock actually asks about.
+//
+// BOUNDED BY CONSTRUCTION. It returns one entry per warehouse and per engineer, never per job, so a
+// backlog of 500 holdings is still a handful of rows. Runs the selection ONCE and groups it in
+// memory — no extra query per group, and no possibility of the groups disagreeing with the count.
+
+export interface OverdueGroup {
+  /** warehouseId / engineerId. `unassigned` for the (rare) issue with no warehouse recorded. */
+  id: string;
+  label: string;
+  /** Warehouse code — what the deep link addresses. Null for engineers and for `unassigned`. */
+  code: string | null;
+  /** Jobs with stock still out in this group. Groups can overlap across dimensions, never within one. */
+  count: number;
+  /** Longest-outstanding job in the group, in whole days — what sorts the list. */
+  oldestDaysOut: number;
+}
+
+export interface OverdueGroupsResult {
+  /** The window the selection ran with — from Settings, reported so the screen can't print a guess. */
+  days: number;
+  /** Total jobs, identical to getOverdueSummary().count for the same actor: one selection, two reads. */
+  total: number;
+  byWarehouse: OverdueGroup[];
+  byEngineer: OverdueGroup[];
+}
+
+/** Fold the selection into `id → group`, largest first, then oldest, then by name for a stable order. */
+function groupOverdue(
+  matched: OverdueMovement[],
+  now: number,
+  key: (m: OverdueMovement) => { id: string; label: string; code: string | null },
+): OverdueGroup[] {
+  const out = new Map<string, OverdueGroup>();
+  for (const m of matched) {
+    const k = key(m);
+    const daysOut = Math.max(0, Math.floor((now - m.createdAt.getTime()) / 86_400_000));
+    const row = out.get(k.id);
+    if (row) {
+      row.count += 1;
+      row.oldestDaysOut = Math.max(row.oldestDaysOut, daysOut);
+    } else {
+      out.set(k.id, { id: k.id, label: k.label, code: k.code, count: 1, oldestDaysOut: daysOut });
+    }
+  }
+  return [...out.values()].sort(
+    (a, b) => b.count - a.count || b.oldestDaysOut - a.oldestDaysOut || a.label.localeCompare(b.label),
+  );
+}
+
+/**
+ * The overdue backlog broken down by warehouse and by engineer, for the dashboard drill-down.
+ *
+ * `opts` is the SAME OverdueParams the list takes, so a drill-down can be narrowed exactly as the
+ * list is. Scoped by `actor` like every other read here — a warehouse-restricted user's breakdown
+ * contains only their own doors, and the total equals the card they clicked.
+ *
+ * The two dimensions are separate answers to "where is it", NOT a decomposition of each other: one
+ * engineer holding kit from two warehouses appears once under each. Each dimension on its own sums
+ * to `total` (one job has exactly one first issue, hence one warehouse and one engineer).
+ */
+export async function getOverdueGroups(actor?: AuditActor, opts: OverdueParams = {}): Promise<OverdueGroupsResult> {
+  const days = await getOverdueAfterDays();
+  const { matched, now } = await selectOverdue(days, actor, opts);
+  return {
+    days,
+    total: matched.length,
+    byWarehouse: groupOverdue(matched, now, (m) => ({
+      // A `consume` movement carries no warehouse, but this list is built from ISSUES, which always
+      // do — the fallback is here so a legacy row with a null id groups visibly instead of crashing
+      // the breakdown, and it deliberately gets no code, so it renders without a link.
+      id: m.warehouseId ?? "unassigned",
+      label: m.warehouseName ?? "Unassigned",
+      code: m.warehouseCode ?? null,
+    })),
+    byEngineer: groupOverdue(matched, now, (m) => ({ id: m.engineerId, label: m.engineerName, code: null })),
+  };
 }
 
 // ── Close & reconcile ─────────────────────────────────────────────────────────────────────────

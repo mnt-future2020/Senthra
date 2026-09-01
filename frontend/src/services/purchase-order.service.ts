@@ -38,6 +38,12 @@ export interface PoListParams {
   // "Awaiting my action" worklist, combined with status=pm_review).
   pm?: string;
   job?: string;
+  /** Inclusive calendar days ("YYYY-MM-DD"), as the user picked them. The SERVER decides which
+   *  day that is for a timestamp column, in the company timezone. */
+  orderedFrom?: string;
+  orderedTo?: string;
+  expectedFrom?: string;
+  expectedTo?: string;
   page?: number;
   pageSize?: number;
   sort?: string;
@@ -119,6 +125,10 @@ function qs(params: PoListParams): string {
   if (params.warehouse) sp.set("warehouse", params.warehouse);
   if (params.pm) sp.set("pm", params.pm);
   if (params.job) sp.set("job", params.job);
+  if (params.orderedFrom) sp.set("orderedFrom", params.orderedFrom);
+  if (params.orderedTo) sp.set("orderedTo", params.orderedTo);
+  if (params.expectedFrom) sp.set("expectedFrom", params.expectedFrom);
+  if (params.expectedTo) sp.set("expectedTo", params.expectedTo);
   if (params.sort) sp.set("sort", params.sort);
   if (params.page) sp.set("page", String(params.page));
   if (params.pageSize) sp.set("pageSize", String(params.pageSize));
@@ -128,8 +138,19 @@ function qs(params: PoListParams): string {
 
 const listCache = new Map<string, PagedPurchaseOrders>();
 registerClientCache(() => listCache.clear());
-const listCacheKey = (p: PoListParams): string =>
-  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${(p.statuses ?? []).join(",")}|${p.priority ?? ""}|${p.supplier ?? ""}|${p.warehouse ?? ""}|${p.pm ?? ""}|${p.job ?? ""}|${p.sort ?? ""}`;
+/**
+ * Cache identity = the QUERY STRING actually sent.
+ *
+ * A hand-written key is a SECOND copy of the parameter list, kept in step with the serialiser by
+ * memory — and memory failed: Goods In sent `receivedFrom`/`receivedTo` and keyed neither, so a
+ * date-filtered read and an unfiltered one hashed identically and overwrote each other's page.
+ *
+ * Deriving the key from the serialiser removes the second list entirely: a parameter that affects
+ * the response is in the key BECAUSE it is in the request, so the two can never drift again.
+ * `URLSearchParams` preserves insertion order and the serialiser sets keys in a fixed order, so
+ * equivalent filters always produce byte-identical keys.
+ */
+export const listCacheKey = (p: PoListParams): string => qs(p);
 
 export const getCachedPurchaseOrders = (params: PoListParams = {}): PagedPurchaseOrders | undefined =>
   listCache.get(listCacheKey(params));

@@ -252,6 +252,10 @@ model Warehouse {
   customerStockAssignments CustomerStockWarehouseAssignment[]
   // Received customer stock physically at this warehouse (back-relation; no DB column).
   customerStockEntries     CustomerStockEntry[]
+  // Submissions where the CUSTOMER named this warehouse as their preferred destination
+  // (back-relation; no DB column). A preference only — the authoritative destination is
+  // customerStockAssignments above.
+  customerStockPreferences CustomerStockRequest[] @relation("CustomerStockRequestPreferredWarehouse")
   // Users explicitly assigned to this warehouse (warehouse-scoped roles) (back-relation; no DB column).
   userAssignments          UserWarehouseAssignment[]
   // Job kit lines collected from this warehouse (back-relation; no DB column).
@@ -2875,6 +2879,16 @@ model CustomerStockRequest {
   // submission is a TOP-UP of. When set, receiving the stock adds to that product's
   // existing quantity (matched by product + warehouse) instead of creating a duplicate.
   linkedStockEntryId String?  @db.ObjectId
+
+  // The warehouse the CUSTOMER said they would like the stock received at. A PREFERENCE
+  // ONLY — it is never the authoritative destination and nothing downstream (receiving,
+  // CustomerStockEntry, reporting) reads it. The authoritative warehouse is
+  // CustomerStockWarehouseAssignment.warehouseId, set by a reviewer at the assign step,
+  // which may differ from this or split the quantity across several warehouses.
+  // Nullable forever: optional on the form, and absent on every row created before this
+  // field existed (Prisma+Mongo throws reading a doc that LACKS a required field).
+  preferredWarehouseId String?    @db.ObjectId
+  preferredWarehouse   Warehouse? @relation("CustomerStockRequestPreferredWarehouse", fields: [preferredWarehouseId], references: [id])
 
   // Warehouse assignments (back-relation; no DB column).
   warehouseAssignments CustomerStockWarehouseAssignment[]

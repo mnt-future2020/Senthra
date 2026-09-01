@@ -437,7 +437,9 @@ describe("listQueue", () => {
   it("trims + forwards the search term to the DB query", async () => {
     mockFindActive.mockResolvedValue([]);
     await listQueue({ warehouseId: WH_ID, search: "  CAT6  " });
-    expect(mockFindActive).toHaveBeenCalledWith(WH_ID, "CAT6");
+    // The queue's JOB-level filters all travel together in one object so they reach the DB rather
+    // than being applied over the candidate set in memory.
+    expect(mockFindActive).toHaveBeenCalledWith(WH_ID, expect.objectContaining({ search: "CAT6" }));
   });
 
   it("rejects an invalid status filter", async () => {
@@ -1566,7 +1568,7 @@ describe("listDamaged", () => {
   });
 
   it("filters by warehouseId and returns rows without cost/value", async () => {
-    const rows = await listDamaged({ warehouseId: WH_ID });
+    const { rows } = await listDamaged({ warehouseId: WH_ID });
     expect(mockFindDamagedByWarehouse).toHaveBeenCalledWith(WH_ID);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: "dmg1", warehouseId: WH_ID, ownerType: "company", irmItemId: IRM_ID, quantity: 3 });
@@ -1578,14 +1580,14 @@ describe("listDamaged", () => {
   it("filters by customerId and returns customer-owned damaged rows", async () => {
     const customerDamagedRow = { ...damagedRow, id: "dmg2", ownerType: "customer", customerId: "cust1", irmItemId: null, customerStockEntryId: CSE_ID, itemName: "SFP-LX", quantity: 1 };
     mockFindDamagedByCustomer.mockResolvedValue([customerDamagedRow]);
-    const rows = await listDamaged({ customerId: "cust1" });
+    const { rows } = await listDamaged({ customerId: "cust1" });
     expect(mockFindDamagedByCustomer).toHaveBeenCalledWith("cust1");
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: "dmg2", ownerType: "customer", customerStockEntryId: CSE_ID, quantity: 1 });
   });
 
   it("returns all damaged rows for a global actor when no filter given", async () => {
-    const rows = await listDamaged({});
+    const { rows } = await listDamaged({});
     expect(mockFindAllDamaged).toHaveBeenCalled();
     expect(rows).toHaveLength(1);
   });
@@ -1838,7 +1840,7 @@ describe("restoreDamaged (warehouse scoping)", () => {
 });
 
 // ── listOverdue ──────────────────────────────────────────────────────────────────────────────
-import { getOverdueSummary, getOverdueView, listOverdue } from "./goods-management.service.js";
+import { getOverdueGroups, getOverdueSummary, getOverdueView, listOverdue } from "./goods-management.service.js";
 import * as settingsService from "#modules/settings/settings.service.js";
 
 const mockFindRecentMovementsForOverdue = repo.findOldIssueMovementsForJobs as ReturnType<typeof vi.fn>;
@@ -2136,6 +2138,113 @@ describe("listOverdue", () => {
     const { rows } = await listOverdue();
     // The same job appears only once even with two issue movements.
     expect(rows).toHaveLength(1);
+  });
+
+  // ── The dashboard drill-down ────────────────────────────────────────────────────────────────
+  //
+  // "Overdue Holdings 6" spans every warehouse the actor can reach, and the work is done inside ONE
+  // warehouse's Goods tab. The card used to open the bare warehouse list — a destination that does
+  // not contain the rows it counted. These groups are the fan-out that makes it openable, and they
+  // run the SAME selection the count does, so the breakdown can never sum to a different number.
+  describe("getOverdueGroups", () => {
+    const WH_B = "wh-b-000000000000000000";
+    const ENG_B = "eng-b-00000000000000000";
+
+    // Three jobs: two out of WH_ID (one held by a second engineer), one out of WH_B.
+    const stageThreeJobs = () => {
+      const jobs = [
+        { id: "job-a", num: "JOB-0001", wh: WH_ID, whName: "Bristol", whCode: "WH-BRS", eng: ENG_ID, engName: "Bob Smith", days: 40 },
+        { id: "job-b", num: "JOB-0002", wh: WH_ID, whName: "Bristol", whCode: "WH-BRS", eng: ENG_B, engName: "Ann Green", days: 25 },
+        { id: "job-c", num: "JOB-0003", wh: WH_B, whName: "Leeds", whCode: "WH-LDS", eng: ENG_B, engName: "Ann Green", days: 18 },
+      ];
+      mockActiveJobIds.mockResolvedValue(jobs.map((j) => ({ id: j.id })));
+      mockOverdueSummaries.mockResolvedValue(jobs.map((j) => ({ jobId: j.id, goodsStatus: "issued" })));
+      mockFindRecentMovementsForOverdue.mockResolvedValue(
+        jobs.map((j, i) => ({
+          id: `m${i}`,
+          code: `GM-000${i}`,
+          jobId: j.id,
+          direction: "issue",
+          status: "posted",
+          engineerId: j.eng,
+          engineerName: j.engName,
+          warehouseId: j.wh,
+          warehouseName: j.whName,
+          warehouseCode: j.whCode,
+          createdAt: new Date(Date.now() - j.days * 86_400_000),
+          job: { id: j.id, jobNumber: j.num, name: j.num },
+          items: [],
+        })),
+      );
+      mockKitLineTypes.mockResolvedValue(jobs.map((j) => ({ id: j.id, kitLines: [{ id: `k-${j.id}`, lineType: "irm" }] })));
+      mockAllMovements.mockResolvedValue(
+        jobs.map((j) => ({ jobId: j.id, status: "posted", direction: "issue", items: [{ jobKitLineId: `k-${j.id}`, qty: 5 }] })),
+      );
+    };
+
+    it("splits the backlog by warehouse, biggest first, and carries the code the link needs", async () => {
+      stageThreeJobs();
+      const { byWarehouse } = await getOverdueGroups();
+      expect(byWarehouse).toEqual([
+        { id: WH_ID, label: "Bristol", code: "WH-BRS", count: 2, oldestDaysOut: 40 },
+        { id: WH_B, label: "Leeds", code: "WH-LDS", count: 1, oldestDaysOut: 18 },
+      ]);
+    });
+
+    it("splits the same backlog by engineer — the other question a chase list gets asked", async () => {
+      stageThreeJobs();
+      const { byEngineer } = await getOverdueGroups();
+      expect(byEngineer).toEqual([
+        { id: ENG_B, label: "Ann Green", code: null, count: 2, oldestDaysOut: 25 },
+        { id: ENG_ID, label: "Bob Smith", code: null, count: 1, oldestDaysOut: 40 },
+      ]);
+    });
+
+    // THE invariant. Each dimension is a partition of the same jobs, so both must add up to the card.
+    it("both breakdowns sum to the total, and the total is the card's own count", async () => {
+      stageThreeJobs();
+      const groups = await getOverdueGroups();
+      expect(groups.total).toBe(3);
+      expect(groups.byWarehouse.reduce((n, g) => n + g.count, 0)).toBe(3);
+      expect(groups.byEngineer.reduce((n, g) => n + g.count, 0)).toBe(3);
+      // Same selection, same number — one computation behind the card and its drill-down.
+      expect((await getOverdueSummary()).count).toBe(groups.total);
+    });
+
+    it("reports the window it ran with, like every other overdue read", async () => {
+      (settingsService.getOverdueAfterDays as ReturnType<typeof vi.fn>).mockResolvedValue(21);
+      stageThreeJobs();
+      expect((await getOverdueGroups()).days).toBe(21);
+    });
+
+    it("narrows exactly as the list does when the drill-down is filtered", async () => {
+      stageThreeJobs();
+      const groups = await getOverdueGroups(undefined, { engineerId: ENG_ID });
+      expect(groups.total).toBe(1);
+      expect(groups.byWarehouse).toEqual([{ id: WH_ID, label: "Bristol", code: "WH-BRS", count: 1, oldestDaysOut: 40 }]);
+    });
+
+    it("returns empty groups rather than throwing when nothing is out", async () => {
+      mockActiveJobIds.mockResolvedValue([]);
+      expect(await getOverdueGroups()).toMatchObject({ total: 0, byWarehouse: [], byEngineer: [] });
+    });
+
+    // A legacy issue with no warehouse snapshot must group visibly instead of vanishing — and with
+    // no code, so the UI renders it as a plain row with nowhere to go rather than a broken link.
+    it("groups an issue with no warehouse under an unlinkable row", async () => {
+      stageThreeJobs();
+      mockFindRecentMovementsForOverdue.mockResolvedValue([
+        {
+          id: "m0", code: "GM-0000", jobId: "job-a", direction: "issue", status: "posted",
+          engineerId: ENG_ID, engineerName: "Bob Smith",
+          warehouseId: null, warehouseName: null, warehouseCode: null,
+          createdAt: new Date(Date.now() - 40 * 86_400_000),
+          job: { id: "job-a", jobNumber: "JOB-0001", name: "JOB-0001" }, items: [],
+        },
+      ]);
+      const { byWarehouse } = await getOverdueGroups();
+      expect(byWarehouse).toEqual([{ id: "unassigned", label: "Unassigned", code: null, count: 1, oldestDaysOut: 40 }]);
+    });
   });
 });
 

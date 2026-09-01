@@ -9,6 +9,10 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { Pagination } from "@/components/ui/Pagination";
 import { PoCodeLink } from "@/components/dashboard/purchase-orders/PoCodeLink";
 import { listPurchaseOrders } from "@/services/purchase-order.service";
+import { listSuppliers } from "@/services/supplier.service";
+import { Select } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { useAuth } from "@/hooks/useAuth";
 import { PO_PRIORITY_LABELS, PoStatusBadge, formatDate } from "@/components/dashboard/purchase-orders/poStatus";
 import type { PurchaseOrder } from "@/types/purchase-order";
@@ -360,6 +364,20 @@ export function ExpectedDeliveries({
   const [rows, setRows] = React.useState<Row[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [page, setPage] = React.useState(1);
+  // Supplier and the promised-delivery window, both applied SERVER-side by listPurchaseOrders. The
+  // bucket pills below then describe the FILTERED set, which is the honest reading: a filter that
+  // narrowed the rows but not the counts above them would leave the two contradicting each other.
+  const [supplierFilter, setSupplierFilter] = React.useState("");
+  const [expectedFrom, setExpectedFrom] = React.useState("");
+  const [expectedTo, setExpectedTo] = React.useState("");
+  const [supplierOptions, setSupplierOptions] = React.useState<{ value: string; label: string }[]>([]);
+  React.useEffect(() => {
+    let alive = true;
+    listSuppliers({ status: "active", pageSize: 200 })
+      .then((r) => alive && setSupplierOptions(r.suppliers.map((x) => ({ value: x.id, label: x.name }))))
+      .catch(() => alive && setSupplierOptions([]));
+    return () => { alive = false; };
+  }, []);
   // Always "all" on open — a view that silently preselects a filter makes an empty-looking table
   // ambiguous ("no deliveries" vs. "none in this bucket"), and the menu puts the urgent work one
   // click away regardless.
@@ -376,12 +394,19 @@ export function ExpectedDeliveries({
         // Load EVERY open PO for this warehouse — not just the first page. The backend caps pageSize
         // at 100, so page through (pages 2..N fetched in parallel) instead of silently truncating the
         // worklist and undercounting the filter menu when a warehouse has >100 open POs.
-        const first = await listPurchaseOrders({ warehouse: warehouseId, statuses, pageSize: 100, page: 1 });
+        const filters = {
+          warehouse: warehouseId,
+          statuses,
+          supplier: supplierFilter || undefined,
+          expectedFrom: expectedFrom || undefined,
+          expectedTo: expectedTo || undefined,
+        };
+        const first = await listPurchaseOrders({ ...filters, pageSize: 100, page: 1 });
         let pos = first.purchaseOrders;
         if (first.totalPages > 1) {
           const rest = await Promise.all(
             Array.from({ length: first.totalPages - 1 }, (_, i) =>
-              listPurchaseOrders({ warehouse: warehouseId, statuses, pageSize: 100, page: i + 2 }),
+              listPurchaseOrders({ ...filters, pageSize: 100, page: i + 2 }),
             ),
           );
           pos = pos.concat(...rest.map((r) => r.purchaseOrders));
@@ -414,7 +439,7 @@ export function ExpectedDeliveries({
       }
     })();
     return () => { active = false; };
-  }, [warehouseId, reloadKey]);
+  }, [warehouseId, reloadKey, supplierFilter, expectedFrom, expectedTo]);
 
   const bucketTotals = React.useMemo(() => countBuckets(rows ?? []), [rows]);
 
@@ -475,18 +500,43 @@ export function ExpectedDeliveries({
   // most common thing you do after filtering, and the Customer pool beside this one clears in a
   // single click. Keyed off `effectiveFilter`, not `filter`, so it never offers to clear a pick
   // that has already fallen back to "all" because its bucket emptied.
-  const menu = options.length > 1
-    ? (
-      <div className="flex items-center gap-2">
+  //
+  // Supplier and the delivery window sit BESIDE the bucket menu rather than inside it: the buckets
+  // are a pool switcher (pills), and a Select dropped among pills reads as ragged. They are always
+  // offered — unlike the bucket menu, which hides itself when there is only one bucket — because a
+  // date range is exactly what you reach for when the queue is long and single-bucket.
+  const menu = (
+    <div className="flex flex-wrap items-center gap-2">
+      {options.length > 1 && (
         <FilterMenu options={options} value={effectiveFilter} onChange={(f) => { setFilter(f); setPage(1); }} />
-        {effectiveFilter !== "all" && (
-          <button type="button" onClick={clearFilter} className={filterPillBtn}>
-            Clear
-          </button>
-        )}
-      </div>
-    )
-    : null;
+      )}
+      <FilterPopover
+        activeCount={(supplierFilter ? 1 : 0) + (expectedFrom || expectedTo ? 1 : 0)}
+        onClear={() => { setSupplierFilter(""); setExpectedFrom(""); setExpectedTo(""); setPage(1); }}
+      >
+        <Select
+          size="sm"
+          value={supplierFilter}
+          onChange={(v) => { setSupplierFilter(v); setPage(1); }}
+          options={[{ value: "", label: "All suppliers" }, ...supplierOptions]}
+          ariaLabel="Filter by supplier"
+        />
+        {/* The PROMISED delivery day — a calendar day, so no timezone applies to the bounds. */}
+        <DateRangeFilter
+          label="Delivery date"
+          showLabel
+          from={expectedFrom}
+          to={expectedTo}
+          onChange={({ from, to }) => { setExpectedFrom(from); setExpectedTo(to); setPage(1); }}
+        />
+      </FilterPopover>
+      {effectiveFilter !== "all" && (
+        <button type="button" onClick={clearFilter} className={filterPillBtn}>
+          Clear
+        </button>
+      )}
+    </div>
+  );
 
   return (
     <div className="flex h-full flex-col gap-3">

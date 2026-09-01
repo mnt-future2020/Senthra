@@ -413,6 +413,28 @@ export interface DamagedHistory {
 // One page of overdue rows. Paged and searched SERVER-side: this list is not guaranteed small — a busy
 // operation can have hundreds of jobs overdue at once — and `total` counts the searched set, so the
 // pager never offers a page that isn't there.
+// The same overdue selection folded per warehouse and per engineer — the dashboard card's drill-down.
+// Bounded by ENTITY count, never by job count, so a backlog of hundreds is still a handful of rows.
+export interface OverdueGroup {
+  /** warehouseId / engineerId. `unassigned` for a legacy issue with no warehouse recorded. */
+  id: string;
+  label: string;
+  /** Warehouse code — what the deep link addresses. Null for engineers, and for `unassigned`, which
+   *  is why a row with no code renders as plain text rather than a link that goes nowhere. */
+  code: string | null;
+  count: number;
+  oldestDaysOut: number;
+}
+
+export interface OverdueGroupsResult {
+  /** The Settings window the selection ran with — print this, never a hardcoded number. */
+  days: number;
+  /** Identical to the Overview card's count for the same actor: one selection, two reads. */
+  total: number;
+  byWarehouse: OverdueGroup[];
+  byEngineer: OverdueGroup[];
+}
+
 export interface OverduePage {
   days: number;
   rows: OverdueRow[];
@@ -553,4 +575,31 @@ export interface CompleteJobPayload {
 export interface ListDamagedParams {
   warehouseId?: string;
   customerId?: string;
+  /**
+   * "company" | "customer" — which owned pool. Applied SERVER-side, after the warehouse scope, and
+   * validated strictly there: an unknown value is rejected rather than silently ignored.
+   *
+   * Hired kit is not in this pool at all: it comes from the custody-exit endpoint and the screen
+   * merges the two. No date filter here — see the service's DamagedFilters for why.
+   */
+  ownerType?: "company" | "customer";
+  /** Item name, latest reason, or warehouse. */
+  search?: string;
+  /**
+   * Ask for the COUNTS without the rows — what the screen wants while the reader is looking at the
+   * HIRE pool, whose rows come from a different endpoint but whose switcher still has to show what
+   * the owned pools hold.
+   */
+  countsOnly?: boolean;
+}
+
+/** Per-pool totals for the searched, scoped set — computed BEFORE `ownerType` narrows the rows. */
+export interface DamagedCounts {
+  company: number;
+  customer: number;
+}
+
+export interface DamagedListResult {
+  rows: DamagedRow[];
+  counts: DamagedCounts;
 }
