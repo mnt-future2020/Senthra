@@ -22,6 +22,7 @@ import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls } from "@/components/ui/styles";
 import { actionLabel, actionTone, changeLabels, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
+import { documentChipLabel } from "@/components/dashboard/purchase-requests/documentGroups";
 import { GrnStatusBadge, formatDate as grnDate } from "@/components/dashboard/goods-in/grnStatus";
 import { ACCEPTANCE_RECORDABLE_STATUSES, HireStateBadge, PO_PRIORITY_LABELS, PoStatusBadge, RECEIVABLE_STATUSES, formatDate, formatMoney } from "./poStatus";
 import { Pagination } from "@/components/ui/Pagination";
@@ -1274,6 +1275,17 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
             // The system-archived copy of the PO exactly as it was issued to the supplier —
             // the document of record. Rendered distinctly and NEVER deletable.
             const isRecord = a.uploadedBy === "system" && a.label === "Issued PO — as sent";
+            // Carried over from the source purchase request, which kept its documents in two groups.
+            // Shown so an order generated from a request does not flatten the supplier's quotation
+            // and the evidence behind the ask into one undifferentiated list. NULL is left unlabelled
+            // on purpose — this order's own uploads have no group, and inventing one for them would
+            // assert something nobody chose.
+            //
+            // The wording comes from DOCUMENT_GROUPS, not from a ternary spelled out here: the
+            // request screen heads its sections from that same table, and two hand-written copies of
+            // the names is how one screen ended up calling `other` "Supporting document" while the
+            // other called it "Other documents".
+            const groupChip = documentChipLabel(a.documentType);
             return (
               <li key={a.id} className="flex items-center justify-between gap-3 py-3">
                 <a href={a.url} target="_blank" rel="noopener noreferrer" className="flex min-w-0 items-center gap-2.5">
@@ -1284,6 +1296,11 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
                       {isRecord && (
                         <span className="inline-block shrink-0 whitespace-nowrap rounded-full bg-sky-500/12 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-sky-600">
                           Document of record
+                        </span>
+                      )}
+                      {!isRecord && groupChip && (
+                        <span className="inline-block shrink-0 whitespace-nowrap rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[var(--muted)]">
+                          {groupChip}
                         </span>
                       )}
                     </span>

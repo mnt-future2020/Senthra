@@ -16,8 +16,6 @@ const irmItemSelect = {
   status: true,
   baseUnit: true,
   trackInventory: true,
-  trackSerialNumbers: true,
-  trackBatchNumbers: true,
 } satisfies Prisma.IrmItemSelect;
 
 // --- engineer-stock primitive (tx-aware writers, used inside the caller's transaction) -------

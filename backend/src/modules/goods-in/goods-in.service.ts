@@ -51,16 +51,6 @@ export interface PublicGRNWarehouse {
   name: string;
   address: string | null;
 }
-export interface PublicGRNSerial {
-  id: string;
-  serialNumber: string;
-}
-export interface PublicGRNBatch {
-  id: string;
-  batchNumber: string;
-  expiryDate: string | null;
-  quantity: number;
-}
 export interface PublicGRNItem {
   id: string;
   purchaseOrderItemId: string;
@@ -74,9 +64,7 @@ export interface PublicGRNItem {
   damagedQuantity: number;
   acceptedQuantity: number;
   notes: string | null;
-  serials: PublicGRNSerial[];
-  batches: PublicGRNBatch[];
-  irmItem: { id: string; code: string; name: string; status: string; trackSerialNumbers: boolean; trackBatchNumbers: boolean; trackInventory: boolean } | null;
+  irmItem: { id: string; code: string; name: string; status: string; trackInventory: boolean } | null;
 }
 export interface PublicGRNAttachment {
   id: string;
@@ -203,16 +191,12 @@ function toPublic(grn: GoodsReceiptWithRelations, liveReceived?: Map<string, num
       damagedQuantity: i.damagedQuantity,
       acceptedQuantity: i.acceptedQuantity,
       notes: i.notes,
-      serials: i.serials.map((s) => ({ id: s.id, serialNumber: s.serialNumber })),
-      batches: i.batches.map((b) => ({ id: b.id, batchNumber: b.batchNumber, expiryDate: iso(b.expiryDate), quantity: b.quantity })),
       irmItem: i.irmItem
         ? {
             id: i.irmItem.id,
             code: i.irmItem.code,
             name: i.irmItem.name,
             status: i.irmItem.status ?? "active",
-            trackSerialNumbers: i.irmItem.trackSerialNumbers,
-            trackBatchNumbers: i.irmItem.trackBatchNumbers,
             trackInventory: i.irmItem.trackInventory,
           }
         : null,
@@ -244,9 +228,7 @@ function toPublic(grn: GoodsReceiptWithRelations, liveReceived?: Map<string, num
 
 // ── Line building + validation ────────────────────────────────────────────────────────────────
 type PoLineLite = { id: string; irmItemId: string; itemName: string; sku: string | null; baseUnit: string | null; quantity: number; receivedQuantity: number };
-type TrackFlags = { trackInventory: boolean; trackSerialNumbers: boolean; trackBatchNumbers: boolean };
-
-function buildLineRows(items: GRNLineInput[], poLines: Map<string, PoLineLite>, flags: Map<string, TrackFlags>): GRNLineRow[] {
+function buildLineRows(items: GRNLineInput[], poLines: Map<string, PoLineLite>): GRNLineRow[] {
   const rows: GRNLineRow[] = [];
   for (const line of items) {
     const po = poLines.get(line.purchaseOrderItemId);
@@ -261,26 +243,6 @@ function buildLineRows(items: GRNLineInput[], poLines: Map<string, PoLineLite>, 
     // Damaged is DERIVED, never client-supplied: staff count what physically passed QC, and
     // whatever's left of the delivery is by definition rejected.
     const damaged = received - accepted;
-    const f = flags.get(po.irmItemId) ?? { trackInventory: true, trackSerialNumbers: false, trackBatchNumbers: false };
-
-    let serials: GRNLineRow["serials"] = [];
-    if (f.trackSerialNumbers) {
-      const cleaned = (line.serials ?? []).map((s) => s.trim()).filter(Boolean);
-      if (cleaned.length !== accepted) {
-        throw badRequest(`${po.itemName}: enter exactly ${accepted} serial number(s) — one per accepted unit.`);
-      }
-      const lowers = cleaned.map((s) => s.toLowerCase());
-      if (new Set(lowers).size !== lowers.length) throw badRequest(`${po.itemName}: duplicate serial numbers in this receipt.`);
-      serials = cleaned.map((sn, i) => ({ serialNumber: sn, serialLower: lowers[i], irmItemId: po.irmItemId }));
-    }
-
-    let batches: GRNLineRow["batches"] = [];
-    if (f.trackBatchNumbers) {
-      const provided = line.batches ?? [];
-      const sum = provided.reduce((a, b) => a + b.quantity, 0);
-      if (sum !== accepted) throw badRequest(`${po.itemName}: batch quantities must total ${accepted} (the accepted quantity).`);
-      batches = provided.map((b) => ({ batchNumber: b.batchNumber.trim(), expiryDate: b.expiryDate ? new Date(b.expiryDate) : null, quantity: b.quantity }));
-    }
 
     rows.push({
       purchaseOrderItemId: po.id,
@@ -294,34 +256,9 @@ function buildLineRows(items: GRNLineInput[], poLines: Map<string, PoLineLite>, 
       damagedQuantity: damaged,
       acceptedQuantity: accepted,
       notes: trimToNull(line.notes),
-      serials,
-      batches,
     });
   }
   return rows;
-}
-
-// Serial numbers are unique per IRM item across all non-deleted GRNs (a serial = one physical
-// unit). Checks dups within this receipt + against the database.
-async function assertSerialsUnique(rows: GRNLineRow[], excludeGrnId?: string): Promise<void> {
-  const byItem = new Map<string, string[]>();
-  for (const r of rows) {
-    if (!r.serials.length) continue;
-    const arr = byItem.get(r.irmItemId) ?? [];
-    arr.push(...r.serials.map((s) => s.serialLower));
-    byItem.set(r.irmItemId, arr);
-  }
-  for (const [irmItemId, lowers] of byItem) {
-    if (new Set(lowers).size !== lowers.length) throw badRequest("The same serial number appears more than once in this receipt.");
-    const conflicts = await grnRepo.findSerialConflicts(irmItemId, lowers, excludeGrnId);
-    if (conflicts.length) throw conflict(`Serial number already received elsewhere: ${conflicts.map((c) => c.serialLower).join(", ")}.`);
-  }
-}
-
-async function loadFlags(poLines: Map<string, PoLineLite>, items: GRNLineInput[]): Promise<Map<string, TrackFlags>> {
-  const irmIds = [...new Set(items.map((i) => poLines.get(i.purchaseOrderItemId)?.irmItemId).filter((x): x is string => Boolean(x)))];
-  const flags = await grnRepo.findIrmTrackFlags(irmIds);
-  return new Map(flags.map((f) => [f.id, { trackInventory: f.trackInventory, trackSerialNumbers: f.trackSerialNumbers, trackBatchNumbers: f.trackBatchNumbers }]));
 }
 
 function poLineMap(po: Awaited<ReturnType<typeof poService.requireReceivablePurchaseOrder>>): Map<string, PoLineLite> {
@@ -521,9 +458,7 @@ export async function createGoodsReceipt(input: CreateGoodsReceiptInput, actor?:
   const po = await poService.requireReceivablePurchaseOrder(input.purchaseOrderId);
   assertWarehouseAccess(actor, po.warehouseId);
   const poLines = poLineMap(po);
-  const flags = await loadFlags(poLines, input.items);
-  const rows = buildLineRows(input.items, poLines, flags);
-  await assertSerialsUnique(rows);
+  const rows = buildLineRows(input.items, poLines);
   const actorEmail = actor?.email ?? null;
 
   const created = await grnRepo.createWithCode(
@@ -577,9 +512,7 @@ export async function updateGoodsReceipt(id: string, input: UpdateGoodsReceiptIn
   if (input.items !== undefined) {
     const po = await poService.requireReceivablePurchaseOrder(existing.purchaseOrderId);
     const poLines = poLineMap(po);
-    const flags = await loadFlags(poLines, input.items);
-    const rows = buildLineRows(input.items, poLines, flags);
-    await assertSerialsUnique(rows, id);
+    const rows = buildLineRows(input.items, poLines);
     result = await grnRepo.replaceItemsAndChildren(id, rows, headerPatch);
   } else {
     result = await grnRepo.update(id, headerPatch);

@@ -5,13 +5,24 @@ import { useRouter } from "next/navigation";
 import { ExternalLink, FileText, Globe, Image as ImageIcon, Link as LinkIcon, Loader2, Lock, Plus, Trash2, Upload } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
-import { listCustomers, listCustomerProjects, listCustomerSites, listCustomerStockOptions, type CustomerStockOption } from "@/services/customer.service";
+import { listCustomerOptions, listCustomerProjects, listCustomerSites, listCustomerStockOptions, type CustomerOption, type CustomerStockOption } from "@/services/customer.service";
 import { listEngineerOptions, listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
+import { IrmItemPicker } from "@/components/dashboard/irm/IrmItemPicker";
+import { mergeIrmItems, missingIrmIds } from "@/components/dashboard/irm/irmItemPickerModel";
+import { useReferenceData } from "@/hooks/useReferenceData";
+import { useIrmItemsByIds } from "@/hooks/useIrmItemsByIds";
+import { useRentalItemsByIds } from "@/hooks/useRentalItemsByIds";
+import { RentalItemPicker } from "@/components/dashboard/rentals/RentalItemPicker";
+import { mergeById, missingIds } from "@/lib/cataloguePicker";
+import { irmKitLineIds, rentalKitLineIds } from "./kitCatalogueIds";
+import type { IrmItem } from "@/types/irm";
+import type { RentalItem } from "@/types/rental";
 import { getAvailability, listItemWarehouseStock } from "@/services/inventory.service";
 import { getJobsDemand } from "@/services/goodsManagement.service";
 import { getRentalItemAvailability, listRentalItems } from "@/services/rental.service";
-import { listSuppliers } from "@/services/supplier.service";
+import { listSupplierOptions, type SupplierOption } from "@/services/supplier.service";
+import { withHistoricalOption } from "@/lib/historicalOption";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
@@ -197,7 +208,17 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
   const [demand, setDemand] = React.useState<Map<string, number>>(new Map());
   const [engineers, setEngineers] = React.useState<{ id: string; name: string; jobTitle: string | null }[]>([]);
   const [suppliers, setSuppliers] = React.useState<Opt[]>([]);
-  const [irmItems, setIrmItems] = React.useState<Opt[]>([]);
+  const [irmItems, setIrmItems] = React.useState<IrmItem[]>([]);
+  // Kit lines store a display label alongside the id. Keep the shape they have always used
+  // ("IRM-0004 — CAT6 Cable") so existing saved kits and new ones read identically.
+  const irmKitLabel = (i: IrmItem) => `${i.code} — ${i.name}`;
+  // EDIT: a saved kit can name items outside the page loaded at mount. Resolve them by id in ONE
+  // request — a kit with twenty IRM lines must not become twenty lookups — so each line's picker
+  // shows the item it actually holds instead of reading as empty.
+  const resolvingIrmItems = useIrmItemsByIds(
+    missingIrmIds(irmKitLineIds(kitLines), irmItems),
+    (found) => setIrmItems((prev) => mergeIrmItems(prev, found)),
+  );
   const [warehouses, setWarehouses] = React.useState<WarehouseOption[]>([]);
   // The lean OPTION shape, not the full entry row. Typing it as the entry made it natural to feed
   // from the paged list read, which capped the picker at 100 and — because the grouping SUMS
@@ -209,7 +230,19 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
   // NOT fall back to every warehouse — they'd be misleading); only "error" (lookup failed / no
   // inventory permission) falls back to the full warehouse list so the pick is never hard-blocked.
   const [irmItemWarehouses, setIrmItemWarehouses] = React.useState<Record<string, IrmWarehouseLookup>>({});
-  const [rentalItems, setRentalItems] = React.useState<Opt[]>([]);
+  // The authoritative rows, not a `{value,label}` adapter: the picker seeds from these, resolves the
+  // selected one from them, and the kit line's label is derived below — one shape, no second copy.
+  const [rentalItems, setRentalItems] = React.useState<RentalItem[]>([]);
+  // Kit lines store a display label alongside the id. Keep the shape they have always used
+  // ("RNT-0005 — Fibre Tester") so existing saved kits and new ones read identically.
+  const rentalKitLabel = (i: RentalItem) => `${i.code} — ${i.name}`;
+  // EDIT: a saved kit can name a hired item outside the page loaded at mount, which used to render
+  // as an EMPTY picker on a line that is in fact set — and re-picking it silently clears the depot
+  // and availability. Resolved by exact id, all of them in ONE request.
+  const resolvingRentalItems = useRentalItemsByIds(
+    missingIds(rentalKitLineIds(kitLines), rentalItems),
+    (found) => setRentalItems((prev) => mergeById(prev, found)),
+  );
   // The rental twin of irmItemWarehouses. A hired item has no stock level of its own, so "where can
   // this be collected" is answered by its live hires — the server sums them per depot and omits any
   // depot with nothing free, so a "ready" empty list means "hired nowhere with a spare unit".
@@ -227,19 +260,25 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
   const clearError = (f: string) => setErrors((p) => { if (!p[f]) return p; const n = { ...p }; delete n[f]; return n; });
   useReportDirty("job-form", dirty && !saved);
 
-  // Static reference lists (one effect, active-guarded).
-  React.useEffect(() => {
-    let active = true;
-    listCustomers({ status: "active", pageSize: 200 }).then((r) => active && setCustomers(r.customers.map((c) => ({ value: c.id, label: c.name }))), () => {});
-    listEngineerOptions().then((us) => active && setEngineers(us.map((u) => ({ id: u.id, name: u.name, jobTitle: u.jobTitle }))), () => {});
-    listSuppliers({ status: "active", pageSize: 200 }).then((r) => active && setSuppliers(r.suppliers.map((s) => ({ value: s.id, label: `${s.code} — ${s.name}` }))), () => {});
-    listIrmItems({ status: "active", pageSize: 200 }).then((r) => active && setIrmItems(r.items.map((i) => ({ value: i.id, label: `${i.code} — ${i.name}` }))), () => {});
-    // Same idiom as the IRM list above. The label carries the RNT-#### because that is what is printed
-    // on the equipment's label and what the warehouse scans.
-    listRentalItems({ status: "active", pageSize: 200 }).then((r) => active && setRentalItems(r.items.map((i) => ({ value: i.id, label: `${i.code} — ${i.name}` }))), () => {});
-    listWarehouseOptions().then((ws) => active && setWarehouses(ws), () => {});
-    return () => { active = false; };
-  }, []);
+  // Static reference lists. Through `useReferenceData` rather than a hand-rolled effect, for the
+  // reason that helper exists: the `() => {}` this replaces swallowed EVERY failure, so a role
+  // holding jobs.create without the read permission behind one of these lists saw a silently empty
+  // dropdown and no way to find out why. Now each failure raises one toast, naming the list and
+  // saying plainly when it is a permission wall.
+  const { isLoading: refLoading } = useReferenceData([
+    // COMPLETE active sets, lean. A paged read hid every record past the page AND rendered an
+    // already-saved one as "none selected" — see listCustomerOptions / listSupplierOptions.
+    { label: "customers", load: listCustomerOptions, onData: (os: CustomerOption[]) => setCustomers(os.map((c) => ({ value: c.id, label: c.name }))) },
+    { label: "engineers", load: listEngineerOptions, onData: (us: Awaited<ReturnType<typeof listEngineerOptions>>) => setEngineers(us.map((u) => ({ id: u.id, name: u.name, jobTitle: u.jobTitle }))) },
+    { label: "suppliers", load: listSupplierOptions, onData: (os: SupplierOption[]) => setSuppliers(os.map((o) => ({ value: o.id, label: `${o.code} — ${o.name}` }))) },
+    // A bounded FIRST PAGE for the picker to show before anything is typed; it searches the rest of
+    // the catalogue server-side, so a kit can name an item past this page. 100, not 200: `paginate`
+    // clamps an ordinary list request to 100, so asking for more quietly returned half of what the
+    // number here claimed.
+    { label: "the item catalogue", load: () => listIrmItems({ status: "active", pageSize: 100 }), onData: (r) => setIrmItems(r.items) },
+    { label: "the rental catalogue", load: () => listRentalItems({ status: "active", pageSize: 100 }), onData: (r) => setRentalItems(r.items) },
+    { label: "warehouses", load: listWarehouseOptions, onData: (ws: WarehouseOption[]) => setWarehouses(ws) },
+  ]);
 
   // Projects, sites + customer-stock catalogue depend on the chosen customer. One effect,
   // keyed on customerId, so it covers BOTH edit-mode seeding (customerId arrives from `o`)
@@ -517,20 +556,24 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
     );
   }, []);
 
-  const onPickRentalItem = (key: string, itemId: string) => {
-    const i = rentalItems.find((x) => x.value === itemId) ?? null;
+  const onPickRentalItem = (key: string, item: RentalItem) => {
+    // Fold the picked row into the loaded set — a search result is not in the first page, and the
+    // line's label and the depot lookup below both read from it.
+    setRentalItems((prev) => mergeById(prev, [item]));
     // New item ⇒ the old depot may not hold it; clear it so the user re-picks a valid collection point.
-    setLine(key, { rentalItemId: itemId, itemName: i?.label ?? "", warehouseId: "", warehouseName: "", available: null, loadingAvail: false });
-    loadRentalItemWarehouses(itemId);
+    setLine(key, { rentalItemId: item.id, itemName: rentalKitLabel(item), warehouseId: "", warehouseName: "", available: null, loadingAvail: false });
+    loadRentalItemWarehouses(item.id);
     touch();
     clearError("kitLines");
   };
 
-  const onPickIrmItem = (key: string, itemId: string) => {
-    const i = irmItems.find((x) => x.value === itemId) ?? null;
+  const onPickIrmItem = (key: string, item: IrmItem) => {
+    // Fold the picked row into the loaded set — a search result is not in the first page, and the
+    // kit line's label, warehouse list and availability all read from it.
+    setIrmItems((prev) => mergeIrmItems(prev, [item]));
     // New item ⇒ the old warehouse may not stock it; clear it so the user re-picks a valid site.
-    setLine(key, { irmItemId: itemId, itemName: i?.label ?? "", warehouseId: "", warehouseName: "", available: null, loadingAvail: false });
-    loadIrmItemWarehouses(itemId);
+    setLine(key, { irmItemId: item.id, itemName: irmKitLabel(item), warehouseId: "", warehouseName: "", available: null, loadingAvail: false });
+    loadIrmItemWarehouses(item.id);
     touch();
     clearError("kitLines");
   };
@@ -875,7 +918,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Customer<RequiredMark /></label>
-                <Select value={customerId} onChange={onPickCustomer} options={customers} placeholder="— Select customer —" ariaLabel="Customer" invalid={Boolean(errors.customerId)} />
+                <Select value={customerId} onChange={onPickCustomer} options={withHistoricalOption(customers, customerId, job?.customerName)} placeholder="— Select customer —" ariaLabel="Customer" invalid={Boolean(errors.customerId)} />
                 <FieldError message={errors.customerId} />
               </div>
               <div>
@@ -1012,7 +1055,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
               </div>
               <div>
                 <label className={labelCls}>Supplier</label>
-                <Select value={supplierId} onChange={(v) => { setSupplierId(v); touch(); }} options={[{ value: "", label: "— None —" }, ...suppliers]} placeholder="— None —" ariaLabel="Supplier" />
+                <Select value={supplierId} onChange={(v) => { setSupplierId(v); touch(); }} options={withHistoricalOption([{ value: "", label: "— None —" }, ...suppliers], supplierId, o?.supplierName)} placeholder="— None —" ariaLabel="Supplier" />
               </div>
               <div>
                 <label className={labelCls}>Planner name</label>
@@ -1086,9 +1129,31 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                           <Select value={l.customerStockItemKey} onChange={(v) => onPickStockItem(l._key, v)} options={stockItemOptions} placeholder="— Select customer stock —" disabled={locked} ariaLabel="Customer stock item" />
                         )
                       ) : l.lineType === "irm" ? (
-                        <Select value={l.irmItemId} onChange={(v) => onPickIrmItem(l._key, v)} options={irmItems} placeholder="— Select IRM item —" disabled={locked} ariaLabel="IRM item" />
+                        <IrmItemPicker
+                          value={l.irmItemId}
+                          selectedItem={irmItems.find((i) => i.id === l.irmItemId) ?? null}
+                          seed={irmItems}
+                          onSelect={(item) => onPickIrmItem(l._key, item)}
+                          canCreate={false}
+                          disabled={locked}
+                          // So a SAVED line still being resolved reads as loading rather than as an
+                          // empty picker on a line that is in fact set.
+                          loading={refLoading || resolvingIrmItems}
+                          ariaLabel="IRM item"
+                        />
                       ) : l.lineType === "rental" ? (
-                        <Select value={l.rentalItemId} onChange={(v) => onPickRentalItem(l._key, v)} options={rentalItems} placeholder="— Select rental item —" disabled={locked} ariaLabel="Rental item" />
+                        <RentalItemPicker
+                          value={l.rentalItemId}
+                          selectedItem={rentalItems.find((i) => i.id === l.rentalItemId) ?? null}
+                          seed={rentalItems}
+                          onSelect={(item) => onPickRentalItem(l._key, item)}
+                          // Job planning picks from the hire catalogue; it has never created entries
+                          // in it, and this change deliberately does not start.
+                          canCreate={false}
+                          disabled={locked}
+                          loading={refLoading || resolvingRentalItems}
+                          ariaLabel="Rental item"
+                        />
                       ) : (
                         <input className={inputCls} value={l.itemName} onChange={(e) => { setLine(l._key, { itemName: e.target.value }); touch(); clearError("kitLines"); }} maxLength={200} placeholder="Item name" disabled={locked} />
                       )}

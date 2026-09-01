@@ -485,15 +485,13 @@ model IrmItem {
   currency          String? @default("GBP") // GBP | EUR
   vatRatePercent    Float?  @default(20) // UK standard rate default
 
-  // Tracking flags.
+  // Whether this item's stock is carried in the inventory ledger at all. No form field sets it —
+  // every item sits at the default — but it IS read widely: it gates whether a completed goods
+  // receipt posts stock, and whether the item may be added, adjusted or transferred.
   //
-  // No form field sets these — the item form's toggles were removed deliberately, so every item sits
-  // at the defaults. `trackInventory` is read widely; the serial/batch pair is a FUTURE seam, and the
-  // goods scan already refuses an item carrying either ("can't be moved here yet") so the feature
-  // cannot be half-enabled by data alone. Keep them.
+  // `trackSerialNumbers` / `trackBatchNumbers` used to sit here. They were removed with the
+  // serial/batch feature on 2026-09-01 (0 rows carried either) — see docs/SERIAL-BATCH-REMOVAL.md.
   trackInventory     Boolean @default(true)
-  trackSerialNumbers Boolean @default(false)
-  trackBatchNumbers  Boolean @default(false)
   // RETIRED — unlike its neighbours this one has NO consumer anywhere: nothing reads it, no rule
   // branches on it, and every row is false. Column kept so existing rows aren't rewritten. Do not
   // re-surface it without something that actually honours it.
@@ -829,6 +827,20 @@ model PurchaseRequestAttachment {
   id                String          @id @default(auto()) @map("_id") @db.ObjectId
   purchaseRequestId String          @db.ObjectId
   purchaseRequest   PurchaseRequest @relation(fields: [purchaseRequestId], references: [id])
+  // WHICH of the two document groups this file belongs to: "quote" (the supplier's quotation
+  // package) or "other" (specs, comparisons, supporting evidence). An explicit column rather than
+  // a convention over `label` or upload order, because both of those are guesses the reviewer's
+  // screen would then be built on.
+  //
+  // NULLABLE for one reason only, the same one `publicId`/`resourceType` are: every row written
+  // before the second group existed was uploaded under a field literally labelled "Quote
+  // document(s)", so a missing value means `quote` and the read side says so once
+  // (`normalisePrfDocumentType`). Nothing backfills them — a `String @default("quote")` would look
+  // equivalent and is not: Prisma+Mongo's `{ documentType: "quote" }` filter does NOT match a
+  // document where the field is ABSENT, so any later query that partitioned on it would silently
+  // drop every legacy quote. Partitioning therefore happens in the DTO, over rows already loaded,
+  // and no query filters on this column.
+  documentType      String? // "quote" | "other" — absent/null means "quote" (see above)
   label             String?
   fileName          String
   fileType          String // pdf | docx | png | jpg
@@ -1246,6 +1258,12 @@ model PurchaseOrderAttachment {
   id              String        @id @default(auto()) @map("_id") @db.ObjectId
   purchaseOrderId String        @db.ObjectId
   purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  // Carried verbatim from the source PRF row at conversion, so an order generated from a request
+  // still shows which files were the supplier's quotation and which were supporting documents.
+  //
+  // Unlike the PRF's, this one is NOT normalised to "quote" on read: a PO's own uploads have no
+  // two-group picker, so null here honestly means "uncategorised" rather than "legacy quote".
+  documentType    String? // "quote" | "other" | null (uncategorised — a PO's own upload)
   label           String?
   fileName        String
   fileType        String // pdf | docx | png | jpg
@@ -1385,45 +1403,12 @@ model GoodsReceiptItem {
   notes              String?
   sortOrder          Int     @default(0)
 
-  serials GoodsReceiptSerial[]
-  batches GoodsReceiptBatch[]
-
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([goodsReceiptId, purchaseOrderItemId])
   @@index([goodsReceiptId])
   @@index([irmItemId])
-}
-
-// One serial per accepted unit (only when the IRM item tracks serial numbers).
-model GoodsReceiptSerial {
-  id                 String           @id @default(auto()) @map("_id") @db.ObjectId
-  goodsReceiptItemId String           @db.ObjectId
-  goodsReceiptItem   GoodsReceiptItem @relation(fields: [goodsReceiptItemId], references: [id])
-  irmItemId          String           @db.ObjectId // denormalised for per-item uniqueness checks
-  serialNumber       String
-  serialLower        String
-  createdAt          DateTime @default(now())
-
-  @@index([goodsReceiptItemId])
-  // DB-level backstop: a serial = one physical unit, unique per IRM item across all receipts.
-  // The app-level check (findSerialConflicts) gives friendly errors; this prevents a concurrent
-  // race from inserting the same serial twice. A P2002 here is mapped to a 409 in the repository.
-  @@unique([irmItemId, serialLower])
-}
-
-// A batch / lot received (only when the IRM item tracks batch numbers). Σ quantity == accepted.
-model GoodsReceiptBatch {
-  id                 String           @id @default(auto()) @map("_id") @db.ObjectId
-  goodsReceiptItemId String           @db.ObjectId
-  goodsReceiptItem   GoodsReceiptItem @relation(fields: [goodsReceiptItemId], references: [id])
-  batchNumber        String
-  expiryDate         DateTime?
-  quantity           Int
-  createdAt          DateTime @default(now())
-
-  @@index([goodsReceiptItemId])
 }
 
 // A file attached to a goods receipt (delivery note / invoice / packing slip / photo).

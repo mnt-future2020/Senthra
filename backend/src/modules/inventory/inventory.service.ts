@@ -103,8 +103,6 @@ export interface PublicInventoryBalance {
   value: number;
   currency: string;
   status: InventoryStatus;
-  trackSerialNumbers: boolean;
-  trackBatchNumbers: boolean;
   lastMovementAt: string;
 }
 
@@ -213,8 +211,6 @@ function toBalanceDTO(b: InventoryBalanceWithRelations, plannedDemand = 0): Publ
     value: valuePence / 100,
     currency: b.irmItem.currency ?? "GBP",
     status: statusOf(onHand, b.irmItem.reorderLevel),
-    trackSerialNumbers: b.irmItem.trackSerialNumbers,
-    trackBatchNumbers: b.irmItem.trackBatchNumbers,
     lastMovementAt: b.updatedAt.toISOString(), // the balance only changes on a movement
   };
 }
@@ -364,10 +360,6 @@ export interface PublicReorderSuggestion {
   covered: boolean;
   critical: boolean;
   unitCostPence: number;
-  // Transfer-eligibility flags for the workbench's "Create Transfer" shortcut (the move endpoint
-  // rejects serial/batch-tracked items, so the button hides for them).
-  trackSerialNumbers: boolean;
-  trackBatchNumbers: boolean;
   primarySupplier: { id: string; name: string; status: string; leadTimeDays: number | null } | null;
 }
 
@@ -436,8 +428,6 @@ export async function getReorderSuggestions(actor?: AuditActor): Promise<Reorder
       covered: math.covered,
       critical: math.critical,
       unitCostPence: b.irmItem.standardCostPence ?? 0,
-      trackSerialNumbers: b.irmItem.trackSerialNumbers,
-      trackBatchNumbers: b.irmItem.trackBatchNumbers,
     });
   }
 
@@ -585,9 +575,6 @@ export async function transferStock(input: CreateTransferInput, actor?: AuditAct
   const source = await inventoryRepo.findBalancePairWithRelations(input.irmItemId, input.fromWarehouseId);
   if (!source) throw conflict("There is no stock of this item at the source warehouse.");
   const item = source.irmItem;
-  if (item.trackSerialNumbers || item.trackBatchNumbers) {
-    throw conflict("Serial-tracked and batch-tracked items can't be transferred yet — serial-level transfer is a future feature.");
-  }
   // Stock a job has already PLANNED at the source can't be moved away — the kit line still points
   // here, so the shortfall would surface only at the scan gun, with the engineer already at the
   // counter. `quantityReserved` never covered this: the schema marks it "FUTURE … 0 now", so this
@@ -651,9 +638,6 @@ export async function addStock(input: AddStockInput, actor?: AuditActor): Promis
 
   const item = await irmService.requireActiveIrmItem(input.irmItemId);
   if (item.trackInventory === false) throw badRequest(`${item.name} isn't inventory-tracked, so stock can't be added for it.`);
-  if (item.trackSerialNumbers || item.trackBatchNumbers) {
-    throw conflict("Serial- and batch-tracked items can't be added this way yet — receive them via Goods In.");
-  }
   const wh = await warehouseService.requireActiveWarehouse(input.warehouseId);
   assertWarehouseAccess(actor, wh.id);
   const actorEmail = actor?.email ?? null;
@@ -706,9 +690,6 @@ export async function adjustStock(input: AdjustStockInput, actor?: AuditActor): 
   if (input.quantity <= 0) throw badRequest("Quantity must be greater than zero.");
 
   const item = await irmService.requireActiveIrmItem(input.irmItemId);
-  if (item.trackSerialNumbers || item.trackBatchNumbers) {
-    throw conflict("Serial- and batch-tracked items can't be adjusted this way.");
-  }
   const wh = await warehouseService.requireActiveWarehouse(input.warehouseId);
   assertWarehouseAccess(actor, wh.id);
   const actorEmail = actor?.email ?? null;

@@ -63,7 +63,7 @@ const ITEM = "i".repeat(24);
 const WH = "w".repeat(24);
 const OTHER_WH = "z".repeat(24);
 
-const irmRow = () => ({ id: ITEM, code: "IRM-1", name: "CAT6 Cable", sku: null, baseUnit: "Box", reorderLevel: null, trackSerialNumbers: false, trackBatchNumbers: false });
+const irmRow = () => ({ id: ITEM, code: "IRM-1", name: "CAT6 Cable", sku: null, baseUnit: "Box", reorderLevel: null });
 const whRow = (quantityOnHand: number, warehouseId = WH) => ({ irmItemId: ITEM, warehouseId, quantityOnHand });
 const demandMap = (demand: number, warehouseId = WH) =>
   new Map([["k", { irmItemId: ITEM, customerStockEntryId: null, warehouseId, itemName: "CAT6 Cable", warehouseName: "WH", demand }]]);
@@ -164,7 +164,7 @@ describe("searchWarehouseItems — the browse list agrees with the typed search"
   const browseRow = (quantityOnHand: number) => ({
     irmItemId: ITEM,
     quantityOnHand,
-    irmItem: { code: "IRM-1", name: "CAT6 Cable", sku: null, baseUnit: "Box", reorderLevel: null, trackSerialNumbers: false, trackBatchNumbers: false },
+    irmItem: { code: "IRM-1", name: "CAT6 Cable", sku: null, baseUnit: "Box", reorderLevel: null },
   });
 
   it("nets planned demand off the browse figure", async () => {

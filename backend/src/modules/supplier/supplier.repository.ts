@@ -184,3 +184,12 @@ export async function createWithCode(
   }
   throw new Error("Could not allocate a unique supplier code.");
 }
+
+/** Lean, complete, active-only options for pickers. Ordered by name — how people scan a dropdown. */
+export function findOptions(): Promise<{ id: string; code: string; name: string }[]> {
+  return prisma.supplier.findMany({
+    where: { deletedAt: null, status: "active" },
+    select: { id: true, code: true, name: true },
+    orderBy: { name: "asc" },
+  });
+}

@@ -6,6 +6,9 @@ import { AlertTriangle, Loader2, MinusCircle } from "lucide-react";
 import * as inventoryService from "@/services/inventory.service";
 import type { AdjustStockReason, StockAdjustment } from "@/services/inventory.service";
 import { listIrmItems } from "@/services/irm.service";
+import type { IrmItem } from "@/types/irm";
+import { IrmItemPicker } from "@/components/dashboard/irm/IrmItemPicker";
+import { mergeIrmItems } from "@/components/dashboard/irm/irmItemPickerModel";
 import { listWarehouses } from "@/services/warehouse.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
@@ -32,7 +35,11 @@ const REASONS: { value: AdjustStockReason; label: string }[] = [
   { value: "other", label: "Other" },
 ];
 
-type ItemOption = { id: string; code: string; name: string; sku: string | null; baseUnit: string | null };
+/**
+ * What this screen may act on. Applied to the picker's SEED and to its SEARCH RESULTS alike —
+ * enforced on only one of them, an unusable row would appear the moment someone typed.
+ */
+const adjustable = (i: IrmItem) => i.trackInventory;
 type WarehouseOption = { id: string; name: string; code: string };
 
 interface AdjustStockFormProps {
@@ -50,7 +57,7 @@ export function AdjustStockForm({ onDone }: AdjustStockFormProps) {
       ? admin.name || admin.email
       : principal?.email ?? "—";
 
-  const [items, setItems] = React.useState<ItemOption[]>([]);
+  const [items, setItems] = React.useState<IrmItem[]>([]);
   const [warehouses, setWarehouses] = React.useState<WarehouseOption[]>([]);
 
   const [irmItemId, setIrmItemId] = React.useState("");
@@ -80,14 +87,12 @@ export function AdjustStockForm({ onDone }: AdjustStockFormProps) {
   // Load adjustable items (non-serial, non-batch, inventory-tracked) and active warehouses.
   React.useEffect(() => {
     let active = true;
+    // A bounded first page for the picker to show before anything is typed. It is no longer the
+    // whole world: the picker searches the rest server-side, so an item past this page is still
+    // findable. Rows are kept whole (not narrowed) so `adjustable` can be applied to SEARCH results
+    // as well — a rule enforced only on this page would let an unusable row appear on typing.
     listIrmItems({ status: "active", pageSize: 200 }).then(
-      (r) =>
-        active &&
-        setItems(
-          r.items
-            .filter((i) => i.trackInventory && !i.trackSerialNumbers && !i.trackBatchNumbers)
-            .map((i) => ({ id: i.id, code: i.code, name: i.name, sku: i.sku, baseUnit: i.baseUnit })),
-        ),
+      (r) => active && setItems(r.items.filter(adjustable)),
       () => {},
     );
     listWarehouses({ status: "active", pageSize: 100 }).then(
@@ -290,17 +295,17 @@ export function AdjustStockForm({ onDone }: AdjustStockFormProps) {
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="sm:col-span-2">
                 <label className={labelCls}>Item</label>
-                <Select
+                <IrmItemPicker
                   value={irmItemId}
-                  onChange={(v) => {
-                    setIrmItemId(v);
+                  selectedItem={selectedItem}
+                  seed={items}
+                  onSelect={(i) => {
+                    setItems((prev) => mergeIrmItems(prev, [i]));
+                    setIrmItemId(i.id);
                     clearError("irmItemId");
                   }}
-                  options={items.map((i) => ({
-                    value: i.id,
-                    label: `${i.code} — ${i.name}${i.sku ? ` (${i.sku})` : ""}`,
-                  }))}
-                  placeholder="— Select an item —"
+                  canCreate={false}
+                  filterItem={adjustable}
                   ariaLabel="Item"
                   invalid={Boolean(errors.irmItemId)}
                   disabled={locked}

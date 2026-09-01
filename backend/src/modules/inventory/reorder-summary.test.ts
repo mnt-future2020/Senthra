@@ -44,8 +44,6 @@ function balance(over: Partial<{ id: string; wh: string; onHand: number; reserve
       baseUnit: "ea",
       status: "active",
       trackInventory: true,
-      trackSerialNumbers: false,
-      trackBatchNumbers: false,
       reorderLevel,
       criticalLevel,
       maximumStock: null,

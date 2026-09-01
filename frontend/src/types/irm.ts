@@ -54,8 +54,6 @@ export interface IrmItem {
   vatRatePercent: number | null;
   // Tracking flags.
   trackInventory: boolean;
-  trackSerialNumbers: boolean;
-  trackBatchNumbers: boolean;
   // Operations.
   notes: string | null;
   // Stock rollups — 0 until the inventory ledger lands.

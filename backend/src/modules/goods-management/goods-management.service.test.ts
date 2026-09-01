@@ -63,7 +63,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockJob.mockResolvedValue({ id: JOB_ID, status: "accepted", assignedEngineerId: "c".repeat(24),
     kitLines: [{ id: "k1", lineType: "irm", irmItemId: IRM_ID, warehouseId: WH_ID, itemName: "CAT6", qty: 10 }] });
-  mockIrm.mockResolvedValue({ id: IRM_ID, code: "IRM-0004", name: "CAT6", baseUnit: "Box", barcode: "5012345678900", trackInventory: true, trackSerialNumbers: false, trackBatchNumbers: false });
+  mockIrm.mockResolvedValue({ id: IRM_ID, code: "IRM-0004", name: "CAT6", baseUnit: "Box", barcode: "5012345678900", trackInventory: true });
   mockBal.mockResolvedValue({ quantityOnHand: 4, quantityReserved: 0 });
   mockMoves.mockResolvedValue([]);
   // Default: no customer stock entry found (IRM path is primary)
@@ -212,17 +212,12 @@ describe("scanLookup (issue)", () => {
     expect(m).toMatchObject({ source: "irm", irmItemId: IRM_ID, jobKitLineId: "k1", plannedQty: 10, alreadyIssued: 0, remainingIssuable: 10, available: 4 });
   });
   it("rejects a code that isn't on the kit list", async () => {
-    mockIrm.mockResolvedValue({ id: "e".repeat(24), code: "IRM-9999", name: "Other", trackInventory: true, trackSerialNumbers: false, trackBatchNumbers: false });
+    mockIrm.mockResolvedValue({ id: "e".repeat(24), code: "IRM-9999", name: "Other", trackInventory: true });
     await expect(scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "IRM-9999" })).rejects.toThrow(/not on this job/i);
   });
   it("rejects an item whose pickup warehouse isn't the warehouse being managed", async () => {
     await expect(scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: "e".repeat(24), code: "IRM-0004" })).rejects.toThrow(/different warehouse/i);
   });
-  it("rejects a serial-tracked item", async () => {
-    mockIrm.mockResolvedValue({ id: IRM_ID, code: "IRM-0004", name: "SFP", trackInventory: true, trackSerialNumbers: true, trackBatchNumbers: false });
-    await expect(scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "IRM-0004" })).rejects.toThrow(/serial|batch/i);
-  });
-
   // Customer stock path — IRM lookup returns null, falls through to barcode lookup.
   describe("customer stock path", () => {
     beforeEach(() => {
@@ -331,7 +326,7 @@ describe("postIssue", () => {
   it("decrements the warehouse and increments the engineer holding for an IRM issue", async () => {
     void ENG_ID;
     const mockRequireIrm = irmService.requireActiveIrmItem as ReturnType<typeof vi.fn>;
-    mockRequireIrm.mockResolvedValue({ id: IRM_ID, code: "IRM-0004", name: "CAT6", baseUnit: "Box", trackSerialNumbers: false, trackBatchNumbers: false });
+    mockRequireIrm.mockResolvedValue({ id: IRM_ID, code: "IRM-0004", name: "CAT6", baseUnit: "Box" });
     await postIssue(JOB_ID, { direction: "issue", warehouseId: WH_ID, lines: [{ source: "irm", irmItemId: IRM_ID, jobKitLineId: "k1", qty: 10, scannedCode: "IRM-0004" }] }, { email: "wm@x.com" } as never);
     expect(mockApplyOutbound).toHaveBeenCalledTimes(1);
     expect(mockApplyOutbound.mock.calls[0][1]).toMatchObject({ irmItemId: IRM_ID, warehouseId: WH_ID, quantity: 10, sourceType: "goods_management", sourceCode: "GM-0001" });
@@ -1419,7 +1414,7 @@ describe("closeReconcile", () => {
       kitLines: [{ id: "k1", lineType: "irm", irmItemId: IRM_ID, customerStockEntryId: null, warehouseId: WH_ID, itemName: "CAT6", qty: 10, warehouseName: "WH1", warehouseCode: "W1" }],
     });
     const mockRequireIrm = irmService.requireActiveIrmItem as ReturnType<typeof vi.fn>;
-    mockRequireIrm.mockResolvedValue({ id: IRM_ID, name: "CAT6", baseUnit: "Box", trackSerialNumbers: false, trackBatchNumbers: false });
+    mockRequireIrm.mockResolvedValue({ id: IRM_ID, name: "CAT6", baseUnit: "Box" });
     await expect(
       postIssue(RECONCILE_JOB_ID, { direction: "issue", warehouseId: WH_ID, lines: [{ source: "irm", irmItemId: IRM_ID, jobKitLineId: "k1", qty: 1 }] }, { email: "wm@x.com" } as never),
     ).rejects.toThrow(/reconciled|locked/i);
@@ -1737,7 +1732,7 @@ describe("reportWarehouseDamage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockWarehouseById.mockResolvedValue({ id: WH_ID, name: "London Hub" });
-    mockRequireIrm.mockResolvedValue({ id: IRM_ID, name: "CAT6", trackSerialNumbers: false, trackBatchNumbers: false });
+    mockRequireIrm.mockResolvedValue({ id: IRM_ID, name: "CAT6" });
     mockUpsertDamagedBalance.mockResolvedValue({ id: "dmg1", quantity: 5 });
     mockUpsertInvBalance.mockResolvedValue({ quantityOnHand: 8 });
     mockAdjustCustomerQty.mockResolvedValue({ quantity: 13 });
@@ -1796,12 +1791,6 @@ describe("reportWarehouseDamage", () => {
     const actor = { type: "user" as const, email: "wm@x.com", assignedWarehouseIds: ["other".padEnd(24, "0")] };
     await expect(reportWarehouseDamage(COMPANY_DAMAGE, actor)).rejects.toMatchObject({ status: 403 });
     expect(mockUpsertDamagedBalance).not.toHaveBeenCalled(); // rejected before any write
-  });
-
-  it("refuses serial/batch-tracked items (the damaged pool is quantity-only)", async () => {
-    mockRequireIrm.mockResolvedValue({ id: IRM_ID, name: "Router", trackSerialNumbers: true, trackBatchNumbers: false });
-    await expect(reportWarehouseDamage(COMPANY_DAMAGE)).rejects.toMatchObject({ status: 409 });
-    expect(mockUpsertDamagedBalance).not.toHaveBeenCalled();
   });
 
   it("refuses customer stock that isn't held at this warehouse", async () => {

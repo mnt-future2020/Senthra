@@ -16,6 +16,35 @@ const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
 export const PRF_ATTACHMENT_TYPES = ["pdf", "docx", "png", "jpg"] as const;
 
+/**
+ * The two document groups a purchase request keeps its files in.
+ *
+ * `quote` is the supplier's quotation package — the quote itself, a revision, the email it arrived
+ * in. `other` is everything supporting the request rather than pricing it: a specification, a
+ * comparison sheet, an approval or technical document.
+ *
+ * ONE attachment table, one explicit column. The alternative — a second table, or inferring the
+ * group from the label or from which picker the file came out of — puts the reviewer's screen on
+ * top of a guess, and the guess is unrecoverable once the row is written.
+ */
+export const PRF_DOCUMENT_TYPES = ["quote", "other"] as const;
+export type PrfDocumentType = (typeof PRF_DOCUMENT_TYPES)[number];
+
+/**
+ * How a stored `documentType` is read.
+ *
+ * The column is nullable so nothing had to be backfilled: every row written before the `other`
+ * group existed came out of a field labelled "Quote document(s)", so absent means `quote`. Anything
+ * unrecognised reads the same way — a stored value can only have got there through the enum below,
+ * so this branch is a floor, not a policy.
+ *
+ * Read-side ONLY. It must never become a query filter: Prisma+Mongo would not match the legacy rows
+ * whose field is absent (as opposed to null), which is exactly the set this exists to interpret.
+ */
+export function normalisePrfDocumentType(value: string | null | undefined): PrfDocumentType {
+  return value === "other" ? "other" : "quote";
+}
+
 const emptyToUndef = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
 
 const requiredDate = (label: string) =>

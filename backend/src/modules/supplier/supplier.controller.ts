@@ -62,3 +62,8 @@ export const deleteSupplier = asyncHandler(async (req, res) => {
   await supplierService.deleteSupplier(param(req, "id"), actorFrom(req));
   res.json({ ok: true });
 });
+
+// GET /suppliers/options — the complete active set, lean, for pickers.
+export const listSupplierOptions = asyncHandler(async (_req, res) => {
+  res.json({ options: await supplierService.listSupplierOptions() });
+});

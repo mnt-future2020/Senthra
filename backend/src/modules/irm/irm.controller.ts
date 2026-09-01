@@ -12,9 +12,15 @@ import type { CreateIrmItemInput, UpdateIrmItemInput } from "./irm.validation.js
 // on screen — a second copy is a second place for a filter to be forgotten, and the resulting file
 // gives no sign that it is wider or narrower than the list it came from.
 function listParamsFrom(req: Request): irmService.ListIrmItemsParams {
-  const { search, status, type, category, supplier, sort, page, pageSize } = req.query;
+  const { search, status, type, category, supplier, sort, page, pageSize, ids } = req.query;
   return {
     search: queryStr(search),
+    // The list route admits callers who were never granted the catalogue itself (a job planner
+    // picking kit lines). They get every field the picker needs and NOT the cost — see
+    // IRM_COST_PERMISSIONS. An admin principal has no permission array and sees everything.
+    includeCost: req.principal ? req.principal.type === "admin" || irmService.canReadIrmCost(req.principal.permissions) : false,
+    // ?ids=a,b,c — a narrowing lookup for callers that already hold the ids they need.
+    ids: queryStr(ids)?.split(",").map((v) => v.trim()).filter(Boolean),
     status: queryStr(status),
     type: queryStr(type),
     category: queryStr(category),

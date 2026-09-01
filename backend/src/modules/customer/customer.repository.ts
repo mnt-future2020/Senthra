@@ -1929,3 +1929,17 @@ export function findActiveStockEntries(filters: { warehouseId?: string; customer
     },
   });
 }
+
+/**
+ * Lean, complete, active-only options for pickers. Ordered by name — how people scan a dropdown.
+ *
+ * The column is `customerCode`, NOT `code` (unlike Supplier and Warehouse). It is mapped to `code`
+ * in the service so every picker consumes one option shape.
+ */
+export function findOptions(): Promise<{ id: string; customerCode: string; name: string }[]> {
+  return prisma.customer.findMany({
+    where: { deletedAt: null, status: "active" },
+    select: { id: true, customerCode: true, name: true },
+    orderBy: { name: "asc" },
+  });
+}

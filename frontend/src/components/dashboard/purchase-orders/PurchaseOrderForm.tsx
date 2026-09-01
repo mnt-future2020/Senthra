@@ -5,9 +5,14 @@ import { useRouter } from "next/navigation";
 import { CalendarDays, CheckCircle2, ChevronRight, Loader2, Package, Plus, RotateCcw, Trash2, Truck, Warehouse as WarehouseIcon } from "lucide-react";
 
 import * as poService from "@/services/purchase-order.service";
-import { listSuppliers } from "@/services/supplier.service";
+import { getSupplier, listSupplierOptions, type SupplierOption } from "@/services/supplier.service";
+import { withHistoricalOption } from "@/lib/historicalOption";
+import { supplierDetailNotice } from "@/lib/supplierPanel";
 import { listWarehouses, listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
+import { IrmItemPicker } from "@/components/dashboard/irm/IrmItemPicker";
+import { mergeIrmItems } from "@/components/dashboard/irm/irmItemPickerModel";
+import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
@@ -53,6 +58,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
   const router = useRouter();
   const guard = useNavigationGuard();
   const { pushToast } = useDashboard();
+  const { can } = useAuth();
 
   const o = order;
   const [supplierId, setSupplierId] = React.useState(o?.supplierId ?? "");
@@ -84,7 +90,10 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
       : [blankLine()],
   );
 
-  const [suppliers, setSuppliers] = React.useState<Supplier[]>([]);
+  // The COMPLETE active set, lean — see listSupplierOptions. The full record for the chosen
+  // supplier is fetched by id, so the dropdown can never hide one behind a page boundary.
+  const [suppliers, setSuppliers] = React.useState<SupplierOption[]>([]);
+  const [supplierDetail, setSupplierDetail] = React.useState<Supplier | null>(null);
   const [warehouses, setWarehouses] = React.useState<Warehouse[]>([]);
   // Active-warehouse OPTIONS for the per-row picker (create flow). Server-scoped: a Warehouse Manager
   // receives only their assigned warehouses, so the picker can never offer one they aren't allowed.
@@ -101,7 +110,11 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
 
   const { isLoading: refLoading } = useReferenceData(
     [
-      { label: "suppliers", load: () => listSuppliers({ status: "active", pageSize: 100 }), onData: (r) => setSuppliers(r.suppliers) },
+      { label: "suppliers", load: listSupplierOptions, onData: (opts: SupplierOption[]) => setSuppliers(opts) },
+      // EDIT only: the panel and payment-terms prefill describe the supplier already chosen.
+      ...(o?.supplierId
+        ? [{ label: "the supplier", load: () => getSupplier(o.supplierId), onData: (full: Supplier) => setSupplierDetail(full), onError: (err: unknown) => setSupplierNotice(supplierDetailNotice(err)) }]
+        : []),
       // Create: per-row warehouse picker from the SCOPED options endpoint (manager → only their
       // warehouses). Edit: full warehouses for the header + address panel (single-warehouse model).
       mode === "create"
@@ -118,20 +131,48 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
 
   useReportDirty("po-form", dirty && !saved);
 
-  const supplierPanel = suppliers.find((s) => s.id === supplierId) ?? o?.supplier ?? null;
+  const supplierPanel = supplierDetail && supplierDetail.id === supplierId ? supplierDetail : null;
+  // Non-null when the SELECTED supplier's record could not be read — see supplierDetailNotice.
+  const [supplierNotice, setSupplierNotice] = React.useState<string | null>(null);
+  // Ticket for the supplier-detail fetch, so a slow answer for a supplier the user has moved on from
+  // cannot write that supplier's payment terms onto the one now chosen.
+  const supplierSeq = React.useRef(0);
 
   // Picking a supplier pre-fills the (still-empty) payment-terms field from that supplier's
   // default, mirroring the backend's create-time default. Done in the event handler rather than
   // an effect so a user's own edit is never clobbered and we avoid a cascading render.
   const onPickSupplier = (id: string) => {
     setSupplierId(id);
-    if (!paymentTerms.trim()) {
-      const picked = suppliers.find((s) => s.id === id) ?? (id === o?.supplierId ? o?.supplier : null);
-      const resolved = resolveSupplierPaymentTerms(picked);
-      if (resolved) setPaymentTerms(resolved);
-    }
     touch();
     clearError("supplierId");
+    if (!id) {
+      // Bumped here too, so an in-flight answer cannot repopulate a panel the user has just cleared.
+      supplierSeq.current++;
+      setSupplierDetail(null);
+      setSupplierNotice(null);
+      return;
+    }
+    // ONE fetch for the supplier actually chosen. The payment-terms prefill waits for it and still
+    // never clobbers a value the user has typed.
+    //
+    // Every pick takes a ticket, and a stale answer is dropped. The panel happens to be safe already
+    // because it re-checks the id it holds, but the payment-terms prefill has no such check — so
+    // supplier A answering after B was chosen wrote A'S TERMS onto an order for B. A real commercial
+    // fact, silently wrong, on a field nobody would think to re-read.
+    const seq = ++supplierSeq.current;
+    void getSupplier(id).then(
+      (full) => {
+        if (seq !== supplierSeq.current) return;
+        setSupplierDetail(full);
+        setSupplierNotice(null);
+        setPaymentTerms((cur) => (cur.trim() ? cur : (resolveSupplierPaymentTerms(full) ?? cur)));
+      },
+      (err) => {
+        if (seq !== supplierSeq.current) return;
+        setSupplierDetail(null);
+        setSupplierNotice(supplierDetailNotice(err));
+      },
+    );
   };
 
   // Selected warehouse + its composed address, shown read-only so the user can see
@@ -157,6 +198,16 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
     return { map, list: items };
   }, [items]);
 
+  /**
+   * Label fallback for a saved line whose item is not in the page loaded at mount.
+   *
+   * On EDIT that used to render as an EMPTY picker on a line that is in fact set — inviting someone
+   * to "fix" it by re-picking, on an order that may already be out with a supplier. The order
+   * carries its own name + code for each line, so no extra request is needed to say what it is.
+   */
+  const savedItemRef = (irmItemId: string) =>
+    irmItemId ? (o?.items.find((i) => i.irmItemId === irmItemId)?.irmItem ?? null) : null;
+
   const goBack = () =>
     guard.attemptLeave(() => {
       if (window.history.length > 1) router.back();
@@ -169,12 +220,15 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
     touch();
     clearError("items");
   };
-  const onPickItem = (idx: number, irmItemId: string) => {
-    const item = itemOptions.map.get(irmItemId);
+  // Takes the WHOLE item, not an id, and merges it into `items` before setting the line. A search
+  // result — anything past the page loaded at mount — is not in that list, and the price/VAT prefill
+  // and the pack hint all read from it. Without the merge a picked item would have no details here.
+  const onPickItem = (idx: number, item: IrmItem) => {
+    setItems((prev) => mergeIrmItems(prev, [item]));
     updateLine(idx, {
-      irmItemId,
-      unitPrice: item?.standardCost != null ? item.standardCost.toFixed(2) : "",
-      vatRate: item?.vatRatePercent != null ? String(item.vatRatePercent) : "20",
+      irmItemId: item.id,
+      unitPrice: item.standardCost != null ? item.standardCost.toFixed(2) : "",
+      vatRate: item.vatRatePercent != null ? String(item.vatRatePercent) : "20",
     });
   };
   const addLine = () => { setLineRows((rows) => [...rows, blankLine()]); touch(); };
@@ -422,7 +476,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Supplier<RequiredMark /></label>
-                <Select value={supplierId} onChange={onPickSupplier} options={suppliers.map((s) => ({ value: s.id, label: `${s.name} (${s.code})` }))} placeholder={refLoading && !supplierId ? "Loading suppliers…" : "— Select a supplier —"} disabled={refLoading && !supplierId} ariaLabel="Supplier" invalid={Boolean(errors.supplierId)} />
+                <Select value={supplierId} onChange={onPickSupplier} options={withHistoricalOption(suppliers.map((s) => ({ value: s.id, label: `${s.name} (${s.code})` })), supplierId, o?.supplier?.name)} placeholder={refLoading && !supplierId ? "Loading suppliers…" : "— Select a supplier —"} disabled={refLoading && !supplierId} ariaLabel="Supplier" invalid={Boolean(errors.supplierId)} />
                 <FieldError id="err-supplierId" message={errors.supplierId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Choose who this order is being placed with.</p>
               </div>
@@ -431,7 +485,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
               {mode === "edit" && (
                 <div>
                   <label className={labelCls}>Delivery warehouse<RequiredMark /></label>
-                  <Select value={warehouseId} onChange={(v) => { setWarehouseId(v); touch(); clearError("warehouseId"); }} options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})${w.isDefault ? " — default" : ""}` }))} placeholder={refLoading && !warehouseId ? "Loading warehouses…" : "— Select a warehouse —"} disabled={refLoading && !warehouseId} ariaLabel="Delivery warehouse" invalid={Boolean(errors.warehouseId)} />
+                  <Select value={warehouseId} onChange={(v) => { setWarehouseId(v); touch(); clearError("warehouseId"); }} options={withHistoricalOption(warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})${w.isDefault ? " — default" : ""}` })), warehouseId, o?.warehouse?.name)} placeholder={refLoading && !warehouseId ? "Loading warehouses…" : "— Select a warehouse —"} disabled={refLoading && !warehouseId} ariaLabel="Delivery warehouse" invalid={Boolean(errors.warehouseId)} />
                   <FieldError id="err-warehouseId" message={errors.warehouseId} />
                   <p className="mt-1.5 text-[11px] text-[var(--faint)]">The warehouse this order delivers to.</p>
                 </div>
@@ -470,6 +524,18 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
             </div>
           </FormSection>
 
+          {/* The panel could not be loaded — say so, rather than rendering exactly like "no supplier
+              chosen". `/suppliers/options` is wider than `suppliers.view`, so a purchaser can pick a
+              supplier and then be refused this follow-up read; silence left them believing the
+              supplier simply had no details or terms on file. */}
+          {!supplierPanel && supplierNotice && supplierId && (
+            <FormSection title="Supplier information" description="Read-only — pulled from the supplier record.">
+              <p className="rounded-xl border border-dashed border-[var(--border)] px-3 py-4 text-xs text-[var(--muted)]">
+                {supplierNotice}
+              </p>
+            </FormSection>
+          )}
+
           {supplierPanel && (
             <FormSection title="Supplier information" description="Read-only — pulled from the supplier record.">
               <div className="grid gap-3 sm:grid-cols-2 text-sm">
@@ -500,7 +566,16 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
                       <div className={mode === "create" ? "grid gap-3 md:grid-cols-2" : undefined}>
                         <div className="min-w-0">
                           <label className={labelCls}>Item</label>
-                          <Select value={row.irmItemId} onChange={(v) => onPickItem(idx, v)} options={itemOptions.list.map((i) => ({ value: i.id, label: `${i.name} (${i.code})` }))} placeholder={refLoading && !row.irmItemId ? "Loading items…" : "— Select an item —"} disabled={refLoading && !row.irmItemId} ariaLabel="Item" />
+                          <IrmItemPicker
+                            value={row.irmItemId}
+                            selectedItem={pickedItem ?? savedItemRef(row.irmItemId)}
+                            seed={itemOptions.list}
+                            onSelect={(item) => onPickItem(idx, item)}
+                            canCreate={can("irm.create")}
+                            defaultSupplierId={supplierId}
+                            disabled={refLoading && !row.irmItemId}
+                            loading={refLoading}
+                          />
                           {pickedItem && supplierId && supplierLink?.supplierSku && (
                             <p className="mt-1.5 text-[11px] text-[var(--muted)]">Supplier item code: <span className="font-mono text-[var(--ink)]">{supplierLink.supplierSku}</span></p>
                           )}

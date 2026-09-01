@@ -36,5 +36,5 @@ export const finalize = asyncHandler(async (req, res) => {
   }
 
   const asset = await verifyFinalize(body, actor);
-  res.json(await attachTo(body.purpose, body.targetId, asset, body.label, actor));
+  res.json(await attachTo(body.purpose, body.targetId, asset, body.label, actor, body.documentType));
 });

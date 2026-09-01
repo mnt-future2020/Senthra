@@ -355,7 +355,7 @@ export function InventoryDetailPage({ initial }: { initial: InventoryDetailType 
     else router.push("/dashboard/inventory");
   };
 
-  const canMove = can("inventory.move") && inv.available > 0 && !inv.trackSerialNumbers && !inv.trackBatchNumbers;
+  const canMove = can("inventory.move") && inv.available > 0;
 
   return (
     <div className="space-y-5">

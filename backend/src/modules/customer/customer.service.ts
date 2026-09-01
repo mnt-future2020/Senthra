@@ -3010,3 +3010,23 @@ export async function listWarehouseStockEntries(
   const entries = await customerRepo.findStockEntriesByWarehouse(warehouseId, status);
   return entries.map((e) => toStockEntry(e as StockEntryRow));
 }
+
+/**
+ * The COMPLETE set of selectable customers, as the lean shape a picker needs.
+ *
+ * Uncapped and tiny, for the same reason as `listSupplierOptions`: the job form used to load
+ * `pageSize: 200` and hand it to a `<Select>`, so past that page a real customer had no row — and
+ * the shared Select renders its PLACEHOLDER for a value it cannot find, so an already-saved job
+ * would have read as "no customer". Mirrors `/warehouses/options`.
+ *
+ * ACTIVE only: an inactive customer must not be newly selectable. A job that already references one
+ * keeps showing it — the form appends the saved value marked "(inactive)".
+ *
+ * No addresses, contacts, sites or projects: this feeds a dropdown. Sites and projects are still
+ * fetched per customer by the existing endpoints once one is chosen.
+ */
+export async function listCustomerOptions(): Promise<{ id: string; code: string; name: string }[]> {
+  const rows = await customerRepo.findOptions();
+  // `customerCode` → `code`, so suppliers, warehouses and customers all hand pickers one shape.
+  return rows.map((c) => ({ id: c.id, code: c.customerCode, name: c.name }));
+}

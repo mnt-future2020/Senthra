@@ -664,7 +664,7 @@ describe("myHoldings — what is field-returnable", () => {
   // screen as "no hire to return" — while the units stayed in the van accruing charges.
   it("puts hired kit FIRST, so it can't be scrolled past", async () => {
     vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([
-      { irmItemId: IRM, quantityOnHand: 5, irmItem: { code: "IRM-0002", name: "CAT6", baseUnit: "Box", trackSerialNumbers: false, trackBatchNumbers: false } },
+      { irmItemId: IRM, quantityOnHand: 5, irmItem: { code: "IRM-0002", name: "CAT6", baseUnit: "Box" } },
     ] as never);
     vi.mocked(rentalCustodyRepo.findRentalHoldingsByEngineer).mockResolvedValue([holding()] as never);
     const out = await myHoldings(ENG);
@@ -1016,7 +1016,7 @@ describe("create (return) - the depot a hire goes back to", () => {
 
   it("leaves an IRM return alone - no depot read, no rental guard", async () => {
     vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValueOnce([{ irmItemId: IRM, quantityOnHand: 5 }] as never);
-    vi.mocked(irmRepo.findById).mockResolvedValueOnce({ id: IRM, name: "Cable Tie", code: "IRM-1", sku: null, baseUnit: "Each", status: "active", trackSerialNumbers: false, trackBatchNumbers: false } as never);
+    vi.mocked(irmRepo.findById).mockResolvedValueOnce({ id: IRM, name: "Cable Tie", code: "IRM-1", sku: null, baseUnit: "Each", status: "active" } as never);
     await create(
       returnInput({ lines: [{ source: "irm", irmItemId: IRM, itemName: "Cable Tie", qty: 2 }] }) as never,
       engineerActor,
@@ -1115,7 +1115,7 @@ describe("scanLookup — resolving a hire label", () => {
   });
 
   it("falls back to rental only after IRM misses, so one label never means two things", async () => {
-    vi.mocked(irmService.findActiveByCodeOrBarcode).mockResolvedValue({ id: IRM, name: "CAT6", code: "RNT-0007", baseUnit: "m", trackSerialNumbers: false, trackBatchNumbers: false } as never);
+    vi.mocked(irmService.findActiveByCodeOrBarcode).mockResolvedValue({ id: IRM, name: "CAT6", code: "RNT-0007", baseUnit: "m" } as never);
     vi.mocked(vsrRepo.findById).mockResolvedValue(request({ lines: [rentalLine({ source: "irm", irmItemId: IRM, rentalItemId: null, itemName: "CAT6" })] }) as never);
     vi.mocked(inventoryRepo.findBalancePair).mockResolvedValue({ quantityOnHand: 9 } as never);
     const out = await scanLookup({ requestId: REQ_ID, warehouseId: WH, code: "RNT-0007" } as never, admin);
@@ -1265,7 +1265,7 @@ describe("walk-in - issuing hired kit at the counter", () => {
   });
 
   it("leaves the COMPANY-STOCK walk-in path untouched", async () => {
-    vi.mocked(irmRepo.findById).mockResolvedValue({ id: IRM, name: "Cable Tie", code: "IRM-1", sku: null, baseUnit: "Each", status: "active", trackSerialNumbers: false, trackBatchNumbers: false } as never);
+    vi.mocked(irmRepo.findById).mockResolvedValue({ id: IRM, name: "Cable Tie", code: "IRM-1", sku: null, baseUnit: "Each", status: "active" } as never);
     vi.mocked(inventoryRepo.findBalancesByItemsAndWarehouses).mockResolvedValue([{ irmItemId: IRM, warehouseId: WH, quantityOnHand: 4 }] as never);
     await walkIn(walkInInput({ lines: [{ source: "irm", irmItemId: IRM, itemName: "Cable Tie", qty: 2 }] }) as never, admin);
     const [, lines] = vi.mocked(vsrRepo.createRequest).mock.calls[0]!;
@@ -1275,7 +1275,7 @@ describe("walk-in - issuing hired kit at the counter", () => {
   });
 
   it("refuses a company-stock line the shelf cannot cover, unchanged", async () => {
-    vi.mocked(irmRepo.findById).mockResolvedValue({ id: IRM, name: "Cable Tie", code: "IRM-1", sku: null, baseUnit: "Each", status: "active", trackSerialNumbers: false, trackBatchNumbers: false } as never);
+    vi.mocked(irmRepo.findById).mockResolvedValue({ id: IRM, name: "Cable Tie", code: "IRM-1", sku: null, baseUnit: "Each", status: "active" } as never);
     vi.mocked(inventoryRepo.findBalancesByItemsAndWarehouses).mockResolvedValue([{ irmItemId: IRM, warehouseId: WH, quantityOnHand: 1 }] as never);
     await expect(walkIn(walkInInput({ lines: [{ source: "irm", irmItemId: IRM, itemName: "Cable Tie", qty: 5 }] }) as never, admin))
       .rejects.toThrow(/only 1 in stock/i);
@@ -1340,7 +1340,7 @@ describe("boundaries", () => {
       lines: [{ ...rentalLine({ source: "irm", irmItemId: IRM, rentalItemId: null, itemName: "CAT6", code: "IRM-0002" }) }],
     });
     vi.mocked(vsrRepo.findById).mockResolvedValue(legacy as never);
-    vi.mocked(irmService.findActiveByCodeOrBarcode).mockResolvedValue({ id: IRM, name: "CAT6", code: "IRM-0002", baseUnit: "m", trackSerialNumbers: false, trackBatchNumbers: false } as never);
+    vi.mocked(irmService.findActiveByCodeOrBarcode).mockResolvedValue({ id: IRM, name: "CAT6", code: "IRM-0002", baseUnit: "m" } as never);
     vi.mocked(inventoryRepo.findBalancePair).mockResolvedValue({ quantityOnHand: 4 } as never);
     const out = await scanLookup({ requestId: REQ_ID, warehouseId: WH, code: "IRM-0002" } as never, admin);
     expect(out).toMatchObject({ source: "irm", irmItemId: IRM, rentalItemId: null, available: 4 });
@@ -1612,9 +1612,9 @@ describe("create (return) — two hires from different depots cannot share one r
   it("leaves an IRM line free to ride along to the hire's depot", async () => {
     // Company stock has a balance at every warehouse, so it can be booked in wherever the hire goes.
     vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([
-      { irmItemId: IRM, quantityOnHand: 5, irmItem: { code: "IRM-0002", name: "CAT6", baseUnit: "m", trackSerialNumbers: false, trackBatchNumbers: false } },
+      { irmItemId: IRM, quantityOnHand: 5, irmItem: { code: "IRM-0002", name: "CAT6", baseUnit: "m" } },
     ] as never);
-    vi.mocked(irmRepo.findById).mockResolvedValue({ id: IRM, code: "IRM-0002", name: "CAT6", baseUnit: "m", sku: null, status: "active", trackSerialNumbers: false, trackBatchNumbers: false } as never);
+    vi.mocked(irmRepo.findById).mockResolvedValue({ id: IRM, code: "IRM-0002", name: "CAT6", baseUnit: "m", sku: null, status: "active" } as never);
     await create({
       type: "return", reason: "tester plus cable", priority: "normal", warehouseId: WH,
       lines: [

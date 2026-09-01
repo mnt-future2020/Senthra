@@ -38,7 +38,6 @@ describe("createGoodsReceiptSchema", () => {
     ["fractional accepted", { ...base, items: [{ purchaseOrderItemId: POI, receivedQuantity: 3, acceptedQuantity: 2.5 }] }],
     ["duplicate PO line", { ...base, items: [{ purchaseOrderItemId: POI, receivedQuantity: 1, acceptedQuantity: 1 }, { purchaseOrderItemId: POI, receivedQuantity: 2, acceptedQuantity: 2 }] }],
     ["invalid quality status", { ...base, qualityStatus: "weird" }],
-    ["batch quantity < 1", { ...base, items: [{ purchaseOrderItemId: POI, receivedQuantity: 2, acceptedQuantity: 2, batches: [{ batchNumber: "B1", quantity: 0 }] }] }],
   ])("rejects: %s", (_label, payload) => {
     expect(createGoodsReceiptSchema.safeParse(payload).success).toBe(false);
   });

@@ -44,13 +44,6 @@ const optionalDate = z.preprocess(
 const intQty = (label: string) =>
   z.coerce.number({ error: `${label} is required.` }).int(`${label} must be a whole number.`).min(0, `${label} can't be negative.`).max(10_000_000);
 
-// A batch / lot line (only meaningful when the IRM item tracks batches).
-const batchSchema = z.object({
-  batchNumber: z.string().trim().min(1, "Batch number is required.").max(120),
-  expiryDate: optionalDate,
-  quantity: z.coerce.number({ error: "Batch quantity is required." }).int("Batch quantity must be a whole number.").min(1, "Batch quantity must be at least 1.").max(10_000_000),
-});
-
 // One received line — receives against ONE PO line.
 const lineSchema = z
   .object({
@@ -62,8 +55,6 @@ const lineSchema = z
     // real number (or a numeric string from a form) may reach the coercion.
     acceptedQuantity: z.preprocess(numericOnly, intQty("Accepted quantity")),
     notes: z.string().trim().max(2000).optional(),
-    serials: z.array(z.string().trim().min(1, "Serial number can't be blank.").max(120)).max(5000, "Too many serial numbers on one line.").optional(),
-    batches: z.array(batchSchema).max(500, "Too many batches on one line.").optional(),
   })
   .refine((l) => l.acceptedQuantity <= l.receivedQuantity, {
     message: "Accepted quantity can't exceed received quantity.",

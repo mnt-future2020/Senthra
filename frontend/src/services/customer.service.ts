@@ -861,3 +861,15 @@ export async function downloadOwnReportXlsx(q: CustomerReportQuery): Promise<{ c
   downloadBlob(blob, filenameFromDisposition(headers["content-disposition"] ?? null, fallback));
   return { capped: String(headers["x-export-capped"] ?? "") === "true" };
 }
+
+/** Lean {id, code, name} for pickers. See `listCustomerOptions` on the server for why this exists. */
+export interface CustomerOption {
+  id: string;
+  code: string;
+  name: string;
+}
+
+/** The COMPLETE set of active customers, for dropdowns. See `listSupplierOptions` for the rationale. */
+export function listCustomerOptions(): Promise<CustomerOption[]> {
+  return api<{ options: CustomerOption[] }>("/customers/options").then((r) => r.options);
+}

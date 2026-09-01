@@ -2,11 +2,11 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Loader2, Plus, Trash2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 
 import * as grnService from "@/services/goods-in.service";
 import { listPurchaseOrders } from "@/services/purchase-order.service";
-import { listIrmItems, generateBarcode, getIrmItem } from "@/services/irm.service";
+import { generateBarcode, getIrmItem } from "@/services/irm.service";
 import { printLabels } from "@/lib/printBarcode";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
@@ -28,9 +28,6 @@ const GRN_LIST = "/dashboard/goods-in";
 const QUALITY = ["passed", "partial", "failed"] as const;
 const QUALITY_LABELS: Record<string, string> = { passed: "Passed", partial: "Partial", failed: "Failed" };
 
-// `_key` is a stable, frontend-only React key (never sent to the backend) so batch rows keep their
-// identity across add/remove and controlled inputs don't desync when a middle row is deleted.
-type BatchRow = { _key: string; batchNumber: string; expiryDate: string; quantity: string };
 type LineState = {
   purchaseOrderItemId: string;
   irmItemId: string;
@@ -40,13 +37,9 @@ type LineState = {
   baseUnit: string | null;
   ordered: number;
   previouslyReceived: number;
-  trackSerials: boolean;
-  trackBatches: boolean;
   receive: string;
   accepted: string;
   notes: string;
-  serialsText: string;
-  batches: BatchRow[];
   // Label printing — never sent to the backend. `barcodeDataUri` is lazy-loaded per item (the IRM
   // list endpoint omits the image to stay light); `copies` blank means "use the accepted qty".
   barcodeDataUri: string | null;
@@ -63,41 +56,34 @@ const blank = (s: string) => s.trim() === "";
 // nobody made. Until it's filled, the Damaged cell shows "—" rather than a misleading number.
 const acceptedOf = (l: LineState) => Math.max(0, num(l.accepted));
 const damagedOf = (l: LineState) => Math.max(0, num(l.receive) - num(l.accepted));
-const parseSerials = (text: string) => text.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
 
 // One sticker per accepted unit by default — staff put away N boxes and label each one. A blank
 // box tracks the accepted qty live; typing a number pins it (e.g. reprinting 3 that smudged).
 const defaultCopies = (accepted: number) => Math.max(1, accepted);
-// Only barcode-able lines get a label panel: serial/batch-tracked items would print an identical
-// sticker on every unit AND are rejected by scan lookup, so a label there is a dead sticker.
-const canLabel = (l: LineState) => !l.trackSerials && !l.trackBatches && Boolean(l.itemCode);
-
-type ItemFlags = { serials: boolean; batches: boolean; code: string };
+// A line can only carry a label once its catalogue code is known.
+const canLabel = (l: LineState) => Boolean(l.itemCode);
 
 // Build the received-item lines for a picked PO (only lines with remaining > 0). Pure —
 // shared by the user's manual pick and the ?po= deep-link preselect, so both paths
 // produce identical rows (incl. serial/batch tracking flags).
-function buildLines(po: PurchaseOrder, flags: Map<string, ItemFlags>): LineState[] {
+function buildLines(po: PurchaseOrder): LineState[] {
   return po.items
     .filter((i) => i.quantity - i.receivedQuantity > 0)
     .map((i) => {
-      const f = flags.get(i.irmItemId);
       return {
         purchaseOrderItemId: i.id,
         irmItemId: i.irmItemId,
-        itemCode: f?.code ?? "",
+        // Blank until the per-line barcode effect resolves it (that same fetch carries the label
+        // image, so the code arrives with it rather than costing a second round trip).
+        itemCode: "",
         itemName: i.itemName,
         sku: i.sku,
         baseUnit: i.baseUnit,
         ordered: i.quantity,
         previouslyReceived: i.receivedQuantity,
-        trackSerials: f?.serials ?? false,
-        trackBatches: f?.batches ?? false,
         receive: "",
         accepted: "",
         notes: "",
-        serialsText: "",
-        batches: [],
         barcodeDataUri: null,
         copies: "",
       };
@@ -158,13 +144,9 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
           baseUnit: i.baseUnit,
           ordered: i.orderedQuantity,
           previouslyReceived: i.previouslyReceived,
-          trackSerials: i.irmItem?.trackSerialNumbers ?? false,
-          trackBatches: i.irmItem?.trackBatchNumbers ?? false,
           receive: String(i.receivedQuantity),
           accepted: String(i.acceptedQuantity),
           notes: i.notes ?? "",
-          serialsText: i.serials.map((s) => s.serialNumber).join("\n"),
-          batches: i.batches.map((b) => ({ _key: crypto.randomUUID(), batchNumber: b.batchNumber, expiryDate: dateInput(b.expiryDate), quantity: String(b.quantity) })),
           barcodeDataUri: null,
           copies: "",
         }))
@@ -184,7 +166,6 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   // True once the receivable-PO fetch settles — lets us tell "still loading" (don't nag) from
   // "genuinely none" (show a clear empty-state instead of a bare placeholder).
   const [posLoaded, setPosLoaded] = React.useState(false);
-  const [flags, setFlags] = React.useState<Map<string, ItemFlags>>(new Map());
   // Barcode label state. `barcodeBusyId` is the IRM item currently generating (one at a time);
   // `loadedBarcodeIds` remembers which items' images we've already fetched so a re-render or a
   // PO reselect never refetches. Failures aren't cached, so they retry.
@@ -211,25 +192,25 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   React.useEffect(() => {
     if (mode !== "create") return;
     let active = true;
-    // Load in one pass so the ?po= preselect can run with BOTH the receivable POs and the
-    // IRM tracking flags resolved (otherwise a preselected line could miss serial/batch
-    // capture). allSettled keeps the two independent — one failing never blocks the other.
-    Promise.allSettled([
-      // receivable = sent + supplier_accepted + partially_received. `warehouse` scopes the list
-      // when opened from a warehouse's Incoming-stock tab (undefined on the global GRN page →
-      // all warehouses).
-      listPurchaseOrders({ statuses: ["sent", "supplier_accepted", "partially_received"], warehouse: presetWarehouseId ?? undefined, pageSize: 100 }),
-      listIrmItems({ status: "active", pageSize: 200 }), // which lines capture serials / batches
-    ]).then(([receivable, irm]) => {
+    // The receivable PO list — the only thing this form loads before a ?po= preselect can run.
+    // receivable = sent + supplier_accepted + partially_received. `warehouse` scopes the list when
+    // opened from a warehouse's Incoming-stock tab (undefined on the global GRN page → all
+    // warehouses). A failure is non-fatal: the picker is simply empty and says so.
+    listPurchaseOrders({
+      statuses: ["sent", "supplier_accepted", "partially_received"],
+      warehouse: presetWarehouseId ?? undefined,
+      pageSize: 100,
+    }).then(
+      (receivable) => applyPos(receivable.purchaseOrders),
+      // Non-fatal, and it MUST still mark the load as settled: `posLoaded` is what flips the picker
+      // from "loading" to "no open purchase orders", so swallowing the failure without it would
+      // leave the form spinning forever on a list that is never coming.
+      () => applyPos([]),
+    );
+
+    function applyPos(pos: PurchaseOrder[]) {
       if (!active) return;
-      const pos = receivable.status === "fulfilled" ? receivable.value.purchaseOrders : [];
-      const flagMap = new Map(
-        (irm.status === "fulfilled" ? irm.value.items : []).map(
-          (i) => [i.id, { serials: i.trackSerialNumbers, batches: i.trackBatchNumbers, code: i.code }] as const,
-        ),
-      );
       setReceivablePos(pos);
-      setFlags(flagMap);
       setPosLoaded(true);
 
       // Preselect a deep-linked PO once. This is NOT a user edit, so it must not set the
@@ -239,12 +220,12 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
         const po = pos.find((p) => p.id === presetPoId);
         if (po) {
           setPoId(po.id);
-          setLines(buildLines(po, flagMap));
+          setLines(buildLines(po));
         } else {
           pushToast("That purchase order isn't available to receive.", "info");
         }
       }
-    });
+    }
     return () => { active = false; };
   }, [mode, presetPoId, presetWarehouseId, pushToast]);
 
@@ -253,8 +234,8 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   // Lazy-load the barcode image for each labelable line (the IRM list endpoint omits barcodeDataUri
   // to stay light even with 100+ barcoded items). A GRN has a handful of lines, so they're fetched
   // in parallel; allSettled keeps one failure from blanking the rest. Also backfills itemCode when
-  // the flags fetch failed. This is NOT a user edit — it must never set the dirty flag.
-  const labelableIds = lines.filter((l) => !l.trackSerials && !l.trackBatches).map((l) => l.irmItemId).join(",");
+  // the item lookup failed. This is NOT a user edit — it must never set the dirty flag.
+  const labelableIds = lines.map((l) => l.irmItemId).join(",");
   React.useEffect(() => {
     const ids = labelableIds.split(",").filter((id) => id && !loadedBarcodeIds.current.has(id));
     if (ids.length === 0) return;
@@ -317,7 +298,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
     clearError("purchaseOrderId");
     clearError("items");
     const po = receivablePos.find((p) => p.id === id);
-    setLines(po ? buildLines(po, flags) : []);
+    setLines(po ? buildLines(po) : []);
   };
 
   const clearError = (f: string) => setErrors((p) => { if (!p[f]) return p; const n = { ...p }; delete n[f]; return n; });
@@ -332,11 +313,6 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
     touch();
     clearError("items");
   };
-  const addBatch = (idx: number) => updateLine(idx, { batches: [...lines[idx].batches, { _key: crypto.randomUUID(), batchNumber: "", expiryDate: "", quantity: "" }] });
-  const updateBatch = (idx: number, bi: number, patch: Partial<BatchRow>) =>
-    updateLine(idx, { batches: lines[idx].batches.map((b, i) => (i === bi ? { ...b, ...patch } : b)) });
-  const removeBatch = (idx: number, bi: number) => updateLine(idx, { batches: lines[idx].batches.filter((_, i) => i !== bi) });
-
   const validate = (): Record<string, string> => {
     const errs: Record<string, string> = {};
     if (mode === "create" && !poId) errs.purchaseOrderId = "Select a purchase order.";
@@ -359,11 +335,6 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
       if (blank(l.accepted)) { errs.items = `${l.itemName}: enter the accepted quantity (0 if the whole line was rejected).`; break; }
       if (!Number.isInteger(accepted)) { errs.items = `${l.itemName}: accepted quantity must be a whole number.`; break; }
       if (accepted > receive) { errs.items = `${l.itemName}: accepted can't exceed received.`; break; }
-      if (l.trackSerials && parseSerials(l.serialsText).length !== accepted) { errs.items = `${l.itemName}: enter exactly ${accepted} serial number(s).`; break; }
-      if (l.trackBatches) {
-        const sum = l.batches.reduce((a, b) => a + num(b.quantity), 0);
-        if (sum !== accepted) { errs.items = `${l.itemName}: batch quantities must total ${accepted}.`; break; }
-      }
     }
     return errs;
   };
@@ -386,10 +357,6 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
         receivedQuantity: num(l.receive),
         acceptedQuantity: num(l.accepted),
         notes: l.notes.trim() || undefined,
-        serials: l.trackSerials ? parseSerials(l.serialsText) : undefined,
-        batches: l.trackBatches
-          ? l.batches.map((b) => ({ batchNumber: b.batchNumber.trim(), expiryDate: b.expiryDate || undefined, quantity: num(b.quantity) }))
-          : undefined,
       })),
   });
 
@@ -533,7 +500,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                 <label className={labelCls}>Purchase order<RequiredMark /></label>
                 {mode === "create" ? (
                   <>
-                    <Select value={poId} onChange={(v) => onPickPo(v)} options={receivablePos.map((p) => ({ value: p.id, label: `${p.code} — ${p.supplierName ?? p.supplier?.name ?? ""} (${PO_STATUS_LABELS[p.status] ?? p.status})` }))} placeholder="— Select a purchase order —" ariaLabel="Purchase order" invalid={Boolean(errors.purchaseOrderId)} />
+                    <Select value={poId} onChange={onPickPo} options={receivablePos.map((p) => ({ value: p.id, label: `${p.code} — ${p.supplierName ?? p.supplier?.name ?? ""} (${PO_STATUS_LABELS[p.status] ?? p.status})` }))} placeholder="— Select a purchase order —" ariaLabel="Purchase order" invalid={Boolean(errors.purchaseOrderId)} />
                     <FieldError message={errors.purchaseOrderId} />
                     {posLoaded && receivablePos.length === 0 ? (
                       <p className="mt-1.5 text-[11px] font-semibold text-[var(--muted)]">
@@ -617,8 +584,6 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                 {lines.map((l, idx) => {
                   const remaining = l.ordered - l.previouslyReceived;
                   const accepted = acceptedOf(l);
-                  const batchSum = l.batches.reduce((a, b) => a + num(b.quantity), 0);
-                  const serialCount = parseSerials(l.serialsText).length;
                   // Live, per-field validation (mirrors the submit-time checks) so an
                   // over-receive / over-damage is flagged the moment it's typed.
                   const receiveNum = num(l.receive);
@@ -694,32 +659,6 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                           {l.barcodeDataUri && l.copies.trim() === "" && (
                             <p className="mt-1.5 text-[11px] text-[var(--faint)]">One label per accepted unit.</p>
                           )}
-                        </div>
-                      )}
-
-                      {l.trackSerials && (
-                        <div className="mt-3">
-                          <label className={labelCls}>Serial numbers (one per line)</label>
-                          <textarea className={inputCls} rows={Math.min(6, Math.max(2, accepted))} value={l.serialsText} onChange={(e) => updateLine(idx, { serialsText: e.target.value })} placeholder="One serial per accepted unit" />
-                          <p className={`mt-1 text-[11px] ${serialCount === accepted ? "text-[var(--faint)]" : "text-[var(--neg)]"}`}>{serialCount} of {accepted} serial number(s) entered.</p>
-                        </div>
-                      )}
-
-                      {l.trackBatches && (
-                        <div className="mt-3">
-                          <label className={labelCls}>Batches</label>
-                          <div className="space-y-2">
-                            {l.batches.map((b, bi) => (
-                              <div key={b._key} className="grid grid-cols-2 gap-2 lg:grid-cols-12">
-                                <input className={`${inputCls} col-span-2 lg:col-span-5`} value={b.batchNumber} onChange={(e) => updateBatch(idx, bi, { batchNumber: e.target.value })} maxLength={120} placeholder="Batch / lot number" />
-                                <input className={`${inputCls} lg:col-span-4`} type="date" value={b.expiryDate} onChange={(e) => updateBatch(idx, bi, { expiryDate: e.target.value })} />
-                                <NumberInput className={`${inputCls} lg:col-span-2`} min={1} value={b.quantity} onChange={(e) => updateBatch(idx, bi, { quantity: e.target.value })} placeholder="Qty" />
-                                <button type="button" onClick={() => removeBatch(idx, bi)} className="col-span-2 flex items-center justify-center rounded-lg p-2 text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--neg)] lg:col-span-1" aria-label="Remove batch"><Trash2 className="h-4 w-4" /></button>
-                              </div>
-                            ))}
-                            <button type="button" onClick={() => addBatch(idx)} className="flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--border)] px-3 py-1.5 text-xs font-bold text-[var(--accent)] hover:bg-[var(--surface-2)]"><Plus className="h-3.5 w-3.5" /> Add batch</button>
-                            <p className={`text-[11px] ${batchSum === accepted ? "text-[var(--faint)]" : "text-[var(--neg)]"}`}>Batch total {batchSum} of {accepted} accepted.</p>
-                          </div>
                         </div>
                       )}
                     </div>

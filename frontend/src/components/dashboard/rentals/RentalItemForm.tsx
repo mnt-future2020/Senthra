@@ -14,6 +14,7 @@ import type { UserStatus } from "@/types/user";
 import { CreatableSelect } from "@/components/ui/CreatableSelect";
 import { Select } from "@/components/ui/Select";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { ghostBtn, hintCls, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
@@ -38,7 +39,20 @@ const RENTAL_LIST = "/dashboard/inventory?tab=rental&rental=catalogue";
  * page CHROME is identical to it all the same — sticky header with Back/Cancel/Save, titled
  * sections, summary aside — because a shorter form is not a different kind of page.
  */
-export function RentalItemForm({ item }: { item?: RentalItem }) {
+export function RentalItemForm({
+  item,
+  initialName,
+  onCreated,
+  onCancel,
+}: {
+  item?: RentalItem;
+  /** Seeds the name — what the user typed into a picker that found nothing. Create only. */
+  initialName?: string;
+  /** Embedded: hand the created item back instead of navigating to its detail page. */
+  onCreated?: (created: RentalItem) => void;
+  /** Embedded: close the host instead of navigating back. */
+  onCancel?: () => void;
+}) {
   const router = useRouter();
   const guard = useNavigationGuard();
   const { can } = useAuth();
@@ -46,7 +60,15 @@ export function RentalItemForm({ item }: { item?: RentalItem }) {
   const editing = Boolean(item);
   const o = item;
 
-  const [name, setName] = React.useState(o?.name ?? "");
+  // Embedded when a caller wants the created item back. Derived, so the two can never disagree.
+  const embedded = Boolean(onCreated);
+  // Seeded on CREATE only: honouring it while editing would silently rewrite an existing item's
+  // name the instant the form opened. Mirrored into the dirty BASELINE below, so a seeded form does
+  // not open already reporting unsaved changes and challenge a user who typed nothing here.
+  const seededName = editing ? "" : (initialName?.trim() ?? "");
+  const [confirmClose, setConfirmClose] = React.useState(false);
+
+  const [name, setName] = React.useState(o?.name ?? seededName);
   const [description, setDescription] = React.useState(o?.description ?? "");
   const [categoryId, setCategoryId] = React.useState(o?.rentalCategoryId ?? "");
   const [status, setStatus] = React.useState<"active" | "inactive">(o?.status ?? "active");
@@ -91,7 +113,9 @@ export function RentalItemForm({ item }: { item?: RentalItem }) {
   const initialKey = React.useMemo(
     () =>
       JSON.stringify({
-        name: o?.name ?? "",
+        // The seed came from what the user already typed into the picker, so it is the
+        // baseline, not an edit — otherwise Cancel challenges someone who touched nothing here.
+        name: o?.name ?? seededName,
         description: o?.description ?? "",
         // On create the category is auto-preselected to the first active one — the baseline must
         // mirror that default, or the preselect alone reads as an edit.
@@ -100,15 +124,26 @@ export function RentalItemForm({ item }: { item?: RentalItem }) {
         baseUnit: o?.baseUnit ?? "Each",
         notes: o?.notes ?? "",
       }),
-    [o, editing, categories],
+    [o, editing, categories, seededName],
   );
   useReportDirty("rental-item-form", !saved && liveKey !== initialKey);
 
-  const goBack = () =>
+  const isDirty = !saved && liveKey !== initialKey;
+
+  const goBack = () => {
+    if (onCancel) {
+      // Embedded: ask about THIS form only. `guard.attemptLeave` reports on every form registered in
+      // the app, and the request behind the overlay is essentially always dirty — routing the close
+      // through it would challenge the user every single time, even having typed nothing here.
+      if (isDirty) setConfirmClose(true);
+      else onCancel();
+      return;
+    }
     guard.attemptLeave(() => {
       if (window.history.length > 1) router.back();
       else router.push(RENTAL_LIST);
     });
+  };
 
   const clearError = (field: string) =>
     setErrors((prev) => {
@@ -161,7 +196,11 @@ export function RentalItemForm({ item }: { item?: RentalItem }) {
       // Before navigating: the guard must not challenge a departure the save itself caused.
       setSaved(true);
       pushToast(editing ? "Rental item updated." : `Rental item ${savedItem.code} created.`, "success");
-      router.replace(`/dashboard/rentals/${savedItem.code}`);
+      // Embedded: the item is persisted exactly as it would be from the catalogue page — same
+      // endpoint, same schema, same server-allocated code and audit entry. Only the DESTINATION
+      // differs: hand it back rather than navigating away and unmounting the request behind it.
+      if (!editing && onCreated) onCreated(savedItem);
+      else router.replace(`/dashboard/rentals/${savedItem.code}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Could not save the rental item.";
       setError(msg);
@@ -176,7 +215,13 @@ export function RentalItemForm({ item }: { item?: RentalItem }) {
     <form onSubmit={submit} className="space-y-6">
       <FormPageHeader
         title={editing ? `Edit ${o?.name ?? "rental item"}` : "Add rental item"}
-        subtitle={editing && o ? o.code : "A new item the company can hire"}
+        subtitle={
+          editing && o
+            ? o.code
+            : embedded
+              ? "A new item the company can hire — the request you were filling in is kept open behind this"
+              : "A new item the company can hire"
+        }
         onBack={goBack}
         actions={
           <>
@@ -337,6 +382,22 @@ export function RentalItemForm({ item }: { item?: RentalItem }) {
           </FormAsideCard>
         </div>
       </div>
+      {/* Embedded only. The app-wide guard cannot serve here (it answers for every mounted form,
+          and the request behind the overlay is always dirty), so closing a part-filled rental item
+          asks its own question. Portals out and stops submit/reset at its panel, so it is safe
+          inside this <form>. */}
+      <ConfirmDialog
+        open={confirmClose}
+        title="Discard this new rental item?"
+        message="You've started filling in a rental item. Closing now discards it — nothing has been saved yet, and the request behind this is untouched either way."
+        confirmLabel="Discard item"
+        danger
+        onConfirm={() => {
+          setConfirmClose(false);
+          onCancel?.();
+        }}
+        onClose={() => setConfirmClose(false)}
+      />
     </form>
   );
 }

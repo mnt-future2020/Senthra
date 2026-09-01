@@ -20,18 +20,6 @@ export interface GrnWarehouseRef {
   address: string | null;
 }
 
-export interface GrnSerial {
-  id: string;
-  serialNumber: string;
-}
-
-export interface GrnBatch {
-  id: string;
-  batchNumber: string;
-  expiryDate: string | null;
-  quantity: number;
-}
-
 export interface GrnItem {
   id: string;
   purchaseOrderItemId: string;
@@ -45,9 +33,7 @@ export interface GrnItem {
   damagedQuantity: number;
   acceptedQuantity: number;
   notes: string | null;
-  serials: GrnSerial[];
-  batches: GrnBatch[];
-  irmItem: { id: string; code: string; name: string; status: string; trackSerialNumbers: boolean; trackBatchNumbers: boolean; trackInventory: boolean } | null;
+  irmItem: { id: string; code: string; name: string; status: string; trackInventory: boolean } | null;
 }
 
 export interface GrnAttachment {

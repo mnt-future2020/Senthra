@@ -7,6 +7,10 @@ import { AlertTriangle, Loader2, PackagePlus } from "lucide-react";
 import * as inventoryService from "@/services/inventory.service";
 import type { StockAdjustment, StockAdjustmentReason } from "@/services/inventory.service";
 import { listIrmItems, generateBarcode, getIrmItem } from "@/services/irm.service";
+import type { IrmItem } from "@/types/irm";
+import { IrmItemPicker } from "@/components/dashboard/irm/IrmItemPicker";
+import { mergeIrmItems, missingIrmIds } from "@/components/dashboard/irm/irmItemPickerModel";
+import { useIrmItemsByIds } from "@/hooks/useIrmItemsByIds";
 import { listWarehouses } from "@/services/warehouse.service";
 import { printLabels } from "@/lib/printBarcode";
 import { useAuth } from "@/hooks/useAuth";
@@ -32,7 +36,11 @@ const REASONS: { value: StockAdjustmentReason; label: string }[] = [
   { value: "other", label: "Other" },
 ];
 
-type ItemOption = { id: string; code: string; name: string; sku: string | null; baseUnit: string | null; barcodeDataUri: string | null };
+/**
+ * What this screen may act on. Applied to the picker's SEED and to its SEARCH RESULTS alike —
+ * enforced on only one of them, an unusable row would appear the moment someone typed.
+ */
+const receivable = (i: IrmItem) => i.trackInventory;
 type WarehouseOption = { id: string; name: string; code: string };
 
 export function AddStockForm() {
@@ -54,7 +62,7 @@ export function AddStockForm() {
   // When launched from a specific warehouse (?warehouse=), lock that field.
   const lockedWarehouseId = params.get("warehouse") ?? "";
 
-  const [items, setItems] = React.useState<ItemOption[]>([]);
+  const [items, setItems] = React.useState<IrmItem[]>([]);
   const [warehouses, setWarehouses] = React.useState<WarehouseOption[]>([]);
 
   const [irmItemId, setIrmItemId] = React.useState(params.get("item") ?? "");
@@ -79,6 +87,18 @@ export function AddStockForm() {
   // barcode lazily fetched, and remember the ids already loaded so we don't refetch on reselect.
   const [barcodeLoadingId, setBarcodeLoadingId] = React.useState<string | null>(null);
   const loadedBarcodeIds = React.useRef<Set<string>>(new Set());
+  /**
+   * Fetched/generated barcode images, keyed by item id — NOT patched into `items`.
+   *
+   * Patching the row was an ordering trap. On a deep link (`?item=<id>`) naming an item outside the
+   * page loaded at mount, this fetch and the by-ids resolve race: if the fetch wins, the row it
+   * wants to patch is not in `items` yet, the `map` matches nothing, the image is dropped — and
+   * because the id is already marked loaded, nothing ever asks again. The Print-label control then
+   * never appears on a form that has an item selected.
+   *
+   * A map keyed by id has no such dependency: it does not care whether, or when, the row arrives.
+   */
+  const [barcodeById, setBarcodeById] = React.useState<Record<string, string | null>>({});
 
   const touch = () => setDirty(true);
   const clearError = (f: string) => setErrors((p) => { if (!p[f]) return p; const n = { ...p }; delete n[f]; return n; });
@@ -91,7 +111,9 @@ export function AddStockForm() {
     listIrmItems({ status: "active", pageSize: 200 }).then(
       // barcodeDataUri is intentionally NOT returned by the list endpoint (kept light even with
       // 100+ barcoded items); it's lazy-loaded for the selected item below.
-      (r) => active && setItems(r.items.filter((i) => i.trackInventory && !i.trackSerialNumbers && !i.trackBatchNumbers).map((i) => ({ id: i.id, code: i.code, name: i.name, sku: i.sku, baseUnit: i.baseUnit, barcodeDataUri: i.barcodeDataUri ?? null }))),
+      // A bounded FIRST PAGE for the picker to show before anything is typed — no longer the whole
+      // world, because the picker searches the rest server-side.
+      (r) => active && setItems(r.items.filter(receivable)),
       () => {},
     );
     listWarehouses({ status: "active", pageSize: 100 }).then(
@@ -127,7 +149,7 @@ export function AddStockForm() {
       (full) => {
         loadedBarcodeIds.current.add(id);
         if (!active) return;
-        setItems((prev) => prev.map((it) => (it.id === full.id ? { ...it, barcodeDataUri: full.barcodeDataUri } : it)));
+        setBarcodeById((m) => ({ ...m, [id]: full.barcodeDataUri }));
         setBarcodeLoadingId((cur) => (cur === id ? null : cur));
       },
       () => { if (active) setBarcodeLoadingId((cur) => (cur === id ? null : cur)); },
@@ -136,6 +158,16 @@ export function AddStockForm() {
   }, [irmItemId]);
 
   const selectedItem = items.find((i) => i.id === irmItemId) ?? null;
+  // The map first, then whatever the row happened to carry. The map is the only source that survives
+  // a merge replacing the row, and the only one that does not depend on the row existing yet.
+  const selectedBarcode = irmItemId ? (barcodeById[irmItemId] ?? selectedItem?.barcodeDataUri ?? null) : null;
+  // A deep link (?item=<id>) can name an item outside the page loaded at mount. Resolve it by id
+  // rather than leaving the picker looking empty on a form that already has an item chosen.
+  // "Still looking" comes from the hook, not from "the id isn't in my list yet". The two agree
+  // until a lookup FAILS, and then the second one never stops being true.
+  const resolvingItem = useIrmItemsByIds(missingIrmIds([irmItemId], items), (found) =>
+    setItems((prev) => mergeIrmItems(prev, found)),
+  );
   const targetWh = warehouses.find((w) => w.id === warehouseId) ?? null;
   const qtyNum = Number(quantity);
   const onHand = availability?.onHand ?? null;
@@ -180,7 +212,7 @@ export function AddStockForm() {
     try {
       const updated = await generateBarcode(selectedItem.id);
       loadedBarcodeIds.current.add(updated.id); // generate returns the image — no need to lazy-fetch
-      setItems((prev) => prev.map((it) => (it.id === updated.id ? { ...it, barcodeDataUri: updated.barcodeDataUri } : it)));
+      setBarcodeById((m) => ({ ...m, [updated.id]: updated.barcodeDataUri }));
       pushToast("Barcode generated.", "success");
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Could not generate the barcode.", "alert");
@@ -194,8 +226,8 @@ export function AddStockForm() {
   // boxes. Blank tracks the quantity field live; typing a number pins it.
   const [labelCopies, setLabelCopies] = React.useState("");
   const printItemBarcode = (count: number) => {
-    if (!selectedItem?.barcodeDataUri) return;
-    printLabels({ dataUri: selectedItem.barcodeDataUri, code: selectedItem.code, copies: count });
+    if (!selectedItem || !selectedBarcode) return;
+    printLabels({ dataUri: selectedBarcode, code: selectedItem.code, copies: count });
   };
 
   const validate = (): Record<string, string> => {
@@ -280,7 +312,18 @@ export function AddStockForm() {
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="sm:col-span-2">
                 <label className={labelCls}>Item<RequiredMark /></label>
-                <Select value={irmItemId} onChange={(v) => { setIrmItemId(v); touch(); clearError("irmItemId"); }} options={items.map((i) => ({ value: i.id, label: `${i.code} — ${i.name}${i.sku ? ` (${i.sku})` : ""}` }))} placeholder="— Select an item —" ariaLabel="Item" invalid={Boolean(errors.irmItemId)} disabled={locked} />
+                <IrmItemPicker
+                  value={irmItemId}
+                  selectedItem={selectedItem}
+                  seed={items}
+                  onSelect={(i) => { setItems((prev) => mergeIrmItems(prev, [i])); setIrmItemId(i.id); touch(); clearError("irmItemId"); }}
+                  canCreate={false}
+                  filterItem={receivable}
+                  loading={resolvingItem}
+                  ariaLabel="Item"
+                  invalid={Boolean(errors.irmItemId)}
+                  disabled={locked}
+                />
                 <FieldError message={errors.irmItemId} />
                 {/* Items must exist in the catalogue first. Offer a shortcut to create one (gated by
                     irm.create) — uses the nav guard so an in-progress form prompts before leaving. */}
@@ -334,7 +377,7 @@ export function AddStockForm() {
               ) : (
                 <BarcodePanel
                   code={selectedItem.code}
-                  barcodeDataUri={selectedItem.barcodeDataUri}
+                  barcodeDataUri={selectedBarcode}
                   canManage={canManageBarcode}
                   busy={barcodeBusy}
                   onGenerate={generateItemBarcode}
@@ -346,7 +389,7 @@ export function AddStockForm() {
               )}
               {/* Same blank-box-only hint the GRN receive and stock-entry surfaces carry: this one
                   also defaults its count to a quantity, so it needs to say which quantity. */}
-              {selectedItem.barcodeDataUri && labelCopies.trim() === "" && (
+              {selectedBarcode && labelCopies.trim() === "" && (
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">One label per unit being added.</p>
               )}
             </FormSection>

@@ -1011,9 +1011,6 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
   // 1) IRM lookup by code/barcode/sku.
   const irmItem = await irmService.findActiveByCodeOrBarcode(code);
   if (irmItem) {
-    if (irmItem.trackSerialNumbers || irmItem.trackBatchNumbers) {
-      throw conflict(`${irmItem.name} is serial/batch-tracked — those items can't be moved here yet.`);
-    }
     // Match the kit line for THIS item AT THIS warehouse — a job can list the same IRM item at more
     // than one warehouse, so picking the first by item id alone would resolve the wrong warehouse.
     let kit = (job.kitLines ?? []).find((k) => k.lineType === "irm" && k.irmItemId === irmItem.id && k.warehouseId === input.warehouseId);
@@ -1420,9 +1417,6 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
     budget.remaining -= line.qty;
     if (line.source === "irm") {
       const irm = await irmService.requireActiveIrmItem(line.irmItemId!);
-      if (irm.trackSerialNumbers || irm.trackBatchNumbers) {
-        throw conflict(`${irm.name} is serial/batch-tracked and can't be moved here.`);
-      }
       // The kit line arrived as a CLIENT-SUPPLIED id and nothing above ties it to this item — the same
       // hole the rental arm below closes, and it was open here. A hand-built request could file an IRM
       // movement against a rental (or another item's) kit line: the warehouse check passes, the line's
@@ -4231,11 +4225,6 @@ export async function reportWarehouseDamage(input: ReportDamageInput, actor?: Au
   if (isCompany) {
     const item = await irmService.requireActiveIrmItem(irmItemId!);
     // Same restriction the downward stock adjustment applies: writing off a serial- or batch-tracked
-    // unit has to name WHICH serial/batch, and the damaged pool is quantity-only. Allowing it here
-    // would silently decouple the serial register from the balance.
-    if (item.trackSerialNumbers || item.trackBatchNumbers) {
-      throw conflict("Serial- and batch-tracked items can't be reported damaged this way.");
-    }
     itemName = item.name;
   } else {
     const entry = await goodsManagementRepo.findCustomerStockEntryById(customerStockEntryId!);

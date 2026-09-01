@@ -63,6 +63,47 @@ beforeEach(() => {
   commit.mockImplementation(async (_asset, write) => write({} as never));
 });
 
+// The document group is a value the BROWSER supplies, and the only reason the two upload areas on
+// the purchase-request form mean anything is that it survives the trip and is re-checked at the end
+// of it. These pin both halves: that it reaches the module that stores it, and that a purpose with
+// nowhere to put one is not silently handed it.
+describe("attachTo — the purchase request's document group", () => {
+  it("hands the group to the purchase request's own attach", async () => {
+    await attachTo("prf_attachment", "rec1", ASSET, undefined, ACTOR, "other");
+    expect(vi.mocked(prfService.attachUploadedAsset).mock.calls[0][1]).toMatchObject({ documentType: "other" });
+  });
+
+  // Absent is legitimate — the older upload path sends none — and the PRF service is what decides
+  // what that means (`quote`). The bridge must pass the absence through rather than inventing a
+  // value, or that decision would end up made in two places.
+  it("passes the absence through rather than choosing a group for it", async () => {
+    await attachTo("prf_attachment", "rec1", ASSET, undefined, ACTOR);
+    expect(vi.mocked(prfService.attachUploadedAsset).mock.calls[0][1]).toMatchObject({ documentType: undefined });
+  });
+
+  // THE REGRESSION THIS FILE EXISTS FOR. `attachUploadedAsset` fires the audit itself only when it
+  // is given NO transaction — and finalize always gives it one, so on the path every real upload
+  // takes, the audit is fired from here instead. A version of this bridge that forwarded the group
+  // to the write but not to the audit therefore recorded an attachment with no group on 100% of
+  // production uploads, while the service's own unit tests (which call it without a tx) stayed
+  // green. Asserting the audit call from the BRIDGE is what closes that gap.
+  it("hands the group to the audit as well as the write", async () => {
+    vi.mocked(prfService.getPurchaseRequest).mockResolvedValue({ id: "rec1", code: "PRF-1" } as never);
+    await attachTo("prf_attachment", "rec1", ASSET, undefined, ACTOR, "other");
+    expect(vi.mocked(prfService.recordAttachmentAudit)).toHaveBeenCalledWith(
+      { id: "rec1", code: "PRF-1" },
+      ACTOR,
+      "other",
+    );
+  });
+
+  it("does not hand a group to a purpose that has no groups", async () => {
+    await attachTo("po_attachment", "rec1", ASSET, undefined, ACTOR, "other");
+    const written = vi.mocked(poService.attachUploadedAsset).mock.calls[0][1];
+    expect(Object.keys(written)).not.toContain("documentType");
+  });
+});
+
 describe("attachTo — attach purposes", () => {
   // THE regression. Each module's attachUploadedAsset finishes by re-reading its record, and inside a
   // transaction that read cannot see the row just written — so it returned the record WITHOUT the new
@@ -108,7 +149,14 @@ describe("attachTo — attach purposes", () => {
 
     expect(order).toEqual(["commit", "read", "audit"]);
     // Fired against the record the read just proved, so the label can never describe a stale one.
-    expect(service.recordAttachmentAudit).toHaveBeenCalledWith({ id: "rec1", code: "PO-1" }, ACTOR);
+    //
+    // First TWO arguments only: the purchase request also passes its document group as a third, and
+    // this test is about which record the event names, not about what else rides with it. That third
+    // argument is pinned in "hands the group to the audit as well as the write".
+    expect(vi.mocked(service.recordAttachmentAudit).mock.calls[0].slice(0, 2)).toEqual([
+      { id: "rec1", code: "PO-1" },
+      ACTOR,
+    ]);
   });
 
   it.each(ATTACHERS)("writes $purpose inside the transaction, carrying the lease", async ({ purpose, service }) => {

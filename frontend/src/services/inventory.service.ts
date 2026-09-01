@@ -183,8 +183,6 @@ export interface ReorderSuggestion {
   covered: boolean;
   critical: boolean;
   unitCostPence: number;
-  trackSerialNumbers: boolean;
-  trackBatchNumbers: boolean;
   primarySupplier: { id: string; name: string; status: string; leadTimeDays: number | null } | null;
 }
 export interface ReorderSuggestionsResult {

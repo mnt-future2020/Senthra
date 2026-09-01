@@ -53,6 +53,12 @@ export interface PoItem {
 
 export interface PoAttachment {
   id: string;
+  /**
+   * The document group this file carried over from the source purchase request, when there was one.
+   * NULL means uncategorised — an order's own uploads have no group picker, so unlike the PRF's this
+   * is not resolved to "quote".
+   */
+  documentType: "quote" | "other" | null;
   label: string | null;
   fileName: string;
   fileType: string;

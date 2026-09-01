@@ -124,7 +124,7 @@ function BreakdownRow({ s }: { s: ReorderSuggestion }) {
 
   // Transfers are only offered when they'd genuinely substitute a purchase: an actionable row, a
   // transferable item (the move endpoint rejects serial/batch tracking), and the mover permission.
-  const canTransfer = can("inventory.move") && !s.covered && s.suggestedQty > 0 && !s.trackSerialNumbers && !s.trackBatchNumbers;
+  const canTransfer = can("inventory.move") && !s.covered && s.suggestedQty > 0;
 
   const line = (label: string, value: React.ReactNode) => (
     <div className="flex justify-between gap-6"><span className="text-[var(--muted)]">{label}</span><span className="font-semibold text-[var(--ink)]">{value}</span></div>

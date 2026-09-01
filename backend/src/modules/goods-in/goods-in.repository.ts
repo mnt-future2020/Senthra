@@ -1,26 +1,12 @@
 import { Prisma, type GoodsReceipt, type GoodsReceiptAttachment } from "@prisma/client";
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
-import { conflict } from "../../utils/http-error.js";
 import { escapeRegex } from "../../utils/search.js";
 import { isEmptyWindow, type DayWindow } from "../../utils/filter-date.js";
 
-// Friendly message when the DB serial-uniqueness backstop fires (a concurrent receipt grabbed the
-// same serial between our app-level check and our write).
-const SERIAL_CONFLICT_MSG =
-  "One or more of those serial numbers were just received on another goods receipt. Refresh and try again.";
-
-// A P2002 raised by the GoodsReceiptSerial @@unique([irmItemId, serialLower]) backstop (as opposed
-// to the GRN code unique). Exported so it can be unit-tested directly.
-export function isSerialUniqueViolation(e: unknown): boolean {
-  if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") return false;
-  const target = (e.meta as { target?: unknown } | undefined)?.target;
-  return target != null && String(target).toLowerCase().includes("serial");
-}
-
 // Data-access layer for Goods In (GRN). The ONLY place Prisma is touched for goods receipts.
-// Soft-deleted GRNs (deletedAt set) are excluded from normal reads. Header + lines + serials +
-// batches are written atomically (withTransaction). The completion transaction itself is
+// Soft-deleted GRNs (deletedAt set) are excluded from normal reads. Header + lines are written
+// atomically (withTransaction). The completion transaction itself is
 // orchestrated in the service (it also writes inventory + the PO), using completeTx here.
 
 // Supplier slice for the read-only "Supplier Information" section (resolved live via the PO).
@@ -52,8 +38,6 @@ const irmItemSelect = {
   name: true,
   status: true,
   trackInventory: true,
-  trackSerialNumbers: true,
-  trackBatchNumbers: true,
 } satisfies Prisma.IrmItemSelect;
 
 const withRelations = {
@@ -63,8 +47,6 @@ const withRelations = {
     orderBy: { sortOrder: "asc" },
     include: {
       irmItem: { select: irmItemSelect },
-      serials: { orderBy: { createdAt: "asc" } },
-      batches: { orderBy: { createdAt: "asc" } },
     },
   },
   attachments: { orderBy: { createdAt: "desc" } },
@@ -73,16 +55,6 @@ const withRelations = {
 export type GoodsReceiptWithRelations = Prisma.GoodsReceiptGetPayload<{ include: typeof withRelations }>;
 
 // --- row shapes the service builds for create / replace --------------------------------------
-export interface GRNSerialRow {
-  serialNumber: string;
-  serialLower: string;
-  irmItemId: string;
-}
-export interface GRNBatchRow {
-  batchNumber: string;
-  expiryDate: Date | null;
-  quantity: number;
-}
 export interface GRNLineRow {
   purchaseOrderItemId: string;
   irmItemId: string;
@@ -95,8 +67,6 @@ export interface GRNLineRow {
   damagedQuantity: number;
   acceptedQuantity: number;
   notes: string | null;
-  serials: GRNSerialRow[];
-  batches: GRNBatchRow[];
 }
 
 function lineCreateData(l: GRNLineRow, sortOrder: number): Prisma.GoodsReceiptItemUncheckedCreateWithoutGoodsReceiptInput {
@@ -113,8 +83,6 @@ function lineCreateData(l: GRNLineRow, sortOrder: number): Prisma.GoodsReceiptIt
     acceptedQuantity: l.acceptedQuantity,
     notes: l.notes,
     sortOrder,
-    serials: { create: l.serials.map((s) => ({ serialNumber: s.serialNumber, serialLower: s.serialLower, irmItemId: s.irmItemId })) },
-    batches: { create: l.batches.map((b) => ({ batchNumber: b.batchNumber, expiryDate: b.expiryDate, quantity: b.quantity })) },
   };
 }
 
@@ -215,31 +183,20 @@ export function completeTx(tx: Prisma.TransactionClient, id: string, completedBy
   return tx.goodsReceipt.update({ where: { id }, data: { status: "completed", completedBy, completedAt: new Date() } });
 }
 
-// Replace ALL lines + their serials/batches and patch the header, atomically (draft edit).
+// Replace ALL lines and patch the header, atomically (draft edit).
 export async function replaceItemsAndChildren(
   id: string,
   lines: GRNLineRow[],
   headerPatch: Prisma.GoodsReceiptUncheckedUpdateInput,
 ): Promise<GoodsReceiptWithRelations> {
-  try {
-    return await withTransaction(async (tx) => {
-      const existing = await tx.goodsReceiptItem.findMany({ where: { goodsReceiptId: id }, select: { id: true } });
-      const itemIds = existing.map((e) => e.id);
-      if (itemIds.length) {
-        await tx.goodsReceiptSerial.deleteMany({ where: { goodsReceiptItemId: { in: itemIds } } });
-        await tx.goodsReceiptBatch.deleteMany({ where: { goodsReceiptItemId: { in: itemIds } } });
-        await tx.goodsReceiptItem.deleteMany({ where: { goodsReceiptId: id } });
-      }
-      for (let i = 0; i < lines.length; i++) {
-        await tx.goodsReceiptItem.create({ data: { goodsReceiptId: id, ...lineCreateData(lines[i], i) } });
-      }
-      await tx.goodsReceipt.update({ where: { id }, data: headerPatch });
-      return tx.goodsReceipt.findUniqueOrThrow({ where: { id }, include: withRelations });
-    });
-  } catch (e) {
-    if (isSerialUniqueViolation(e)) throw conflict(SERIAL_CONFLICT_MSG);
-    throw e;
-  }
+  return withTransaction(async (tx) => {
+    await tx.goodsReceiptItem.deleteMany({ where: { goodsReceiptId: id } });
+    for (let i = 0; i < lines.length; i++) {
+      await tx.goodsReceiptItem.create({ data: { goodsReceiptId: id, ...lineCreateData(lines[i], i) } });
+    }
+    await tx.goodsReceipt.update({ where: { id }, data: headerPatch });
+    return tx.goodsReceipt.findUniqueOrThrow({ where: { id }, include: withRelations });
+  });
 }
 
 // --- delete-guard counters (used by PO / Warehouse / IRM delete guards) ----------------------
@@ -282,38 +239,6 @@ export async function completedReceiptsSince(since: Date, warehouseIds?: string[
     select: { receivedDate: true },
   });
   return rows.map((r) => ({ at: r.receivedDate }));
-}
-
-// --- serial uniqueness (app-level, per item, across non-deleted GRNs) ------------------------
-export function findSerialConflicts(irmItemId: string, serialLowers: string[], excludeGoodsReceiptId?: string): Promise<{ serialLower: string }[]> {
-  if (serialLowers.length === 0) return Promise.resolve([]);
-  return prisma.goodsReceiptSerial.findMany({
-    where: {
-      irmItemId,
-      serialLower: { in: serialLowers },
-      goodsReceiptItem: {
-        is: {
-          // Cancelled receipts post no stock, so their serials don't reserve the namespace — exclude
-          // them so a serial from a cancelled delivery can be received again.
-          goodsReceipt: { is: { deletedAt: null, status: { not: "cancelled" }, ...(excludeGoodsReceiptId ? { id: { not: excludeGoodsReceiptId } } : {}) } },
-        },
-      },
-    },
-    select: { serialLower: true },
-  });
-}
-
-// IRM tracking flags for the selected items (drives serial/batch requirements + whether an
-// item's accepted stock writes to inventory). Read regardless of item status — receiving
-// physical goods isn't blocked by a later deactivation of the catalogue item.
-export function findIrmTrackFlags(
-  irmItemIds: string[],
-): Promise<{ id: string; trackInventory: boolean; trackSerialNumbers: boolean; trackBatchNumbers: boolean }[]> {
-  if (irmItemIds.length === 0) return Promise.resolve([]);
-  return prisma.irmItem.findMany({
-    where: { id: { in: irmItemIds } },
-    select: { id: true, trackInventory: true, trackSerialNumbers: true, trackBatchNumbers: true },
-  });
 }
 
 // --- attachments -----------------------------------------------------------------------------
@@ -385,7 +310,7 @@ async function fastForwardCounter(): Promise<void> {
   }
 }
 
-// Create a GRN + its lines + serials + batches atomically with a unique GRN-#### code.
+// Create a GRN + its lines atomically with a unique GRN-#### code.
 // deletedAt: null is written EXPLICITLY — Prisma+Mongo `{deletedAt:null}` reads don't match an
 // absent field, so without this a freshly-created GRN would be invisible to findById/list.
 export async function createWithCode(
@@ -408,8 +333,6 @@ export async function createWithCode(
         return tx.goodsReceipt.findUniqueOrThrow({ where: { id: grn.id }, include: withRelations });
       });
     } catch (e) {
-      // DB serial-uniqueness backstop → friendly 409 (a concurrent receipt grabbed the same serial).
-      if (isSerialUniqueViolation(e)) throw conflict(SERIAL_CONFLICT_MSG);
       if (!isCodeConflict(e)) throw e;
       await fastForwardCounter();
     }
