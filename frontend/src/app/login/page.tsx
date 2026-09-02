@@ -3,11 +3,12 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Eye, EyeOff, Loader2 } from "lucide-react";
+import { Eye, EyeOff, Loader2, MonitorSmartphone } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
 import * as authService from "@/services/auth.service";
 import { homeFor } from "@/lib/auth";
+import { takeSignedOutNotice, type SignedOutNotice } from "@/lib/signedOutNotice";
 import { AuthLayout } from "@/components/auth/AuthLayout";
 
 // Minimal typing for the Google Identity Services global.
@@ -79,6 +80,10 @@ export default function LoginPage() {
   const [remember, setRemember] = React.useState(true);
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  // Why the user landed back here, if they didn't arrive under their own steam — set by
+  // AuthProvider when the server revokes this device's session (the one-device cap, "sign out
+  // other devices", a password change). Read once and consumed, so a refresh clears it.
+  const [signedOutNotice, setSignedOutNoticeState] = React.useState<SignedOutNotice | null>(null);
 
   const [googleEnabled, setGoogleEnabled] = React.useState(false);
   const [googleClientId, setGoogleClientId] = React.useState<string | null>(null);
@@ -93,6 +98,18 @@ export default function LoginPage() {
     if (!loading && principal) router.replace(homeFor(principal));
   }, [loading, principal, router]);
 
+  // sessionStorage is client-only, so this reads after mount rather than during render (a lazy
+  // useState initialiser would run on the server too and hydrate mismatched). The microtask keeps
+  // setState out of the effect body, and only a NON-null result is stored: takeSignedOutNotice
+  // consumes the value, so under StrictMode's double-invoked effect the second pass finds nothing
+  // and must leave the message the first pass found alone.
+  React.useEffect(() => {
+    void Promise.resolve().then(() => {
+      const notice = takeSignedOutNotice();
+      if (notice) setSignedOutNoticeState(notice);
+    });
+  }, []);
+
   // Dev quick-login: fill the creds + submit (used only by the dev-gated buttons below).
   const quickLogin = (em: string, pw: string) => {
     setEmail(em);
@@ -103,6 +120,7 @@ export default function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setSignedOutNoticeState(null);
     setSubmitting(true);
     try {
       const next = await login(email, password, remember);
@@ -195,6 +213,27 @@ export default function LoginPage() {
       <p className="mt-2 text-center text-sm text-[var(--muted)]">
         Enter your email and password to access your account.
       </p>
+
+      {/* Styled as information, not as an error: nothing went wrong and the user did nothing wrong
+          — they signed in somewhere else. A red failure banner here reads like a bug. Same
+          icon-chip row as the Devices card in Settings, so the two places that talk about devices
+          look like the same idea. Dropped the moment they submit, so a real login error is never
+          stacked under it. */}
+      {signedOutNotice && !error && (
+        <div className="mt-6 flex items-start gap-3.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-4 py-3.5">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--accent-10)] text-[var(--accent)]">
+            <MonitorSmartphone className="h-[18px] w-[18px]" />
+          </span>
+          <div className="min-w-0 space-y-1">
+            <p className="text-sm font-bold leading-snug text-[var(--ink)]">
+              {signedOutNotice.title}
+            </p>
+            <p className="text-[13px] leading-relaxed text-[var(--muted)]">
+              {signedOutNotice.body}
+            </p>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="mt-6 rounded-xl border border-[var(--neg)]/30 bg-[var(--neg)]/10 px-3.5 py-2.5 text-sm font-semibold text-[var(--neg)]">

@@ -7,8 +7,11 @@ import { SlidersHorizontal, X } from "lucide-react";
 import { anchorMoved, anchorVisible, popoverPlacement, type Placement } from "./popoverPlacement";
 
 /** Panel size, in px. Kept here (not measured) so placement is decided BEFORE the first paint — a
- *  measure-then-reposition would show the panel in the wrong place for a frame. `w-72` = 288px; the
- *  height is a working estimate for the flip-above decision, which only needs to be roughly right. */
+ *  measure-then-reposition would show the panel in the wrong place for a frame. `w-72` = 288px.
+ *
+ *  PANEL_H is not an estimate any more: popoverPlacement returns the smaller of it and the room the
+ *  chosen side had, and the panel wears that as an inline `max-height`. Written here and nowhere
+ *  else, so it cannot drift from a class saying something different. */
 const PANEL_W = 288;
 const PANEL_H = 320;
 
@@ -99,7 +102,10 @@ export function FilterPopover({
     window.addEventListener("scroll", onMove, true);
     window.addEventListener("resize", onMove);
     window.addEventListener("keydown", onKey);
-    panelRef.current?.querySelector<HTMLElement>("button, select, input")?.focus();
+    // preventScroll: the panel is capped to the room its side had, so on a short window it scrolls —
+    // and the browser bringing the freshly focused control "into view" scrolls the panel's own header
+    // off the top of it. The control is the first thing inside; no scrolling is the right amount.
+    panelRef.current?.querySelector<HTMLElement>("button, select, input")?.focus({ preventScroll: true });
     return () => {
       window.removeEventListener("scroll", onMove, true);
       window.removeEventListener("resize", onMove);
@@ -140,7 +146,9 @@ export function FilterPopover({
               ref={panelRef}
               role="dialog"
               aria-label={label}
-              className="anim-fade-in fixed z-[60] w-72 max-h-[min(20rem,70vh)] overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-2xl"
+              /* The height cap arrives on `pos` — the room this side actually had, capped at PANEL_H.
+                 Stating it as a class too would be the same number written twice. */
+              className="anim-fade-in fixed z-[60] w-72 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-2xl"
               style={pos}
             >
               <div className="mb-2 flex items-center justify-between">

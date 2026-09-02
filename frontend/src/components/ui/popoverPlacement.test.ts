@@ -72,6 +72,7 @@ describe("popoverPlacement — vertical", () => {
     const p = popoverPlacement(at(300, 100), PANEL, short);
     expect(p.top).toBe(144);
     expect(p.bottom).toBeUndefined();
+    expect(p.maxHeight).toBe(248); // 400 − 138 − 6 − 8
   });
 
   it("always returns exactly one vertical anchor", () => {
@@ -79,6 +80,58 @@ describe("popoverPlacement — vertical", () => {
       const p = popoverPlacement(at(300, y), PANEL, VIEW);
       expect(p.top === undefined || p.bottom === undefined).toBe(true);
       expect(p.top !== undefined || p.bottom !== undefined).toBe(true);
+    }
+  });
+});
+
+// "Let it scroll" was the intent above and the panel could not honour it: nothing told it how much
+// room it had been given, so it was laid out at its natural height and simply hung past the bottom
+// of the window. Measured in Chrome on Purchase Orders at 844×390 — a phone held landscape — the
+// attention panel ran 101px below the fold with three of its six queues inside that strip. The panel
+// is `position: fixed`, so no amount of scrolling reaches them, and its own `overflow-y-auto` cannot
+// help: the box itself is off-screen, not its contents. FilterPopover clipped 91px on the same page.
+//
+// So placement now returns the room on the side it chose, and the panel wears it as `max-height`.
+describe("popoverPlacement — the panel never leaves the viewport", () => {
+  it("caps the panel to the room below when it cannot fit there", () => {
+    const landscapePhone = { width: 844, height: 390 };
+    const p = popoverPlacement(at(300, 176), PANEL, landscapePhone);
+    expect(p.top).toBe(220); // 176 + 38 + 6
+    expect(p.maxHeight).toBe(162); // 390 − 214 − 6 − 8
+  });
+
+  it("caps the panel to the room above when it flips", () => {
+    const short = { width: 1024, height: 500 };
+    const p = popoverPlacement(at(300, 300), PANEL, short);
+    expect(p.bottom).toBe(206); // 500 − 300 + 6
+    expect(p.maxHeight).toBe(286); // 300 − 6 − 8
+  });
+
+  // A cap is not a resize: with room to spare the panel keeps its own height.
+  it("leaves the panel's own height as the cap when there is room", () => {
+    expect(popoverPlacement(at(300, 200), PANEL, VIEW).maxHeight).toBe(PANEL.height);
+  });
+
+  // The old rule read "is the trigger higher up than the panel is tall?" and took `below` on a yes,
+  // which handed the panel the SMALLER side whenever the trigger sat just above that line.
+  it("takes the side with more room when neither side fits", () => {
+    const short = { width: 1024, height: 700 };
+    const p = popoverPlacement(at(300, 380), PANEL, short); // 366 above vs 268 below
+    expect(p.top).toBeUndefined();
+    expect(p.bottom).toBe(326); // 700 − 380 + 6
+  });
+
+  // The invariant the whole change exists for, stated once over every case rather than per example.
+  it("keeps every placement inside the viewport", () => {
+    for (const view of [{ width: 844, height: 390 }, { width: 1024, height: 500 }, VIEW]) {
+      for (const y of [0, 60, 176, 300, view.height - 100, view.height - 40]) {
+        const p = popoverPlacement(at(300, y), PANEL, view);
+        const height = p.maxHeight ?? PANEL.height;
+        // One vertical anchor is guaranteed above; resolve whichever it is to a top edge.
+        const top = p.top ?? view.height - p.bottom! - height;
+        expect(top).toBeGreaterThanOrEqual(0);
+        expect(top + height).toBeLessThanOrEqual(view.height);
+      }
     }
   });
 });

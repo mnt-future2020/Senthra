@@ -50,6 +50,9 @@ export interface SitePickerProps {
   ariaLabel?: string;
 }
 
+/** Panel size, in px — see FilterPopover for why it is declared rather than measured. PANEL_H is the
+ *  cap the panel wants; popoverPlacement hands back the smaller of it and the room the chosen side
+ *  had, and the panel wears that as an inline `max-height`. The only place the height is written. */
 const PANEL_W = 300;
 const PANEL_H = 320;
 /** Long enough that typing a site name is one request, short enough to feel immediate. */
@@ -132,7 +135,9 @@ export function SitePicker({
     window.addEventListener("scroll", onMove, true);
     window.addEventListener("resize", onMove);
     window.addEventListener("keydown", onKey);
-    panelRef.current?.querySelector<HTMLInputElement>("input")?.focus();
+    // preventScroll — see FilterPopover: the panel is capped to the room its side had, and focusing
+    // the search box would scroll the panel's own header out of its top on a short window.
+    panelRef.current?.querySelector<HTMLInputElement>("input")?.focus({ preventScroll: true });
     return () => {
       window.removeEventListener("scroll", onMove, true);
       window.removeEventListener("resize", onMove);
@@ -175,7 +180,9 @@ export function SitePicker({
               ref={panelRef}
               role="dialog"
               aria-label={ariaLabel}
-              className="anim-fade-in fixed z-[60] flex max-h-[min(20rem,70vh)] w-[300px] flex-col rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-2xl"
+              /* The height cap arrives on `pos` — the room this side actually had, capped at PANEL_H.
+                 Still a flex column: the search box stays put and the list below it takes the rest. */
+              className="anim-fade-in fixed z-[60] flex w-[300px] flex-col rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-2xl"
               style={pos}
             >
               <div className="mb-2 flex items-center justify-between">

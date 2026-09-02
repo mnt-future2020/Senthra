@@ -43,6 +43,7 @@ import type {
   CreatePurchaseOrderInput,
   CreatePurchaseOrdersSplitInput,
   POLineInput,
+  PoMarkSentInput,
   PoSupplierAcceptInput,
   UpdatePurchaseOrderInput,
   CloseHireShortInput,
@@ -1391,7 +1392,37 @@ async function archiveIssuedPdf(po: PurchaseOrderWithRelations, actor?: AuditAct
   });
 }
 
-export async function sendPurchaseOrder(id: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
+// ── Issuing the order (ONE transition, two doors) ─────────────────────────────────────────────
+//
+// `sent` means "this purchase order has been ISSUED to the supplier" — it has never meant "Senthra
+// emailed it". The email is fire-and-forget and cannot fail the transition; an order whose supplier
+// has no address on file goes `sent` and is simply not emailed; and every downstream gate (receiving,
+// acceptance, the delivery worklists) reads the STATUS, never whether a message went out. So a PO
+// handed over by WhatsApp, print or phone is genuinely `sent`, and needs no state of its own — only a
+// second way in that does not fire an email the supplier already has.
+//
+// Hence ONE implementation with one flag. The guards below — source status, delivery date, the
+// assigned-PM rule — are the commitment being made to a supplier, and they hold identically whoever
+// carried the paperwork. Two copies of this function would be two copies to keep in step, and the one
+// that drifted would be the door nobody was watching.
+export const ISSUE_CHANNELS = ["email", "whatsapp", "printed", "phone", "other"] as const;
+/** How an externally-issued order reached the supplier. AUDIT METADATA ONLY — no field on the PO. */
+export type IssueChannel = (typeof ISSUE_CHANNELS)[number];
+
+interface IssueOptions {
+  /**
+   * Whether SENTHRA is the one delivering the document.
+   *
+   * `false` is "Mark as sent": the supplier already has it, by whatever route. Note that
+   * `channel: "email"` still means `false` here — the user is telling us they emailed it themselves
+   * from their own mailbox, which is precisely the case that must not trigger a second email.
+   */
+  emailSupplier: boolean;
+  channel?: IssueChannel | null;
+  note?: string | null;
+}
+
+async function issuePurchaseOrder(id: string, opts: IssueOptions, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(id, actor);
   assertTransition(po.status, "sent");
   // A dateless PO must never reach a supplier: the delivery date is on the issued document, and
@@ -1410,22 +1441,86 @@ export async function sendPurchaseOrder(id: string, actor?: AuditActor): Promise
     }
   }
   // sentBy is the issuer — the signer printed on the PO document (deterministic for email + download).
-  const updated = await poRepo.update(id, { status: "sent", sentAt: new Date(), sentBy: actor?.email ?? null });
-  recordStatus(actor, id, updated.code, "purchase_order.sent");
+  //
+  // GUARDED on the status just read. Everything past this line has a side effect the SUPPLIER can see
+  // — an email, an archived document of record — so two people issuing the same order at the same
+  // moment must not both get through. Read-then-write let them: both passed `assertTransition` on the
+  // same `approved`, both wrote, and Mongo raised nothing because the writes never overlapped. Carrying
+  // the expected status into the write makes the loser match no row, and it is told who moved it.
+  const updated = await poRepo.updateStatusIf(id, po.status, {
+    status: "sent",
+    sentAt: new Date(),
+    sentBy: actor?.email ?? null,
+  });
+  if (!updated) {
+    const current = await poRepo.findById(id);
+    throw conflict(
+      current
+        ? `This purchase order is already ${humanStatus(current.status)} — someone else acted on it. Refresh to see where it is now.`
+        : "This purchase order no longer exists.",
+    );
+  }
+  const channel = opts.emailSupplier ? undefined : (opts.channel ?? undefined);
+  const note = opts.emailSupplier ? undefined : (trimToNull(opts.note) ?? undefined);
+  audit.record({
+    actor,
+    // NEVER `purchase_order.sent` on the manual path: THAT entry is the record of Senthra having
+    // transmitted the document, and claiming it when nothing was transmitted is the one thing the
+    // ledger must not do. `sent_manually` renders as "Purchase Order · Sent Manually" through the
+    // existing actionLabel splitter — no frontend mapping to add.
+    action: opts.emailSupplier ? "purchase_order.sent" : "purchase_order.sent_manually",
+    targetType: "purchase_order",
+    targetId: id,
+    targetLabel: updated.code,
+    // Only when something was actually given — an empty metadata object reads as data lost.
+    ...(channel || note ? { metadata: { channel, note } } : {}),
+  });
   // The catch-up for a hire received while the order was still a draft: the quantities were recorded
   // then, but the status could not legally move until now. Fire-and-forget in the same sense as the
   // rest of this block — the send itself has already committed.
   await recomputeRentalReceiptStatus(id, actor);
   emitPoUpdated(updated);
   // Fire-and-forget: email the supplier the issued PO with its PDF. NEVER blocks or rolls back.
-  void poEmail.notifySupplierPoSent(updated, actor).catch((e) =>
-    console.error(`PO ${updated.code} supplier email failed:`, e instanceof Error ? e.message : e),
-  );
+  // Skipped ENTIRELY on the manual path — the supplier already has the document, which is the whole
+  // reason that door exists. Guarded here in the service, not in the caller: frontend behaviour and
+  // route wiring are not where an invariant like this belongs.
+  if (opts.emailSupplier) {
+    void poEmail.notifySupplierPoSent(updated, actor).catch((e) =>
+      console.error(`PO ${updated.code} supplier email failed:`, e instanceof Error ? e.message : e),
+    );
+  }
   // Fire-and-forget: archive the exact issued PDF (document of record). NEVER blocks or rolls back.
+  //
+  // Runs on BOTH doors, deliberately. The archive is what the supplier received, frozen against later
+  // supplier-detail and branding edits — and an externally-issued order is the one MOST likely to be
+  // disputed, precisely because there is no sent-mail trail behind it. Skipping it here would leave
+  // the orders that most need the record as the only ones without one.
   void archiveIssuedPdf(updated, actor).catch((e) =>
     console.error(`PO ${updated.code} issued-PDF archive failed:`, e instanceof Error ? e.message : e),
   );
   return toPublic(updated);
+}
+
+/** Issue the order and email it to the supplier — the "Send to supplier" action. */
+export async function sendPurchaseOrder(id: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
+  return issuePurchaseOrder(id, { emailSupplier: true }, actor);
+}
+
+/**
+ * Record that the order was ALREADY issued to the supplier outside Senthra — "Mark as sent".
+ *
+ * The same transition through the same function: same source statuses, same delivery-date gate, same
+ * assigned-PM rule, same document of record, same rental catch-up. No email, and a distinct audit
+ * action so the ledger never claims a transmission that did not happen. `channel` and `note` are
+ * optional colour on that entry and are stored nowhere else — there is no field on the order for them,
+ * because nothing downstream branches on how the paperwork travelled.
+ */
+export async function markPurchaseOrderSent(
+  id: string,
+  input: PoMarkSentInput,
+  actor?: AuditActor,
+): Promise<PublicPurchaseOrder> {
+  return issuePurchaseOrder(id, { emailSupplier: false, channel: input.channel ?? null, note: input.note ?? null }, actor);
 }
 
 // ── Supplier acceptance (a recorded EVENT, not a workflow gate) ───────────────────────────────

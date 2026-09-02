@@ -74,6 +74,36 @@ export const RENTAL_WATCHERS_ROOM = "rentals:watchers";
 // the broadcast tells them nothing they couldn't already see. Customers are excluded (staff surface).
 export const ATTENTION_ROOM = "attention:watchers";
 
+// Per-DEVICE room — one socket, named after its session id. Every other room here fans OUT to many
+// people; this one exists to reach exactly one device and no other, which is what revoking a single
+// session needs (the principal-id room would hit the very device that just signed in). Namespaced so
+// a session uuid can never collide with the ObjectId principal rooms.
+function sessionRoom(sid: string): string {
+  return `session:${sid}`;
+}
+
+// Sent to a device whose session has just been destroyed server-side — evicted by the device cap,
+// signed out from another device, or wiped by a password change. The client clears its state and
+// goes to /login; without it the tab sits there rendering already-fetched data until the user
+// happens to touch the server, which on a 1-device cap is the difference between "you were signed
+// out" and "the app randomly broke".
+export const SESSION_REVOKED_EVENT = "auth:session_revoked";
+
+// Why the session went. Sent verbatim to the client, which turns it into the message on /login —
+// so a user who was bumped by their own second login reads something different from one whose
+// password was changed. Keep in sync with SESSION_REVOKED_REASONS in the frontend's socket lib.
+export type SessionRevokedReason =
+  | "signed_in_elsewhere" // the device cap evicted this device when the account signed in again
+  | "signed_out_remotely" // "Sign out other devices", a password change, or the account was deleted
+  ;
+
+// Gap between telling a device it is signed out and cutting its socket. The disconnect is what
+// actually stops an evicted device receiving broadcasts, but firing it in the same tick can beat the
+// notice out of the transport buffer, and then the user gets a silent dead tab instead of a reason.
+// The delay costs one quarter-second of a socket that has already lost its session row, so it can no
+// longer read, write, or refresh anything — only sit in rooms it is about to be removed from.
+const REVOKE_DISCONNECT_DELAY_MS = 250;
+
 // Identity resolved from the handshake, stashed on the socket for handlers.
 interface SocketAuth {
   principalId: string; // token sub — also the room name
@@ -146,8 +176,10 @@ export function initRealtime(httpServer: HttpServer): IOServer {
     const auth = (socket as AuthedSocket).data.auth;
     if (!auth) return;
     // Every authenticated socket joins a room named after its principal id, so
-    // emitToUser can target every device/tab of one user.
+    // emitToUser can target every device/tab of one user, plus a room of its own so a
+    // single revoked session can be reached without touching that account's others.
     void socket.join(auth.principalId);
+    void socket.join(sessionRoom(auth.sid));
     // Staff who can view jobs (admins always) also join the shared office room so the
     // Jobs list live-updates for every watcher, and van-stock reviewers join their own room
     // so the field-stock board live-updates. One permission query loads the role for both.
@@ -206,6 +238,50 @@ async function joinScopedRooms(socket: Socket, auth: SocketAuth): Promise<void> 
 // realtime isn't initialised (e.g. unit tests).
 export function emitToUser(userId: string, event: string, payload: unknown): void {
   io?.to(userId).emit(event, payload);
+}
+
+/**
+ * Tell a set of now-dead sessions they are dead, then cut their sockets.
+ *
+ * Called from session.service the moment the rows are deleted, so a device the user no longer
+ * controls stops being a live client immediately rather than at its next REST call. Both halves
+ * matter and they are not the same thing:
+ *
+ *  - the EVENT is the user-visible half — the old tab shows "signed out" instead of pretending to
+ *    still work;
+ *  - the DISCONNECT is the security half — until the socket is closed, a device whose session row
+ *    is gone still sits in the broadcast rooms it joined and keeps receiving job, purchase-order
+ *    and rental payloads it can no longer fetch over REST.
+ *
+ * No-op when realtime isn't initialised (unit tests, or a device that had no socket open) — losing
+ * the push is never fatal, the session is already gone server-side and the REST guard still bites.
+ */
+export function revokeSessionSockets(sids: readonly string[], reason: SessionRevokedReason): void {
+  if (!io || sids.length === 0) return;
+  const rooms = sids.map(sessionRoom);
+  io.to(rooms).emit(SESSION_REVOKED_EVENT, { reason });
+  const server = io;
+  setTimeout(() => server.in(rooms).disconnectSockets(true), REVOKE_DISCONNECT_DELAY_MS);
+}
+
+/**
+ * Same, for every session of one principal — optionally sparing the device that asked. Used where
+ * the sids aren't enumerated first: "sign out other devices", a password change, or an account
+ * being deleted. `keepSid` is the caller's own session; omit it to cut every device.
+ */
+export function revokePrincipalSockets(
+  principalId: string,
+  reason: SessionRevokedReason,
+  keepSid?: string,
+): void {
+  if (!io) return;
+  const spared = keepSid ? [sessionRoom(keepSid)] : [];
+  io.to(principalId).except(spared).emit(SESSION_REVOKED_EVENT, { reason });
+  const server = io;
+  setTimeout(
+    () => server.in(principalId).except(spared).disconnectSockets(true),
+    REVOKE_DISCONNECT_DELAY_MS,
+  );
 }
 
 // Emit an event to every socket in a named room (e.g. OFFICE_JOBS_ROOM). No-op if

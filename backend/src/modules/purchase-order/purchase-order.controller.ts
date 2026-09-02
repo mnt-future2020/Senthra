@@ -16,6 +16,7 @@ import type {
   PoAssignPmInput,
   PoCancelInput,
   PoDeliveryDateInput,
+  PoMarkSentInput,
   PoRejectInput,
   PoSupplierAcceptInput,
   UpdatePurchaseOrderInput,
@@ -142,6 +143,11 @@ export const rejectPurchaseOrder = asyncHandler(async (req, res) => {
 });
 export const sendPurchaseOrder = asyncHandler(async (req, res) => {
   res.json({ purchaseOrder: await poService.sendPurchaseOrder(param(req, "id"), actorFrom(req)) });
+});
+// POST /purchase-orders/:id/mark-sent — the order already reached the supplier outside Senthra.
+// Same transition as /send, no supplier email; the channel/note ride along into the audit entry.
+export const markPurchaseOrderSent = asyncHandler(async (req, res) => {
+  res.json({ purchaseOrder: await poService.markPurchaseOrderSent(param(req, "id"), req.body as PoMarkSentInput, actorFrom(req)) });
 });
 export const cancelPurchaseOrder = asyncHandler(async (req, res) => {
   const { reason } = req.body as PoCancelInput;

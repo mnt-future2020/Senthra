@@ -30,6 +30,15 @@ const VERB_TONE: Record<string, ActionTone> = {
   // Purchase order lifecycle — issue reads as an update, receipt as positive,
   // cancel as negative, close as a neutral terminal; attachments add/remove.
   sent: "update",
+  // The SAME lifecycle transition as `sent`, reached through "Mark as sent" when the order was
+  // handed to the supplier outside Senthra. It gets the same tone because it is the same event in
+  // the order's life — only the courier differs. Left to fall through, it landed on neutral grey
+  // beside an amber `sent`, which read as two different kinds of thing in one trail.
+  //
+  // Keyed explicitly rather than by adding a `_manually` suffix rule: "manually" says nothing about
+  // whether an action was positive, negative or a change, so a suffix would be guessing for every
+  // future `x_manually` action. This one is known.
+  sent_manually: "update",
   closed: "neutral",
   cancelled: "delete",
   // Goods In lifecycle — completing a receipt posts stock (positive).
@@ -205,4 +214,44 @@ export function changeLabels(metadata: unknown): string[] {
   return changes
     .map((c) => (c && typeof c === "object" ? (c as { label?: unknown }).label : null))
     .filter((l): l is string => typeof l === "string" && l.length > 0);
+}
+
+// ── "Mark as sent" detail ──────────────────────────────────────────────────────────────────────
+//
+// How a manually-issued purchase order reached the supplier. Mirrors PO_ISSUE_CHANNELS in the
+// backend's purchase-order.validation.ts — change together. An unrecognised value is shown verbatim
+// rather than dropped: it came from a server that knows a channel this build does not, and hiding it
+// would be worse than printing it.
+const ISSUE_CHANNEL_LABELS: Record<string, string> = {
+  email: "Email",
+  whatsapp: "WhatsApp",
+  printed: "Printed / hand-delivered",
+  phone: "Phone",
+  other: "Other",
+};
+
+/**
+ * The detail lines for a `purchase_order.sent_manually` entry, in the audit list's own row format.
+ *
+ * Keyed on the ACTION, not merely on the metadata shape. That is the containment: this reads two
+ * named fields off one known action and can never render an unrelated entry's metadata, however
+ * similarly shaped. Everything else keeps going to the audit drawer, which is where raw metadata
+ * belongs.
+ *
+ * Both fields are optional on the server, so all four combinations are real and each returns exactly
+ * the lines it has — no "Method: —" placeholder for something the user chose not to say, and an
+ * empty array when they said neither, which the caller renders as no detail block at all.
+ */
+export function manualSendDetails(action: string, metadata: unknown): string[] {
+  if (action !== "purchase_order.sent_manually") return [];
+  if (!metadata || typeof metadata !== "object") return [];
+  const { channel, note } = metadata as { channel?: unknown; note?: unknown };
+  const lines: string[] = [];
+  if (typeof channel === "string" && channel.length > 0) {
+    lines.push(`Method: ${ISSUE_CHANNEL_LABELS[channel] ?? channel}`);
+  }
+  // Trimmed again on the way out: the server already normalises blank to absent, but a row written
+  // before it did must not render as "Note:" with nothing after it.
+  if (typeof note === "string" && note.trim().length > 0) lines.push(`Note: ${note.trim()}`);
+  return lines;
 }

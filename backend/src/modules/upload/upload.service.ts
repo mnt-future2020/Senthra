@@ -18,6 +18,8 @@ import { ALL_PERMISSIONS } from "#modules/role/permissions.js";
 
 import * as pendingRepo from "./upload.repository.js";
 import {
+  CSV_HEADER_GUARDS,
+  isTextByte,
   CONTENT_PROBE_BYTES,
   CONTENT_SIGNATURES,
   UPLOAD_PURPOSES,
@@ -48,6 +50,9 @@ export const SIGNATURE_TTL_SECONDS = 120;
 const FILE_TYPE_BY_MEDIA: Record<string, string> = {
   "application/pdf": "pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "text/csv": "csv",
+  "application/vnd.ms-excel": "xls",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
   "image/png": "png",
   "image/jpeg": "jpg",
   "image/gif": "gif",
@@ -256,8 +261,11 @@ export async function verifyFinalize(input: FinalizeInput, actor: AuditActor | u
   // silently. The file is attached with nothing having looked inside it.
   //
   // Tying the declaration back to the resource type that was actually signed closes it at the
-  // source: a `raw` row can now only be finalized as PDF or DOCX, and those are exactly the two
-  // types CONTENT_SIGNATURES covers.
+  // source: a `raw` row can only be finalized as one of the raw document types — PDF, DOCX, XLSX,
+  // XLS or CSV — and CONTENT_SIGNATURES covers every one of them, so there is no raw media type
+  // that reaches the pass below without an entry waiting for it. (A catalog test enforces that
+  // coverage, which is what keeps this sentence true as the policy widens: CSV is checked by
+  // exclusion rather than by a magic number, but it is checked.)
   if (resourceTypeFor(mediaType) !== pending.resourceType) {
     throw badRequest("That upload was authorised for a different file type.");
   }
@@ -265,8 +273,8 @@ export async function verifyFinalize(input: FinalizeInput, actor: AuditActor | u
   const url = signedDeliveryUrl(input.publicId, pending.resourceType, creds);
 
   // Cloudinary decodes an `image` on the way in and refuses what it cannot read, so its own acceptance
-  // IS the content check for photos. It stores a `raw` asset opaquely, so a PDF or DOCX has been
-  // checked by nobody until here.
+  // IS the content check for photos. It stores a `raw` asset opaquely, so a document — PDF, DOCX,
+  // XLSX, XLS or CSV — has been checked by nobody until here.
   if (pending.resourceType === "raw") {
     await assertContentMatches(url, mediaType);
   }
@@ -308,11 +316,53 @@ async function assertContentMatches(url: string, mediaType: string): Promise<voi
     throw badRequest(`Could not verify the uploaded file (${e instanceof Error ? e.message : "read failed"}).`);
   }
 
+  // A format with no signature of its own (CSV) is checked by exclusion instead — see
+  // ContentSignature. The two branches are alternatives, not a fallback: a `text` entry has no
+  // `bytes` to test, and a `bytes` entry is never subjected to the binary sweep.
+  if (spec.text) {
+    assertLooksLikeText(head);
+    return;
+  }
+
   const needle = Buffer.from(spec.bytes);
   const ok = spec.searchWindow
     ? head.subarray(0, spec.searchWindow).includes(needle)
     : head.subarray(0, needle.length).equals(needle);
-  if (!ok) throw badRequest("That file isn't a valid PDF, DOCX, PNG or JPG.");
+  if (!ok) throw badRequest("That file isn't a valid PDF, DOCX, XLSX, XLS, PNG or JPG.");
+}
+
+/**
+ * Refuse a probe that is demonstrably not text. The CSV half of the content check.
+ *
+ * Two layers, and the ORDER of the message matters more than the order of the tests: whichever fires,
+ * the user is told their file is not a CSV — never which binary format it looked like. Naming the
+ * format would turn an attachment field into a free file-identification oracle, and the user who hit
+ * this honestly (they picked the wrong file) is not helped by knowing it was a ZIP.
+ *
+ * An EMPTY probe passes. It cannot be reached — `measure` refuses a zero-length asset before this
+ * runs — and treating "no bytes" as "binary" would be the wrong reading if that ever changed: an
+ * empty file is a legitimately empty CSV, not an executable.
+ */
+function assertLooksLikeText(head: Buffer): void {
+  // LAYER 1, and the one that does the real work: every byte in the probe must be one a text file can
+  // contain. That is the whole C0 control range minus tab/LF/CR, plus DEL — bytes no encoding this app
+  // can receive puts in a data file, and bytes every binary format is dense with. A NUL alone used to
+  // be the test; widening it to the control range costs nothing (a CSV has none of them either) and
+  // catches a binary whose first 1024 bytes happen to be NUL-free.
+  //
+  // Deliberately NOT a rule about structure: bytes >= 0x80 are text, because a UTF-8 or Latin-1 CSV
+  // is full of them, and a BOM is three of them.
+  for (const b of head) {
+    if (!isTextByte(b)) throw badRequest("That file isn't a valid CSV.");
+  }
+
+  // LAYER 2: the net for a binary that reads as text this far in. Only headers distinctive enough
+  // that a real CSV could not open with them — see CSV_HEADER_GUARDS for why `MZ` is not one of them
+  // and why excluding it takes nothing away.
+  for (const { bytes } of CSV_HEADER_GUARDS) {
+    const needle = Buffer.from(bytes);
+    if (head.subarray(0, needle.length).equals(needle)) throw badRequest("That file isn't a valid CSV.");
+  }
 }
 
 /**

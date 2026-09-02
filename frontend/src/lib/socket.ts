@@ -21,6 +21,18 @@ function socketOrigin(): string {
   }
 }
 
+// Sent by the server to a device whose session has just been destroyed — evicted by the one-device
+// cap, signed out from another device, or wiped by a password change. Name and reasons mirror
+// SESSION_REVOKED_EVENT / SessionRevokedReason in the backend's lib/realtime.ts; change together.
+export const SESSION_REVOKED_EVENT = "auth:session_revoked";
+
+// Deliberately typed loose (`string`) at the boundary: the reason is turned into copy by
+// signedOutNotice, which falls back to a generic line for anything it doesn't recognise. A newer
+// server sending a reason this build has never heard of must still sign the user out.
+export interface SessionRevokedPayload {
+  reason?: string;
+}
+
 let socket: Socket | null = null;
 let refCount = 0;
 
@@ -62,6 +74,34 @@ export function subscribe(
   return () => {
     events.forEach((ev) => s.off(ev, handler));
     s.io.off("reconnect", handler);
+    refCount -= 1;
+    if (refCount === 0) {
+      socket?.disconnect();
+      socket = null;
+    }
+  };
+}
+
+/**
+ * Subscribe to the server's "your session was revoked" push.
+ *
+ * Separate from subscribe() above on purpose — that one re-runs its handler on every RECONNECT so
+ * data consumers can catch up on missed events, which for a sign-out handler would mean a passing
+ * network blip logging the user out. This one listens to the single event and nothing else.
+ *
+ * Holding this subscription is also what keeps ONE socket open for the whole authenticated session,
+ * so the push arrives on pages that have no other realtime consumer (a settings screen, the customer
+ * portal). It shares the same refcounted connection as every other subscriber, so it costs no extra
+ * websocket.
+ */
+export function onSessionRevoked(handler: (reason: string | undefined) => void): () => void {
+  const s = getSocket();
+  refCount += 1;
+  const listener = (payload?: SessionRevokedPayload) => handler(payload?.reason);
+  s.on(SESSION_REVOKED_EVENT, listener);
+
+  return () => {
+    s.off(SESSION_REVOKED_EVENT, listener);
     refCount -= 1;
     if (refCount === 0) {
       socket?.disconnect();

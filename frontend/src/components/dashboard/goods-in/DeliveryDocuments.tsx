@@ -9,13 +9,19 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { ImageLightbox } from "@/components/ui/ImageLightbox";
 import type { GrnAttachment } from "@/types/goods-in";
 import { isImageType, resolveDocType, stageFiles, UNTYPED_IMAGE } from "./docPicker";
+import { allowedFrom, BASE_DOC_ACCEPT, BASE_DOC_LABEL } from "@/lib/uploadPolicy";
+import { dropRing, useFileDrop } from "@/hooks/useFileDrop";
 
 // Shared delivery-document UI for the GRN form + detail. Limits MIRROR the backend
 // source of truth in backend/src/modules/goods-in/goods-in.validation.ts — keep in sync.
 export const GRN_DOC_MAX_COUNT = 5;
 export const GRN_DOC_MAX_BYTES = 5 * 1024 * 1024; // 5 MB / file
 export const GRN_DOC_MAX_TOTAL_BYTES = 20 * 1024 * 1024; // 20 MB total
-export const GRN_DOC_ACCEPT = ".pdf,.docx,.png,.jpg,.jpeg";
+// The BASE document policy, not the spreadsheet-capable one. A goods receipt carries what came off
+// the van — a delivery note, a packing slip, a photo of a damaged pallet — and a workbook is not one
+// of those, so PRF/PO/Job's CSV/XLS/XLSX are deliberately not offered here. Mirrors `grn_attachment`
+// keeping `DOCUMENT_TYPES` in the backend's upload catalog while the other three moved.
+export const GRN_DOC_ACCEPT = BASE_DOC_ACCEPT;
 
 // The type map and the multi-pick accumulator live in ./docPicker so they can be tested — both were
 // inline here, and both were written for the goods receipt and then silently reused by the hire
@@ -98,7 +104,7 @@ export function DocPicker({
   const atCount = count >= limits.maxCount;
   // Derived from `accept` rather than a second prop, so the picker cannot advertise one set of types
   // and refuse another.
-  const allowed = new Set(accept.split(",").map((e) => e.trim().replace(/^\./, "").toLowerCase()));
+  const allowed = allowedFrom(accept);
 
   // Returns the size actually STAGED, or null when the file was refused — see stageFiles for why the
   // running total cannot be advanced by the picked file's own size.
@@ -153,8 +159,17 @@ export function DocPicker({
     return file.size;
   };
 
+  // A drop runs the SAME `stageFiles` walk the input's onChange runs, so the caps, the type gate and
+  // the running-total accounting cannot differ between the two ways in. `multiple` is honoured here
+  // too: a single-file surface takes the first of a dropped set rather than silently staging all of
+  // them past a rule the picker enforces.
+  const onDropFiles = (files: File[]) => {
+    void stageFiles(multiple ? files : files.slice(0, 1), { bytes: totalBytes, count }, onFile);
+  };
+  const { dragging, dropProps } = useFileDrop(onDropFiles, disabled || busy || atCount);
+
   return (
-    <div>
+    <div {...dropProps} className={dropRing(dragging)}>
       <input
         ref={inputRef}
         type="file"
@@ -169,7 +184,7 @@ export function DocPicker({
         type="button"
         onClick={() => inputRef.current?.click()}
         disabled={disabled || busy || atCount}
-        className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60"
+        className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] disabled:opacity-60"
       >
         {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />} {label}
       </button>
@@ -177,7 +192,7 @@ export function DocPicker({
         {atCount
           ? `Maximum ${limits.maxCount} files reached.`
           : (hint ??
-            `Delivery note, packing slip, invoice or photo — PDF, DOCX, PNG or JPG. Max ${mb(limits.maxBytes)} each · ${limits.maxCount} files · ${mb(limits.maxTotalBytes)} total.`)}
+            `Delivery note, packing slip, invoice or photo — drag here or choose. ${BASE_DOC_LABEL}. Max ${mb(limits.maxBytes)} each · ${limits.maxCount} files · ${mb(limits.maxTotalBytes)} total.`)}
       </p>
     </div>
   );

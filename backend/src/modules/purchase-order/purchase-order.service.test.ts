@@ -6,6 +6,8 @@ vi.mock("./purchase-order.repository.js", () => ({
   findMany: vi.fn(),
   count: vi.fn(),
   update: vi.fn(),
+  // Guarded header transition — returns the fresh row, or null when someone else moved it first.
+  updateStatusIf: vi.fn(),
   softDelete: vi.fn(),
   createWithCode: vi.fn(),
   createManyWithCodes: vi.fn(),
@@ -88,6 +90,7 @@ import {
   deletePurchaseOrder,
   getPurchaseOrder,
   listPurchaseOrders,
+  markPurchaseOrderSent,
   recordSupplierAcceptance,
   rejectPurchaseOrder,
   removeAttachment,
@@ -179,6 +182,8 @@ const mockFindById = poRepo.findById as ReturnType<typeof vi.fn>;
 const mockFindMany = poRepo.findMany as ReturnType<typeof vi.fn>;
 const mockCount = poRepo.count as ReturnType<typeof vi.fn>;
 const mockUpdate = poRepo.update as ReturnType<typeof vi.fn>;
+// The guarded header transition issuing uses. Signature is (id, expectedStatus, data).
+const mockUpdateStatusIf = poRepo.updateStatusIf as ReturnType<typeof vi.fn>;
 const mockSoftDelete = poRepo.softDelete as ReturnType<typeof vi.fn>;
 const mockCreateWithCode = poRepo.createWithCode as ReturnType<typeof vi.fn>;
 const mockCreateMany = poRepo.createManyWithCodes as ReturnType<typeof vi.fn>;
@@ -193,6 +198,11 @@ const auditActions = () => mockAudit.mock.calls.map((c) => c[0].action);
 beforeEach(() => {
   vi.clearAllMocks();
   mockUpdate.mockImplementation((_id: string, data: Record<string, unknown>) => Promise.resolve(poRow(data)));
+  // Default: the guard HELD (nobody raced us). Tests that care about LOSING the race override it
+  // with `mockResolvedValueOnce(null)`, which is exactly what the repository returns in that case.
+  mockUpdateStatusIf.mockImplementation((_id: string, _expected: string, data: Record<string, unknown>) =>
+    Promise.resolve(poRow(data)),
+  );
   mockReqSupplier.mockResolvedValue({ name: "Acme" });
   mockReqWarehouse.mockResolvedValue({ id: WH_ID });
   mockReqIrm.mockImplementation((id: string) => Promise.resolve(irmRow(id)));
@@ -426,7 +436,7 @@ describe("expected delivery date is required to leave draft", () => {
   it("send: blocks a dateless order that somehow reached approved", async () => {
     mockFindById.mockResolvedValue(dateless({ status: "approved" }));
     await expect(sendPurchaseOrder(PO_ID)).rejects.toThrow(/expected delivery date/i);
-    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(mockUpdateStatusIf).not.toHaveBeenCalled();
   });
 
   it("lets a dated order through every one of those gates", async () => {
@@ -886,7 +896,7 @@ describe("PM routing (approved → pm_review → sent)", () => {
     await expect(
       sendPurchaseOrder(PO_ID, { type: "user", id: "7".repeat(24), email: "other@x.co", permissions: ["purchase_orders.send"] }),
     ).rejects.toThrow(/assigned project manager/i);
-    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(mockUpdateStatusIf).not.toHaveBeenCalled();
   });
 
   it("in pm_review, an assign_pm holder may send on the PM's behalf (override)", async () => {
@@ -1734,5 +1744,358 @@ describe("commerciallyMatchesPrf — hires are part of the commercial identity",
 
   it("documents with no hires on either side still compare on their items alone", () => {
     expect(commerciallyMatchesPrf(doc([]), doc([]))).toBe(true);
+  });
+});
+
+// ── "Mark as sent" — the order already reached the supplier outside Senthra ───────────────────
+//
+// The SAME transition as Send to supplier, through the same function, with exactly one difference:
+// no supplier email. Everything else about issuing an order — the source statuses, the delivery-date
+// gate, the assigned-PM rule, the document of record, the rental catch-up — is the commitment being
+// made to a supplier, and none of it changes with who carried the paperwork.
+//
+// So these tests are written as a PAIR with the normal path wherever the two must agree: proving
+// they behave identically is the point, because the failure mode of a second door is the two drifting
+// apart.
+describe("markPurchaseOrderSent — issuing an order that was sent outside Senthra", () => {
+  const mockSent = poEmail.notifySupplierPoSent as ReturnType<typeof vi.fn>;
+  const mockAddAtt = poRepo.addAttachment as ReturnType<typeof vi.fn>;
+  const mockCreds = getCloudinaryCreds as ReturnType<typeof vi.fn>;
+  const mockPdf = documentService.generatePurchaseOrderPdf as ReturnType<typeof vi.fn>;
+  const mockUpload = uploadFileToCloudinary as ReturnType<typeof vi.fn>;
+  const SENDER = { type: "user" as const, id: "u1", email: "buyer@x.co", permissions: ["purchase_orders.send"] };
+  // Everything the issued-PDF archive needs to actually run end to end.
+  const withCloudinary = () => {
+    mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+    mockPdf.mockResolvedValue({ filename: "PO-0001.pdf", buffer: Buffer.from("pdf"), mimeType: "application/pdf" });
+    mockUpload.mockResolvedValue({ url: "https://cdn/po-0001.pdf", publicId: "senthra/po1.pdf", resourceType: "raw" });
+  };
+
+  // --- the transition itself ---------------------------------------------------------------
+  it("approved → sent", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    expect((await markPurchaseOrderSent(PO_ID, {}, SENDER)).status).toBe("sent");
+  });
+
+  it("pm_review → sent, for the assigned PM", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "pm_review", pmUserId: PM_ID, pmName: "Priya M" }));
+    const r = await markPurchaseOrderSent(PO_ID, {}, { type: "user", id: PM_ID, email: "pm@x.co", permissions: ["purchase_orders.send"] });
+    expect(r.status).toBe("sent");
+  });
+
+  it("stamps sentAt and sentBy — the issuer is the signer on the document, whoever posted it", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    await markPurchaseOrderSent(PO_ID, { channel: "whatsapp" }, SENDER);
+    const [, expected, data] = mockUpdateStatusIf.mock.calls[0];
+    expect(expected).toBe("approved"); // the guard carries the status we validated
+    expect(data.status).toBe("sent");
+    expect(data.sentBy).toBe("buyer@x.co");
+    expect(data.sentAt).toBeInstanceOf(Date);
+  });
+
+  // --- the guards, which are NOT relaxed on this path ---------------------------------------
+  it("refuses a dateless order, exactly as Send to supplier does", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved", expectedDeliveryDate: null }));
+    await expect(markPurchaseOrderSent(PO_ID, {}, SENDER)).rejects.toThrow(/expected delivery date/i);
+    expect(mockUpdateStatusIf).not.toHaveBeenCalled();
+  });
+
+  it("in pm_review, another user without the override is refused (403) — no bypass of PM routing", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "pm_review", pmUserId: PM_ID, pmName: "Priya M" }));
+    await expect(
+      markPurchaseOrderSent(PO_ID, {}, { type: "user", id: "7".repeat(24), email: "other@x.co", permissions: ["purchase_orders.send"] }),
+    ).rejects.toThrow(/assigned project manager/i);
+    expect(mockUpdateStatusIf).not.toHaveBeenCalled();
+  });
+
+  it("in pm_review, an assign_pm holder may still issue on the PM's behalf", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "pm_review", pmUserId: PM_ID }));
+    const r = await markPurchaseOrderSent(PO_ID, {}, {
+      type: "user",
+      id: "7".repeat(24),
+      email: "fin@x.co",
+      permissions: ["purchase_orders.send", "purchase_orders.assign_pm"],
+    });
+    expect(r.status).toBe("sent");
+  });
+
+  // Never a silent no-op: an order that cannot be issued must SAY so, or a user who believes they
+  // marked it sent will wait for a Receive button that is never going to appear.
+  it.each(["draft", "pending_approval", "sent", "supplier_accepted", "partially_received", "fully_received", "closed", "cancelled"])(
+    "refuses to issue a %s order (the ordinary transition conflict)",
+    async (status) => {
+      mockFindById.mockResolvedValue(poRow({ status }));
+      await expect(markPurchaseOrderSent(PO_ID, {}, SENDER)).rejects.toThrow(/can't move/i);
+      expect(mockUpdateStatusIf).not.toHaveBeenCalled();
+      expect(mockSent).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a repeated request is refused rather than issuing twice", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    expect((await markPurchaseOrderSent(PO_ID, {}, SENDER)).status).toBe("sent");
+    // The second request reads the order as it now stands — already sent.
+    mockFindById.mockResolvedValue(poRow({ status: "sent", sentAt: new Date() }));
+    await expect(markPurchaseOrderSent(PO_ID, {}, SENDER)).rejects.toThrow(/can't move/i);
+    expect(mockUpdateStatusIf).toHaveBeenCalledTimes(1);
+  });
+
+  // --- the one behaviour that differs, and the hard invariant behind it -----------------------
+  it("NEVER emails the supplier — the whole reason this door exists", async () => {
+    mockFindById.mockResolvedValue(poRow({
+      status: "approved",
+      // A supplier WITH an address on file: the case where pressing Send would fire a duplicate.
+      supplier: { ...poRow().supplier, contactEmail: "orders@acme.co" },
+    }));
+    await markPurchaseOrderSent(PO_ID, { channel: "whatsapp" }, SENDER);
+    await flushAsync();
+    expect(mockSent).not.toHaveBeenCalled();
+  });
+
+  it("channel 'email' still sends nothing — it means the USER emailed it, not that we should", async () => {
+    mockFindById.mockResolvedValue(poRow({
+      status: "approved",
+      supplier: { ...poRow().supplier, contactEmail: "orders@acme.co" },
+    }));
+    await markPurchaseOrderSent(PO_ID, { channel: "email", note: "From my own mailbox" }, SENDER);
+    await flushAsync();
+    expect(mockSent).not.toHaveBeenCalled();
+  });
+
+  it("the normal Send path is untouched — it still emails", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    await sendPurchaseOrder(PO_ID, SENDER);
+    await flushAsync();
+    expect(mockSent).toHaveBeenCalledTimes(1);
+    expect(mockSent.mock.calls[0][0]).toMatchObject({ status: "sent" });
+  });
+
+  // --- document of record: written on BOTH doors ---------------------------------------------
+  it("archives the issued PO PDF, the same system attachment the normal send writes", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    withCloudinary();
+    await markPurchaseOrderSent(PO_ID, { channel: "printed" }, SENDER);
+    await flushAsync();
+    expect(mockAddAtt).toHaveBeenCalledTimes(1);
+    expect(mockAddAtt.mock.calls[0][0]).toMatchObject({
+      label: ISSUED_PO_ATTACHMENT_LABEL,
+      fileType: "pdf",
+      uploadedBy: "system",
+    });
+  });
+
+  it("an archive failure never rolls back the manual issue", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+    mockPdf.mockRejectedValue(new Error("pdfkit exploded"));
+    expect((await markPurchaseOrderSent(PO_ID, {}, SENDER)).status).toBe("sent");
+    await flushAsync();
+    expect(mockAddAtt).not.toHaveBeenCalled();
+  });
+
+  // --- audit: distinguishable, and never claiming a transmission that did not happen ----------
+  it("records purchase_order.sent_manually and NEVER purchase_order.sent", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    await markPurchaseOrderSent(PO_ID, {}, SENDER);
+    expect(auditActions()).toContain("purchase_order.sent_manually");
+    expect(auditActions()).not.toContain("purchase_order.sent");
+  });
+
+  it("carries the channel and note as audit metadata", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    await markPurchaseOrderSent(PO_ID, { channel: "phone", note: "Confirmed with Dave on 0113 496" }, SENDER);
+    const entry = mockAudit.mock.calls.find((c) => c[0].action === "purchase_order.sent_manually")![0];
+    expect(entry.metadata).toEqual({ channel: "phone", note: "Confirmed with Dave on 0113 496" });
+    expect(entry.targetType).toBe("purchase_order");
+    expect(entry.targetLabel).toBe("PO-0001");
+  });
+
+  it("omits metadata entirely when neither optional field was given", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    await markPurchaseOrderSent(PO_ID, {}, SENDER);
+    const entry = mockAudit.mock.calls.find((c) => c[0].action === "purchase_order.sent_manually")![0];
+    expect(entry.metadata).toBeUndefined();
+  });
+
+  it("treats a whitespace-only note as absent rather than storing it", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    await markPurchaseOrderSent(PO_ID, { note: "   " }, SENDER);
+    const entry = mockAudit.mock.calls.find((c) => c[0].action === "purchase_order.sent_manually")![0];
+    expect(entry.metadata).toBeUndefined();
+  });
+
+  it("the normal Send path still records purchase_order.sent, with no channel metadata", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    await sendPurchaseOrder(PO_ID, SENDER);
+    const entry = mockAudit.mock.calls.find((c) => c[0].action === "purchase_order.sent")![0];
+    expect(entry.metadata).toBeUndefined();
+    expect(auditActions()).not.toContain("purchase_order.sent_manually");
+  });
+
+  // --- downstream: the same order a normal send produces --------------------------------------
+  it("notifies the procurement watchers with the new status", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    await markPurchaseOrderSent(PO_ID, {}, SENDER);
+    expect((emitToRoom as ReturnType<typeof vi.fn>).mock.calls
+      .filter((c) => c[0] === PURCHASE_ORDER_WATCHERS_ROOM && c[1] === "purchase_order:updated")
+      .map((c) => c[2])).toEqual([{ id: PO_ID, code: "PO-0001", status: "sent" }]);
+  });
+
+  it("leaves the money, the dates and the acceptance alone", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved", grandTotalPence: 12_000 }));
+    await markPurchaseOrderSent(PO_ID, { channel: "printed" }, SENDER);
+    const written = mockUpdateStatusIf.mock.calls[0][2];
+    // Exactly three fields — issuing an order is not an edit of it. In particular nothing here
+    // records a supplier acceptance: the supplier has confirmed nothing by receiving a WhatsApp.
+    expect(Object.keys(written).sort()).toEqual(["sentAt", "sentBy", "status"]);
+  });
+
+  it("writes no stock — marking an order sent is not a receipt", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved", items: [{ id: "l1", quantity: 5, receivedQuantity: 0 }] }));
+    await markPurchaseOrderSent(PO_ID, {}, SENDER);
+    await flushAsync();
+    expect(poRepo.incrementLineReceivedTx).not.toHaveBeenCalled();
+    expect(poRepo.setStatusTx).not.toHaveBeenCalled();
+  });
+
+  // --- rental compatibility: one transition, three shapes of order ----------------------------
+  // The receiving gate reads the HEADER status, never the line type, so all three must issue the
+  // same way. A separate manual-send path for hires would have dropped the catch-up below.
+  const hireLine = (over: Record<string, unknown> = {}) => ({
+    id: "h1",
+    quantity: 2,
+    receivedQuantity: 0,
+    returnedQuantity: 0,
+    cancelledQuantity: 0,
+    hireStatus: "awaiting_delivery",
+    ...over,
+  });
+
+  it.each([
+    ["IRM-only", { items: [{ id: "l1", quantity: 3, receivedQuantity: 0 }], rentalItems: [] }],
+    ["rental-only", { items: [], rentalItems: [hireLine()] }],
+    ["mixed IRM + rental", { items: [{ id: "l1", quantity: 3, receivedQuantity: 0 }], rentalItems: [hireLine()] }],
+  ])("issues a %s order through the same transition", async (_label, lines) => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved", ...lines }));
+    expect((await markPurchaseOrderSent(PO_ID, { channel: "whatsapp" }, SENDER)).status).toBe("sent");
+    expect(auditActions()).toContain("purchase_order.sent_manually");
+  });
+
+  it("runs the rental catch-up: a hire delivered pre-issue lands on the right status", async () => {
+    // The quantities were recorded while the order could not legally move; issuing is when the
+    // status is allowed to catch up. Same behaviour the normal send has always had.
+    const delivered = [hireLine({ receivedQuantity: 2, hireStatus: "on_hire" })];
+    mockFindById
+      .mockResolvedValueOnce(poRow({ status: "approved", items: [], rentalItems: delivered })) // loadOrThrow
+      .mockResolvedValueOnce(poRow({ status: "sent", items: [], rentalItems: delivered })); // the catch-up's re-read
+    await markPurchaseOrderSent(PO_ID, {}, SENDER);
+    // recomputeRentalReceiptStatus re-reads the order (now `sent`) and advances it on the quantities.
+    expect(mockUpdate.mock.calls.some(([, data]) => data.status === "fully_received")).toBe(true);
+  });
+
+  // --- the two doors are ONE implementation ---------------------------------------------------
+  it("normal send and manual send take the identical guarded transition", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    await sendPurchaseOrder(PO_ID, SENDER);
+    const normal = mockUpdateStatusIf.mock.calls[0];
+    vi.clearAllMocks();
+    mockUpdateStatusIf.mockImplementation((_id: string, _e: string, data: Record<string, unknown>) => Promise.resolve(poRow(data)));
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    await markPurchaseOrderSent(PO_ID, { channel: "printed" }, SENDER);
+    const manual = mockUpdateStatusIf.mock.calls[0];
+    expect(manual[0]).toBe(normal[0]); // same order id
+    expect(manual[1]).toBe(normal[1]); // same expected source status carried into the guard
+    expect(Object.keys(manual[2]).sort()).toEqual(Object.keys(normal[2]).sort()); // same write
+  });
+});
+
+// ── The race the second door makes reachable ─────────────────────────────────────────────────
+//
+// Send to supplier and Mark as sent are two buttons on two desks pointed at one order. Both read the
+// status, both check it, both write — and read-then-write let both win, because Mongo raises nothing
+// when two writes never overlap in time. The cost is not a cosmetic double transition: it is a
+// duplicate email to the supplier and a duplicate document of record.
+//
+// This models the guard the way the database applies it — a filtered update against ONE row of shared
+// state — rather than asserting that a mock returned null. Only the request whose expected status
+// still matches may write.
+describe("concurrent issue: exactly one door opens", () => {
+  const mockSent = poEmail.notifySupplierPoSent as ReturnType<typeof vi.fn>;
+  const mockAddAtt = poRepo.addAttachment as ReturnType<typeof vi.fn>;
+  const ACTOR = { type: "user" as const, id: "u1", email: "buyer@x.co", permissions: ["purchase_orders.send"] };
+
+  /** One shared row, plus the filtered update `updateStatusIf` compiles to. */
+  function liveOrder(initialStatus: string) {
+    let row = poRow({ status: initialStatus, supplier: { ...poRow().supplier, contactEmail: "orders@acme.co" } });
+    mockFindById.mockImplementation(async () => row);
+    mockUpdateStatusIf.mockImplementation(async (_id: string, expected: string, data: Record<string, unknown>) => {
+      // The filter and the write are ONE operation — this is the whole point of the guard.
+      if (row.status !== expected) return null;
+      row = poRow({ ...row, ...data });
+      return row;
+    });
+    mockUpdate.mockImplementation(async (_id: string, data: Record<string, unknown>) => {
+      row = poRow({ ...row, ...data });
+      return row;
+    });
+    return () => row;
+  }
+
+  it("Send to supplier and Mark as sent, fired together: one succeeds, one gets a 409", async () => {
+    const read = liveOrder("approved");
+    const [a, b] = await Promise.allSettled([
+      sendPurchaseOrder(PO_ID, ACTOR),
+      markPurchaseOrderSent(PO_ID, { channel: "whatsapp" }, ACTOR),
+    ]);
+    await flushAsync();
+
+    const outcomes = [a.status, b.status].sort();
+    expect(outcomes).toEqual(["fulfilled", "rejected"]);
+    const loser = (a.status === "rejected" ? a : b) as PromiseRejectedResult;
+    expect(loser.reason).toMatchObject({ status: 409 });
+    expect(loser.reason.message).toMatch(/already sent/i);
+
+    // One transition, one audit entry, one email at most, one archived document of record.
+    expect(read().status).toBe("sent");
+    const issueEntries = auditActions().filter((x) => x === "purchase_order.sent" || x === "purchase_order.sent_manually");
+    expect(issueEntries).toHaveLength(1);
+    expect(mockSent.mock.calls.length).toBe(a.status === "fulfilled" ? 1 : 0);
+    expect(mockAddAtt.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+
+  it("two Mark as sent requests at once issue the order once and email nobody", async () => {
+    const read = liveOrder("approved");
+    const results = await Promise.allSettled([
+      markPurchaseOrderSent(PO_ID, { channel: "printed" }, ACTOR),
+      markPurchaseOrderSent(PO_ID, { channel: "phone" }, ACTOR),
+    ]);
+    await flushAsync();
+
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
+    expect(read().status).toBe("sent");
+    expect(auditActions().filter((x) => x === "purchase_order.sent_manually")).toHaveLength(1);
+    expect(mockSent).not.toHaveBeenCalled();
+  });
+
+  it("two Send to supplier requests at once email the supplier once", async () => {
+    // The pre-existing race, closed by the same guard — the frontend busy flag was the only thing
+    // standing between a double-click and two supplier emails.
+    liveOrder("approved");
+    const results = await Promise.allSettled([sendPurchaseOrder(PO_ID, ACTOR), sendPurchaseOrder(PO_ID, ACTOR)]);
+    await flushAsync();
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(mockSent).toHaveBeenCalledTimes(1);
+  });
+
+  it("the loser's message names where the order actually is, so the UI can resync", async () => {
+    // The order was valid when we read it, and gone by the time we wrote — another session
+    // cancelled it in between. The guard is what turns that into a 409 instead of a lost write.
+    mockFindById
+      .mockResolvedValueOnce(poRow({ status: "approved" })) // loadOrThrow: a legal source
+      .mockResolvedValue(poRow({ status: "cancelled" })); // the re-read behind the conflict message
+    mockUpdateStatusIf.mockResolvedValueOnce(null);
+    await expect(markPurchaseOrderSent(PO_ID, {}, ACTOR)).rejects.toThrow(/already cancelled/i);
+    expect(mockSent).not.toHaveBeenCalled();
   });
 });

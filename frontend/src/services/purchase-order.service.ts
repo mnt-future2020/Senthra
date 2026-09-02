@@ -257,6 +257,21 @@ export function approvePurchaseOrder(id: string): Promise<ApproveResult> {
 }
 export const rejectPurchaseOrder = (id: string, reason: string) => action(id, "reject", { reason });
 export const sendPurchaseOrder = (id: string) => action(id, "send");
+
+// "Mark as sent" — the order already reached the supplier outside Senthra (WhatsApp, the buyer's own
+// mailbox, a printed copy, over the phone). The SAME transition to `sent` as the action above and the
+// same permission; the one difference is that no supplier email is sent, which the server enforces.
+//
+// `channel` and `note` are optional and land in AUDIT METADATA ONLY — nothing on the order stores
+// them. In particular `channel: "email"` means "the user emailed it themselves"; it is not an
+// instruction to send one.
+export const PO_ISSUE_CHANNELS = ["email", "whatsapp", "printed", "phone", "other"] as const;
+export type PoIssueChannel = (typeof PO_ISSUE_CHANNELS)[number];
+export interface MarkSentPayload {
+  channel?: PoIssueChannel;
+  note?: string;
+}
+export const markPurchaseOrderSent = (id: string, payload: MarkSentPayload = {}) => action(id, "mark-sent", payload);
 // Cancellation reason is MANDATORY (audited; referenced by the supplier cancellation email).
 export const cancelPurchaseOrder = (id: string, reason: string) => action(id, "cancel", { reason });
 export const closePurchaseOrder = (id: string) => action(id, "close");

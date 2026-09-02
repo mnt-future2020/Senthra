@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { AlertTriangle, CalendarClock, CheckCircle2, ChevronRight, ClipboardCheck, Download, FileText, Loader2, Package, PackageCheck, PackageX, Paperclip, Pencil, ScrollText, Send, Trash2, Upload, UserRound, XCircle } from "lucide-react";
+import { AlertTriangle, CalendarClock, CheckCheck, CheckCircle2, ChevronRight, ClipboardCheck, Download, FileText, Loader2, Package, PackageCheck, PackageX, Paperclip, Pencil, ScrollText, Send, Trash2, Upload, UserRound, XCircle } from "lucide-react";
 
 import { hireWindowState } from "@/components/dashboard/rentals/hireWindow";
 import { canMoveHires, damageableNow, hireKeepsOrderOpen, hireTakesDelivery, netOrdered } from "@/components/dashboard/rentals/hireActions";
@@ -20,7 +20,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { DetailHeader } from "@/components/ui/DetailHeader";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls } from "@/components/ui/styles";
-import { actionLabel, actionTone, changeLabels, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
+import { actionLabel, actionTone, changeLabels, manualSendDetails, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { documentChipLabel } from "@/components/dashboard/purchase-requests/documentGroups";
 import { GrnStatusBadge, formatDate as grnDate } from "@/components/dashboard/goods-in/grnStatus";
@@ -30,14 +30,23 @@ import type { AuditEntry } from "@/types/audit";
 import type { GoodsReceipt } from "@/types/goods-in";
 import type { PurchaseOrder } from "@/types/purchase-order";
 import { uploadDirect } from "@/lib/upload";
+import { allowedFrom, BUSINESS_DOC_ACCEPT, BUSINESS_DOC_LABEL, resolveFileType } from "@/lib/uploadPolicy";
+import { dropRing, useFileDrop } from "@/hooks/useFileDrop";
 import { shrinkImage } from "@/lib/image";
 import { returnLegSummary } from "@/lib/rentalReturn";
 import { hireDeliveryWarning } from "@/lib/hireDelivery";
 import { Notice } from "@/components/ui/Notice";
+import { issueEligibility, markSentPayload } from "./issueActions";
 import { HireDeliveries, HireDeliveriesHeading } from "./HireDeliveries";
 import { HireCustodyTimeline } from "./HireCustodyTimeline";
 
-const EXT_TYPE: Record<string, string> = { pdf: "pdf", docx: "docx", png: "png", jpg: "jpg", jpeg: "jpg" };
+// The spreadsheet-capable document policy — a supplier's price breakdown or bill of materials is
+// ordinary supporting paperwork on an order. Only the ACCEPTED SET widens: a CSV or workbook is an
+// attachment like any other here, with the same 10 MB cap, the same permission and the same audit.
+// The generated "Issued PO — as sent" archive is untouched by this and keeps its reserved label,
+// which the backend refuses to a user upload at signature time.
+const ATTACH_ACCEPT = BUSINESS_DOC_ACCEPT;
+const ATTACH_ALLOWED = allowedFrom(ATTACH_ACCEPT);
 
 type Tab = "overview" | "receipts" | "attachments" | "audit";
 
@@ -71,6 +80,7 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   const [reason, setReason] = React.useState("");
   const [downloading, setDownloading] = React.useState(false);
   const [confirmSend, setConfirmSend] = React.useState(false);
+  const [markSentOpen, setMarkSentOpen] = React.useState(false);
   const [assignPmOpen, setAssignPmOpen] = React.useState(false);
   const [acceptOpen, setAcceptOpen] = React.useState(false);
   const [deliveryDateOpen, setDeliveryDateOpen] = React.useState(false);
@@ -262,19 +272,36 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   // The backend rejects sending a PO with no expected delivery date (it's printed on the issued
   // document and the warehouse schedules against it). Mirror that here so it's caught before the
   // round-trip. Approve/Submit gate on the same thing, so this is a backstop.
-  if ((s === "approved" || s === "pm_review") && can("purchase_orders.send"))
+  // The two doors onto the SAME transition, so they share ONE eligibility rule (issueActions.ts) —
+  // an order Mark as sent could reach but Send could not, or the reverse, would be a state machine
+  // with two answers. Mark as sent goes first and stays secondary so "Send to supplier" keeps the
+  // primary slot and remains the default read.
+  const issue = issueEligibility(po, can("purchase_orders.send"));
+  if (issue.visible) {
+    actions.push(
+      <ActionBtn
+        key="mark-sent"
+        icon={CheckCheck}
+        onClick={() => setMarkSentOpen(true)}
+        disabled={busy || issue.disabled}
+        title={issue.reason ?? "Already sent to the supplier outside Senthra — issue it without emailing."}
+      >
+        Mark as sent
+      </ActionBtn>,
+    );
     actions.push(
       <ActionBtn
         key="send"
         icon={Send}
         primary
         onClick={() => setConfirmSend(true)}
-        disabled={busy || !po.expectedDeliveryDate}
-        title={!po.expectedDeliveryDate ? "Set an expected delivery date before sending to the supplier." : undefined}
+        disabled={busy || issue.disabled}
+        title={issue.reason ?? undefined}
       >
         Send to supplier
       </ActionBtn>,
     );
+  }
   // Record the supplier's acknowledgement. Available on any issued, non-terminal order — goods
   // often arrive before the paperwork, and the ack reference/date must not be lost just because
   // the truck was quick. Only `sent` advances the status; later ones record the event in place.
@@ -469,6 +496,24 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
             await run(() => poService.updateConfirmedDeliveryDate(po.id, confirmedDeliveryDate, deliveryReason), "Confirmed delivery date updated.");
           }}
           onClose={() => setDeliveryDateOpen(false)}
+        />
+      )}
+
+      {markSentOpen && (
+        <MarkSentDialog
+          po={po}
+          busy={busy}
+          onConfirm={async (payload) => {
+            setMarkSentOpen(false);
+            await run(
+              () => poService.markPurchaseOrderSent(po.id, payload),
+              "Marked as sent — no email was sent.",
+              // Same reason Send passes it: in pm_review only the ASSIGNED PM may issue, so a
+              // re-assignment made elsewhere turns this into a 403. Resync to show who owns it.
+              true,
+            );
+          }}
+          onClose={() => setMarkSentOpen(false)}
         />
       )}
 
@@ -722,6 +767,90 @@ function SupplierAcceptanceDialog({ po, busy, onConfirm, onClose }: { po: Purcha
             className="rounded-xl bg-[var(--accent)] px-3.5 py-2 text-xs font-extrabold text-white hover:opacity-90 disabled:opacity-60"
           >
             Record acceptance
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// "Mark as sent" — the order already reached the supplier outside Senthra.
+//
+// The SAME transition as Send to supplier and therefore the same commitment, so it is confirmed
+// rather than fired straight from the toolbar: past `sent` there is no way back to draft. The one
+// thing this dialog has to make unmissable is that NO EMAIL WILL BE SENT — that is the entire
+// difference between the two buttons, and a user who misreads it either double-sends a PO to a
+// supplier or believes one went out when it did not.
+//
+// Channel and note are OPTIONAL and go only into the audit entry. Neither is required, because the
+// business fact being recorded — this order has been issued — is complete without them.
+const MARK_SENT_CHANNELS: { value: poService.PoIssueChannel; label: string }[] = [
+  // "Email" here means the USER emailed it from their own mailbox. It does not ask Senthra to send
+  // one, and the server never reads it as such — worth saying plainly, because it is the one option
+  // whose name could be misread as "send an email after all".
+  { value: "email", label: "Email (from my own mailbox)" },
+  { value: "whatsapp", label: "WhatsApp" },
+  { value: "printed", label: "Printed / hand-delivered" },
+  { value: "phone", label: "Phone" },
+  { value: "other", label: "Other" },
+];
+function MarkSentDialog({ po, busy, onConfirm, onClose }: { po: PurchaseOrder; busy: boolean; onConfirm: (payload: poService.MarkSentPayload) => void; onClose: () => void }) {
+  const [channel, setChannel] = React.useState<poService.PoIssueChannel | "">("");
+  const [note, setNote] = React.useState("");
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-sm font-extrabold text-[var(--ink)]">Mark as sent</h3>
+        <p className="mt-1 text-xs text-[var(--muted)]">
+          Was <span className="font-bold text-[var(--ink)]">{po.code}</span> already sent to{" "}
+          {po.supplierName ?? po.supplier?.name ?? "the supplier"} outside Senthra?
+        </p>
+        {/* The consequence and the non-consequence, in that order — what this unlocks, and the one
+            thing it deliberately does not do. */}
+        <p className="mt-2 rounded-lg bg-[var(--surface-2)] px-2.5 py-1.5 text-[11px] text-[var(--muted)]">
+          This issues the order and unlocks receiving.{" "}
+          <span className="font-bold text-[var(--ink)]">No email will be sent.</span>
+        </p>
+        <div className="mt-4 grid gap-3">
+          <div>
+            <label className={labelCls} htmlFor="mark-sent-channel">How was it sent?</label>
+            <select
+              id="mark-sent-channel"
+              className={inputCls}
+              value={channel}
+              onChange={(e) => setChannel(e.target.value as poService.PoIssueChannel | "")}
+            >
+              <option value="">Not specified</option>
+              {MARK_SENT_CHANNELS.map((c) => (
+                <option key={c.value} value={c.value}>{c.label}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={labelCls} htmlFor="mark-sent-note">Note</label>
+            <textarea
+              id="mark-sent-note"
+              className={inputCls}
+              rows={2}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              maxLength={500}
+              placeholder="Who you sent it to, and when (optional)"
+            />
+            {/* Says where this ends up, so nobody expects to find it on the order afterwards. */}
+            <p className="mt-1 text-[11px] text-[var(--faint)]">Both are optional and are recorded on the audit trail.</p>
+          </div>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-xl border border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--ink)] hover:bg-[var(--surface-2)]">Cancel</button>
+          <button
+            type="button"
+            onClick={() => onConfirm(markSentPayload(channel, note))}
+            disabled={busy}
+            className="rounded-xl bg-[var(--accent)] px-3.5 py-2 text-xs font-extrabold text-white hover:opacity-90 disabled:opacity-60"
+          >
+            Mark as sent
           </button>
         </div>
       </div>
@@ -1207,11 +1336,12 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
   const [confirm, setConfirm] = React.useState<{ open: boolean; id: string | null }>({ open: false, id: null });
   const [deleting, setDeleting] = React.useState(false);
   const inputRef = React.useRef<HTMLInputElement>(null);
-
   const onFile = (rawFile: File) => {
-    const ext = rawFile.name.split(".").pop()?.toLowerCase() ?? "";
-    if (!EXT_TYPE[ext]) {
-      pushToast("Unsupported file. Use PDF, DOCX, PNG or JPG.", "alert");
+    // Resolved against this surface's own accept string, so the gate can only be what the dialog
+    // offered. It runs on a DROPPED file too — nothing constrains a drop, so this is the only check
+    // standing between a dragged .zip and a signature request.
+    if (resolveFileType(rawFile.name, ATTACH_ALLOWED) == null) {
+      pushToast(`Unsupported file. Use ${BUSINESS_DOC_LABEL}.`, "alert");
       return;
     }
     setUploading(true);
@@ -1239,6 +1369,10 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
     })();
   };
 
+  // One file at a time, matching the input (which has no `multiple`) — a dropped set takes the
+  // first, because each upload here answers with a whole PO DTO and two in flight would race.
+  const { dragging, dropProps } = useFileDrop((files) => onFile(files[0]), uploading || !canEdit);
+
   const onDelete = async () => {
     if (!confirm.id || deleting) return;
     setDeleting(true);
@@ -1256,12 +1390,12 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
   return (
     <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
       {canEdit && (
-        <div className="mb-4">
-          <input ref={inputRef} type="file" accept=".pdf,.docx,.png,.jpg,.jpeg" className="hidden" onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
-          <button type="button" onClick={() => inputRef.current?.click()} disabled={uploading} className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60">
+        <div {...dropProps} className={`mb-4 ${dropRing(dragging)}`}>
+          <input ref={inputRef} type="file" accept={ATTACH_ACCEPT} className="hidden" onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
+          <button type="button" onClick={() => inputRef.current?.click()} disabled={uploading} className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] disabled:opacity-60">
             {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />} Upload file
           </button>
-          <p className="mt-1.5 text-[11px] text-[var(--faint)]">Supplier quote, invoice or supporting document — PDF, DOCX, PNG or JPG (max 10 MB).</p>
+          <p className="mt-1.5 text-[11px] text-[var(--faint)]">Supplier quote, invoice or supporting document — drag a file here or use the button. {BUSINESS_DOC_LABEL} (max 10 MB).</p>
         </div>
       )}
       {po.attachments.length === 0 ? (
@@ -1459,20 +1593,39 @@ function AuditTrail({ poId }: { poId: string }) {
     <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
       <ul className="divide-y divide-[var(--border)]">
         {entries.map((e) => {
-          const changes = changeLabels(e.metadata);
+          // The field-level diff of an edit, plus — for a manually-issued order — the channel and
+          // note the Mark as sent dialog collected. Two sources, one list, because they are the same
+          // thing to a reader: the detail behind the headline. They never co-occur in practice.
+          const changes = [...changeLabels(e.metadata), ...manualSendDetails(e.action, e.metadata)];
           return (
             <li key={e.id} className="px-4 py-3">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <span className={`inline-block shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}>{actionLabel(e.action)}</span>
-                  <span className="text-xs text-[var(--muted)]">{e.actorEmail ?? "system"}</span>
+              {/* Chip · actor · time. Three items that FIT on one line on a desktop card and cannot
+                  at 360px, where the card is ~288px wide and the chip alone is ~186px of it.
+                  Everything here was `shrink-0` or unshrinkable, so the row simply ran past the card.
+                  The fix is to let it WRAP rather than to shrink anything: nothing is hidden, no type
+                  gets smaller, and on any width where the three fit the layout is byte-for-byte what
+                  it was — `flex-wrap` costs nothing until it is needed. */}
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                  {/* `max-w-full` and no `whitespace-nowrap`, so a chip wider than the card wraps its
+                      own text instead of overflowing. `shrink-0` still keeps it whole beside the
+                      email whenever there is room. */}
+                  <span className={`inline-block max-w-full shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}>{actionLabel(e.action)}</span>
+                  {/* `min-w-0` lets it drop below the chip; `break-all` is for the address long
+                      enough to overflow even a whole line of its own. */}
+                  <span className="min-w-0 break-all text-xs text-[var(--muted)]">{e.actorEmail ?? "system"}</span>
                 </div>
-                <span className="shrink-0 text-[11px] text-[var(--faint)]" title={new Date(e.createdAt).toLocaleString("en-GB")}>{relativeTime(e.createdAt)}</span>
+                {/* `ml-auto` so it stays right-aligned on the line it lands on — `justify-between`
+                    alone would flush it LEFT once it wrapped onto a row of its own. */}
+                <span className="ml-auto shrink-0 text-[11px] text-[var(--faint)]" title={new Date(e.createdAt).toLocaleString("en-GB")}>{relativeTime(e.createdAt)}</span>
               </div>
               {changes.length > 0 && (
                 <ul className="mt-2 space-y-1 border-l-2 border-[var(--border)] pl-3">
+                  {/* `break-words`: a Mark-as-sent note is free text up to 500 characters and can
+                      carry an unbroken run — a URL, a long reference — that would otherwise push the
+                      row wider than the card at 390px. */}
                   {changes.map((c, i) => (
-                    <li key={i} className="text-xs text-[var(--muted)]">{c}</li>
+                    <li key={i} className="text-xs break-words text-[var(--muted)]">{c}</li>
                   ))}
                 </ul>
               )}

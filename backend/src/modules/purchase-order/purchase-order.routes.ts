@@ -11,6 +11,7 @@ import {
   poAssignPmSchema,
   poCancelSchema,
   poDeliveryDateSchema,
+  poMarkSentSchema,
   poRejectSchema,
   poSupplierAcceptSchema,
   updatePurchaseOrderSchema,
@@ -76,6 +77,18 @@ router.post(
   poController.rejectPurchaseOrder,
 );
 router.post("/:id/send", requirePermission("purchase_orders.send"), writeLimiter, poController.sendPurchaseOrder);
+// The order already reached the supplier outside Senthra (WhatsApp, the buyer's own mailbox, a printed
+// copy, over the phone). The SAME transition as /send and therefore the SAME permission: what is being
+// exercised is the authority to commit this order to a supplier, which does not change with the
+// courier. `purchase_orders.edit` would let a drafter issue an order; a new key would need a seed, a
+// role migration and an answer to "who gets it" that has no business behind it.
+router.post(
+  "/:id/mark-sent",
+  requirePermission("purchase_orders.send"),
+  writeLimiter,
+  validateBody(poMarkSentSchema),
+  poController.markPurchaseOrderSent,
+);
 router.post(
   "/:id/cancel",
   requirePermission("purchase_orders.cancel"),

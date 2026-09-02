@@ -1,11 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 // Mock lib/prisma so importing the repository never constructs a real Prisma client —
-// buildWhere is a pure where-clause builder with no I/O.
+// buildWhere is a pure where-clause builder with no I/O. `purchaseOrder` carries the two calls
+// `updateStatusIf` makes, so the guarded transition can be exercised against a fake row.
 import { vi } from "vitest";
-vi.mock("../../lib/prisma.js", () => ({ prisma: {} }));
+vi.mock("../../lib/prisma.js", () => ({
+  prisma: { purchaseOrder: { updateMany: vi.fn(), findFirst: vi.fn() } },
+}));
 
-import { awaitingClosePoWhere, buildWhere, LIVE_GRN, RECEIVABLE_PO_STATUSES, withRelations } from "./purchase-order.repository.js";
+import { prisma } from "../../lib/prisma.js";
+import { awaitingClosePoWhere, buildWhere, LIVE_GRN, RECEIVABLE_PO_STATUSES, updateStatusIf, withRelations } from "./purchase-order.repository.js";
 
 describe("buildWhere — PO list status filtering", () => {
   it("maps a single status to an equality filter (backward compatible)", () => {
@@ -253,5 +257,65 @@ describe("buildWhere — the `awaiting_close` derived pseudo-status", () => {
     const where = buildWhere({ status: "awaiting_close", search: "PO-1" });
     expect(where.rentalItems).toBeDefined();
     expect(where.OR).toHaveLength(3);
+  });
+});
+
+// ── updateStatusIf — the guarded header transition ────────────────────────────────────────────
+//
+// The defence `updateRentalLineIf` gives a hire line, applied to the order header. What matters is
+// that the expected status travels INTO the write: a check made before the write is not a guard,
+// because a second request can pass the identical check on the identical status and Mongo raises
+// nothing when the two writes never overlap in time.
+describe("updateStatusIf — the expected status is part of the write, not a prior check", () => {
+  const mockUpdateMany = prisma.purchaseOrder.updateMany as ReturnType<typeof vi.fn>;
+  const mockFindFirst = prisma.purchaseOrder.findFirst as ReturnType<typeof vi.fn>;
+  const PO_ID = "f".repeat(24);
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it("carries the expected status in the WHERE clause", async () => {
+    mockUpdateMany.mockResolvedValue({ count: 1 });
+    mockFindFirst.mockResolvedValue({ id: PO_ID, status: "sent" });
+    await updateStatusIf(PO_ID, "approved", { status: "sent" });
+    expect(mockUpdateMany).toHaveBeenCalledWith({
+      where: { id: PO_ID, status: "approved" },
+      data: { status: "sent" },
+    });
+  });
+
+  it("returns the fresh row when the guard held", async () => {
+    mockUpdateMany.mockResolvedValue({ count: 1 });
+    mockFindFirst.mockResolvedValue({ id: PO_ID, status: "sent" });
+    await expect(updateStatusIf(PO_ID, "approved", { status: "sent" })).resolves.toMatchObject({ status: "sent" });
+  });
+
+  // The loser of a race: the row moved on, so the filter matched nothing. `null` — never a throw,
+  // and never a silent success — is what lets the service answer with a 409 that names the new status
+  // rather than a 500 the client would retry straight back into.
+  it("returns null when the row had already moved, and does not re-read it", async () => {
+    mockUpdateMany.mockResolvedValue({ count: 0 });
+    await expect(updateStatusIf(PO_ID, "approved", { status: "sent" })).resolves.toBeNull();
+    expect(mockFindFirst).not.toHaveBeenCalled();
+  });
+
+  // Two requests, one row, real ordering: the second must find the status already moved. This is the
+  // regression — before the guard, both `where: { id }` writes landed and both callers proceeded to
+  // email the supplier and archive a document of record.
+  it("lets exactly one of two concurrent transitions through", async () => {
+    let status = "approved";
+    mockUpdateMany.mockImplementation(async ({ where, data }: { where: { status: string }; data: { status: string } }) => {
+      if (status !== where.status) return { count: 0 };
+      status = data.status;
+      return { count: 1 };
+    });
+    mockFindFirst.mockImplementation(async () => ({ id: PO_ID, status }));
+
+    const results = await Promise.all([
+      updateStatusIf(PO_ID, "approved", { status: "sent" }),
+      updateStatusIf(PO_ID, "approved", { status: "sent" }),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(results.filter((r) => r === null)).toHaveLength(1);
+    expect(status).toBe("sent");
   });
 });

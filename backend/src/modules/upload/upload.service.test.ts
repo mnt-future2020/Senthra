@@ -42,6 +42,10 @@ const ACTOR = { type: "user" as const, id: "u1", email: "buyer@x.co", permission
 const PDF = Buffer.concat([Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d]), Buffer.alloc(64, 0x41)]);
 const DOCX = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.alloc(64, 0x41)]);
 const EXE = Buffer.concat([Buffer.from([0x4d, 0x5a, 0x90, 0x00]), Buffer.alloc(64, 0x41)]);
+// OLE2 compound file — the legacy .xls container.
+const OLE2 = Buffer.concat([Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]), Buffer.alloc(64, 0x41)]);
+// A CSV has no signature at all; this is simply text. That is exactly why it needs the inverted check.
+const CSV_BYTES = Buffer.from("code,description,qty\nSKU-1,Cable tray 3m,12\n", "utf8");
 
 const create = vi.mocked(pendingRepo.create);
 const findByPublicId = vi.mocked(pendingRepo.findByPublicId);
@@ -379,6 +383,173 @@ describe("verifyFinalize — content", () => {
         permissions: ["inventory.adjust"],
       }),
     ).rejects.toThrow(/file type/i);
+  });
+
+  // ── Spreadsheets ─────────────────────────────────────────────────────────────────────────────
+  //
+  // All three are `raw`, so all three reach the magic-byte pass — which is the point of accepting
+  // them here rather than waving them through on their extension.
+
+  const XLS = "application/vnd.ms-excel";
+  const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  const CSV = "text/csv";
+
+  it("accepts a real XLSX", async () => {
+    // OOXML — the same ZIP container as DOCX, so these are the correct bytes for a workbook.
+    firstBytes.mockResolvedValue(DOCX);
+    await expect(verifyFinalize(finInput({ mediaType: XLSX, fileName: "prices.xlsx" }), ACTOR)).resolves.toBeTruthy();
+  });
+
+  it("accepts a real legacy XLS", async () => {
+    firstBytes.mockResolvedValue(OLE2);
+    await expect(verifyFinalize(finInput({ mediaType: XLS, fileName: "prices.xls" }), ACTOR)).resolves.toBeTruthy();
+  });
+
+  it("accepts a plain-text CSV", async () => {
+    firstBytes.mockResolvedValue(CSV_BYTES);
+    await expect(verifyFinalize(finInput({ mediaType: CSV, fileName: "boq.csv" }), ACTOR)).resolves.toBeTruthy();
+  });
+
+  // A CSV that opens with a UTF-8 BOM is what Excel writes by default — refusing it would refuse the
+  // single most common way a real CSV reaches this app.
+  it("accepts a CSV written with a UTF-8 BOM", async () => {
+    firstBytes.mockResolvedValue(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), CSV_BYTES]));
+    await expect(verifyFinalize(finInput({ mediaType: CSV, fileName: "boq.csv" }), ACTOR)).resolves.toBeTruthy();
+  });
+
+  // THE case the negative check exists for: CSV has no signature, so without it an .exe renamed
+  // .csv would be stored with nothing having looked inside it.
+  it("rejects an executable wearing a .csv label", async () => {
+    firstBytes.mockResolvedValue(EXE);
+    await expect(verifyFinalize(finInput({ mediaType: CSV, fileName: "payload.csv" }), ACTOR)).rejects.toThrow(
+      /isn't a valid CSV/i,
+    );
+  });
+
+  it("rejects an archive wearing a .csv label", async () => {
+    firstBytes.mockResolvedValue(DOCX); // ZIP header
+    await expect(verifyFinalize(finInput({ mediaType: CSV, fileName: "payload.csv" }), ACTOR)).rejects.toThrow(
+      /isn't a valid CSV/i,
+    );
+  });
+
+  // A binary whose header is not in the list is still caught: a NUL byte is not text.
+  it("rejects binary content with an unlisted header wearing a .csv label", async () => {
+    firstBytes.mockResolvedValue(Buffer.from([0x11, 0x22, 0x33, 0x00, 0x44]));
+    await expect(verifyFinalize(finInput({ mediaType: CSV, fileName: "payload.csv" }), ACTOR)).rejects.toThrow(
+      /isn't a valid CSV/i,
+    );
+  });
+
+  // The message never names the format it detected. An attachment field must not double as a file
+  // identification oracle, and the honest user who picked the wrong file is not helped by knowing.
+  it("does not disclose what the rejected CSV actually was", async () => {
+    firstBytes.mockResolvedValue(EXE);
+    await expect(verifyFinalize(finInput({ mediaType: CSV, fileName: "payload.csv" }), ACTOR)).rejects.toThrow(
+      /^That file isn't a valid CSV\.$/,
+    );
+  });
+
+  // ── The "MZ" false positive ──────────────────────────────────────────────────────────────────
+  //
+  // `MZ` is two printable letters, and the header check matched them as a Windows executable — so a
+  // genuine parts list whose first cell is the SKU prefix `MZ1200` was refused as a renamed .exe,
+  // AFTER the whole file had uploaded, with a message that deliberately would not say why.
+  //
+  // The fix is not "stop checking CSVs". It is that a two-byte all-printable prefix is not evidence:
+  // a real PE is caught a layer earlier by the text sweep, because its DOS header, stub and `PE\0\0`
+  // marker are full of NULs long before byte 128. These pin both halves — the false positive gone,
+  // the executable still refused.
+  it("accepts a CSV whose first cell starts with the letters MZ", async () => {
+    firstBytes.mockResolvedValue(Buffer.from("MZ1200,Bracket,4\nMZ1201,Bracket,8\n", "utf8"));
+    await expect(verifyFinalize(finInput({ mediaType: CSV, fileName: "parts.csv" }), ACTOR)).resolves.toBeTruthy();
+  });
+
+  it("accepts a multiline CSV with quoted fields and accented text", async () => {
+    // Bytes >= 0x80 are text: a UTF-8 supplier name is not a binary tell.
+    firstBytes.mockResolvedValue(
+      Buffer.from('code,supplier,qty\r\n"A-1","Müller & Co, Ltd",12\r\n"B-2","Ø Fabrikk",3\r\n', "utf8"),
+    );
+    await expect(verifyFinalize(finInput({ mediaType: CSV, fileName: "boq.csv" }), ACTOR)).resolves.toBeTruthy();
+  });
+
+  // Every other all-printable prefix a real CSV could plausibly open with. None of these is a
+  // catalogued header, and none may be refused for looking like one.
+  it.each([
+    ["a single column with no delimiter at all", "PartNumber\nMZ1200\nMZ1201\n"],
+    ["a header row of ordinary words", "description,qty\nCable tray 3m,12\n"],
+    ["a leading percent that is not %PDF", "%complete,stage\n80,fit-out\n"],
+    ["a leading GIF-like token that is not GIF8", "GIF,format,count\nyes,animated,3\n"],
+  ])("accepts %s", async (_label, text) => {
+    firstBytes.mockResolvedValue(Buffer.from(text, "utf8"));
+    await expect(verifyFinalize(finInput({ mediaType: CSV, fileName: "x.csv" }), ACTOR)).resolves.toBeTruthy();
+  });
+
+  // A REAL PE, not just its two-letter prefix: the MS-DOS stub as every linker emits it. The point
+  // is that demoting `MZ` cost nothing — this is still refused, by the text sweep.
+  it("still rejects a genuine PE executable wearing a .csv label", async () => {
+    const dosHeader = Buffer.alloc(64);
+    dosHeader.write("MZ", 0, "ascii");
+    dosHeader.writeUInt16LE(0x0090, 2); // e_cblp
+    dosHeader.writeUInt32LE(0x00000080, 0x3c); // e_lfanew — NUL-bearing, as it must be
+    const stub = Buffer.from("This program cannot be run in DOS mode.\r\r\n$\0\0\0\0\0\0\0", "binary");
+    firstBytes.mockResolvedValue(Buffer.concat([dosHeader, stub, Buffer.from("PE\0\0", "binary")]));
+    await expect(verifyFinalize(finInput({ mediaType: CSV, fileName: "payload.csv" }), ACTOR)).rejects.toThrow(
+      /^That file isn't a valid CSV\.$/,
+    );
+  });
+
+  // The rest of the catalogue, each by its own real header bytes.
+  it.each([
+    ["ELF", [0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01]],
+    ["Mach-O", [0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00, 0x00, 0x01]],
+    ["Java class", [0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x34]],
+    ["RAR", [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00]],
+    ["7-Zip", [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]],
+    ["gzip", [0x1f, 0x8b, 0x08, 0x00]],
+    ["PNG", [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]],
+    ["GIF", [0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x10, 0x00]],
+    ["JPEG", [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]],
+    ["PDF", [0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]],
+  ])("still rejects %s bytes wearing a .csv label", async (_label, bytes) => {
+    firstBytes.mockResolvedValue(Buffer.from(bytes));
+    await expect(verifyFinalize(finInput({ mediaType: CSV, fileName: "payload.csv" }), ACTOR)).rejects.toThrow(
+      /^That file isn't a valid CSV\.$/,
+    );
+  });
+
+  // The text sweep is the general rule, so a control byte anywhere in the probe is refused — not
+  // only a NUL, and not only at the front.
+  it.each([
+    ["a NUL late in the probe", [0x61, 0x2c, 0x62, 0x0a, 0x00]],
+    ["a DEL byte", [0x61, 0x2c, 0x62, 0x7f]],
+    ["an ESC byte", [0x61, 0x2c, 0x62, 0x1b, 0x5b]],
+  ])("rejects %s", async (_label, bytes) => {
+    firstBytes.mockResolvedValue(Buffer.from(bytes));
+    await expect(verifyFinalize(finInput({ mediaType: CSV, fileName: "x.csv" }), ACTOR)).rejects.toThrow(
+      /isn't a valid CSV/i,
+    );
+  });
+
+  // A spreadsheet label on the wrong bytes is refused the same way a PDF label is.
+  it("rejects a CSV's text bytes wearing an .xls label", async () => {
+    firstBytes.mockResolvedValue(CSV_BYTES);
+    await expect(verifyFinalize(finInput({ mediaType: XLS, fileName: "prices.xls" }), ACTOR)).rejects.toThrow(
+      /isn't a valid/i,
+    );
+  });
+
+  // GRN does NOT accept spreadsheets, and the refusal is the CATALOG's, not the content check's —
+  // the file never reaches a byte read. This is the backend half of the surface-aware policy.
+  it("refuses a spreadsheet on the goods-receipt purpose", async () => {
+    findByPublicId.mockResolvedValue(pendingRow({ purpose: "grn_attachment" }));
+    await expect(
+      verifyFinalize(finInput({ purpose: "grn_attachment", mediaType: XLSX, fileName: "packing.xlsx" }), {
+        ...ACTOR,
+        permissions: ["goods_in.edit"],
+      }),
+    ).rejects.toThrow(/isn't accepted here/i);
+    expect(firstBytes).not.toHaveBeenCalled();
   });
 
   // The size is measured from storage, not taken from the browser — and an oversize asset is removed,

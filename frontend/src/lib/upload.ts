@@ -1,6 +1,7 @@
 import { api } from "./api";
 import type { PrfDocumentType } from "@/types/purchase-request";
 import { shrinkImage } from "./image";
+import { EXT_MEDIA_TYPE } from "./uploadPolicy";
 
 // ── Direct browser upload ──────────────────────────────────────────────────────────────────────
 //
@@ -29,15 +30,10 @@ import { shrinkImage } from "./image";
  * check is the magic-byte read finalize does on the stored file. This just stops it refusing files
  * that are genuinely fine.
  */
-const MEDIA_TYPE_BY_EXTENSION: Record<string, string> = {
-  pdf: "application/pdf",
-  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-};
+// Lives in ./uploadPolicy with the accept strings and the extension→fileType map it has to agree
+// with. It was a second copy here, and a second copy of a list whose whole purpose is to match the
+// backend's is a list that will eventually not.
+const MEDIA_TYPE_BY_EXTENSION = EXT_MEDIA_TYPE;
 
 /**
  * What to declare this file as. The extension wins when we recognise it; `file.type` is the fallback
