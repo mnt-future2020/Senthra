@@ -8,6 +8,16 @@
 // So: prefer the side with room, and when neither side has room, clamp rather than let the panel run
 // off-screen. Same for the vertical axis — a panel opening downward near the bottom of a short laptop
 // screen would put its own controls below the fold.
+//
+// The vertical half only picked a side; it never clamped, and that is a different promise. A panel
+// handed less room than it wants is laid out at its natural height and hangs past the bottom of the
+// window — measured on Purchase Orders at 844×390, a phone held landscape, the attention panel ran
+// 101px over with three of its six queues inside that strip, and the filter panel 91px over on the
+// same page. `position: fixed` puts those rows beyond any scroll, and the panel's own
+// `overflow-y-auto` cannot reach them either: what is off-screen is the BOX, not its contents.
+//
+// So the caller is told how much room its chosen side actually had, as a `maxHeight` to wear. That
+// makes the panel scroll inside the space it was given, which is what "let it scroll" always meant.
 
 export interface Rect {
   top: number;
@@ -25,6 +35,13 @@ export interface Placement {
   top?: number;
   /** css `bottom`, when it flips upward */
   bottom?: number;
+  /**
+   * css `max-height` — the room the chosen side actually had, never more than the panel asked for.
+   *
+   * Apply it. A panel that renders `style={pos}` gets this for free; one that also carries a
+   * `max-h-…` class is stating its cap twice, and the class is the copy that goes stale.
+   */
+  maxHeight?: number;
 }
 
 /** Breathing room kept between the panel and the viewport edge. */
@@ -63,15 +80,16 @@ export function anchorVisible(rect: Rect, viewport: { height: number }): boolean
 
 /**
  * @param anchor   the trigger's bounding rect, in viewport coordinates
- * @param panel    the panel's size
+ * @param panel    the panel's size — the height is the cap it WANTS, not a measurement
  * @param viewport the window's inner size
  *
  * Horizontal: open RIGHTWARD from the trigger's left edge when the panel fits — that direction moves
  * away from the leading columns of a table, which is where the reading happens. Fall back to
  * right-aligning it under the trigger, and clamp if even that would overflow.
  *
- * Vertical: below the trigger, flipping above it only when below genuinely doesn't fit AND above
- * does — a flip that swaps one overflow for another helps nobody.
+ * Vertical: below the trigger when the panel fits there, otherwise the side with more room — a flip
+ * that swaps one overflow for another helps nobody. Then `maxHeight` states what that side had, so a
+ * panel that fits nowhere scrolls inside the viewport instead of hanging past the bottom of it.
  */
 export function popoverPlacement(
   anchor: Rect,
@@ -91,12 +109,26 @@ export function popoverPlacement(
     place.right = MARGIN;
   }
 
-  const spaceBelow = viewport.height - anchor.bottom;
-  if (spaceBelow >= panel.height + OFFSET + MARGIN || anchor.top < panel.height + OFFSET + MARGIN) {
+  // Room on each side once the gap to the trigger and the viewport margin are paid for — so the two
+  // are directly comparable, and whichever wins is also the number the panel may grow to.
+  const roomBelow = viewport.height - anchor.bottom - OFFSET - MARGIN;
+  const roomAbove = anchor.top - OFFSET - MARGIN;
+
+  // Below when the panel fits there, because downward is where a menu is expected to go. Otherwise
+  // simply the roomier side: the old test was "is the trigger higher up than the panel is tall?",
+  // which answered yes for a trigger sitting just above that line and then chose `below` even when
+  // above had more to offer — a panel squeezed into 268px with 366px going spare over its head.
+  const openDownward = roomBelow >= panel.height || roomBelow >= roomAbove;
+  const room = openDownward ? roomBelow : roomAbove;
+  if (openDownward) {
     place.top = anchor.bottom + OFFSET;
   } else {
     place.bottom = viewport.height - anchor.top + OFFSET;
   }
+  // Never taller than the panel wants, never taller than the space it was given. The floor at zero is
+  // for a trigger straddling an edge, where the losing side's room is negative; the roomier side wins
+  // that comparison, so it is a guard against emitting nonsense, not a placement anyone lands on.
+  place.maxHeight = Math.max(0, Math.min(panel.height, room));
 
   return place;
 }

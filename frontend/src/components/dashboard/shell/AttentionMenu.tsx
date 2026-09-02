@@ -62,9 +62,14 @@ import type { AttentionItem, AttentionTone } from "@/services/attention.service"
 // and a row has the width to explain itself, so a subset's warning and a no-destination count's note
 // are visible text rather than a hover title nobody hovers.
 
-/** Panel size, in px. Decided before first paint — see FilterPopover for why it isn't measured. */
+/** Panel size, in px. Decided before first paint — see FilterPopover for why it isn't measured.
+ *
+ *  PANEL_H is the cap the panel WANTS; popoverPlacement returns the smaller of it and the room the
+ *  chosen side had, and the panel wears that as an inline `max-height`. So this is the only place the
+ *  height is written down. It used to be written twice — 360 here against a `max-h-[min(24rem,70vh)]`
+ *  class of 384 — and placement was deciding for a panel 24px shorter than the one it would get. */
 const PANEL_W = 320;
-const PANEL_H = 360;
+const PANEL_H = 384;
 
 const TONE_TRIGGER: Record<AttentionTone, string> = {
   critical: "border-[var(--neg)]/35 bg-[var(--neg)]/10 text-[var(--neg)]",
@@ -136,6 +141,18 @@ export function AttentionMenu({
   // also simply the correct shape — this is a fact about the current render, not a state to keep.
   const panelOpen = open && rollup !== null;
 
+  // ...and the INTENT has to die with the control, not merely be overruled for one render.
+  //
+  // Deriving alone left `open` true right through the empty period. When a queue refilled — the same
+  // colleague reopening that order a minute later — the panel sprang back open on its own: at the
+  // `pos` of a trigger that has since moved, and pulling focus into a queue list from whatever the
+  // user was actually reading. Nobody had pressed anything.
+  //
+  // Adjusted DURING RENDER, the shape PermissionMatrix uses to honour a reveal: the effect form is
+  // exactly what set-state-in-effect rejects, and React re-runs this render before committing, so the
+  // reopened state is never painted. Self-limiting — it clears the one condition it tests.
+  if (open && !rollup) setOpen(false);
+
   const close = React.useCallback(() => {
     setOpen(false);
     btnRef.current?.focus();
@@ -173,8 +190,14 @@ export function AttentionMenu({
     window.addEventListener("keydown", onKey);
     // The first QUEUE, not the Close button that precedes it in the DOM — opening this panel is how
     // you pick something to work on, so that is where the keyboard should land.
+    //
+    // preventScroll, because the panel can now be shorter than its contents: on a 844×390 window it
+    // opened already scrolled 119px down, header gone and the top two queues above the fold of its
+    // own scroller — the browser scrolling the freshly focused row "into view" against a box whose
+    // height had just been capped. The row is the first thing in the panel; it needs no scrolling to
+    // be seen, so the correct amount is none.
     (panelRef.current?.querySelector<HTMLElement>("ul a, ul button") ??
-      panelRef.current?.querySelector<HTMLElement>("button"))?.focus();
+      panelRef.current?.querySelector<HTMLElement>("button"))?.focus({ preventScroll: true });
     return () => {
       window.removeEventListener("scroll", onMove, true);
       window.removeEventListener("resize", onMove);
@@ -253,7 +276,10 @@ export function AttentionMenu({
               ref={panelRef}
               role="dialog"
               aria-label="Needs attention"
-              className="anim-fade-in fixed z-[60] max-h-[min(24rem,70vh)] w-80 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] p-2 shadow-2xl"
+              /* No `max-h-…` class: the cap rides in on `pos` as the room this side actually had,
+                 which is never more than PANEL_H. A class here would be a second copy of that number
+                 — the copy that goes stale, and the one an inline style silently overrules anyway. */
+              className="anim-fade-in fixed z-[60] w-80 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] p-2 shadow-2xl"
               style={pos}
             >
               <div className="mb-1 flex items-center justify-between px-1 pt-1">

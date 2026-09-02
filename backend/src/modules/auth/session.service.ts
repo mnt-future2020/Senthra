@@ -3,12 +3,21 @@ import crypto from "node:crypto";
 import type { Session } from "@prisma/client";
 
 import * as sessionRepo from "./session.repository.js";
+import { revokePrincipalSockets, revokeSessionSockets } from "../../lib/realtime.js";
 import type { Actor } from "../../utils/jwt.js";
 
+// realtime.ts imports this module back (its handshake auth calls findActive). That cycle is
+// deliberate and safe under ESM — neither side touches the other at module-evaluation time, only
+// inside function bodies — and it buys the invariant below: killing a session's socket lives HERE,
+// next to the delete, instead of at each caller. A future call site that deletes sessions some new
+// way therefore cannot forget to hang up on the device, which is exactly the kind of thing that is
+// forgotten and leaves a revoked device quietly receiving broadcasts.
+
 // Max concurrent devices per account (business rule). Signing in past this evicts
-// the least-recently-used session, so only this many ever stay live. The number is
-// mirrored in the frontend's SessionsCard copy — change both together.
-export const MAX_DEVICES = 3;
+// the least-recently-used session, so only this many ever stay live. At 1 that means
+// a new sign-in signs the previous device straight out. The number is mirrored in the
+// frontend's SessionsCard copy — change both together.
+export const MAX_DEVICES = 1;
 
 // How long a session (and its refresh token) stays valid. Matches the refresh
 // cookie's lifetime.
@@ -45,23 +54,31 @@ export async function startSession(
     expiresAt: new Date(Date.now() + SESSION_TTL_MS),
   });
 
-  // Enforce the cap AFTER inserting so concurrent sign-ins self-heal: keep the
-  // MAX_DEVICES most-recently-used LIVE sessions plus the one we just created, and
+  // Enforce the cap AFTER inserting so concurrent sign-ins self-heal: keep the new
+  // session plus at most the (MAX_DEVICES - 1) most-recently-used LIVE others, and
   // evict everything else — overflow and any already-expired-but-unpruned rows.
-  // Pinning the new sid means a race (or 3+ simultaneous sign-ins) can never evict
-  // the device that just logged in, and only live sessions count toward the cap.
+  // The new sid is excluded from the ranking and re-added unconditionally, so the
+  // total is exactly MAX_DEVICES no matter where the fresh row sorts: a race (or
+  // several simultaneous sign-ins, or two rows sharing a lastUsedAt millisecond)
+  // can neither evict the device that just logged in nor leave the account over cap.
+  // Only live sessions count toward the cap.
   const all = await sessionRepo.findForPrincipal(principalId, principalType);
   const now = Date.now();
   const keep = new Set(
     all
-      .filter((s) => s.expiresAt.getTime() > now)
-      .slice(0, MAX_DEVICES)
+      .filter((s) => s.sid !== sid && s.expiresAt.getTime() > now)
+      .slice(0, MAX_DEVICES - 1)
       .map((s) => s.sid),
   );
   keep.add(sid);
   const evict = all.filter((s) => !keep.has(s.sid)).map((s) => s.sid);
   if (evict.length) {
     await sessionRepo.deleteManyBySids(evict);
+    // Bump the evicted devices off their sockets now. At a cap of 1 this IS the feature: the
+    // previous device lands on /login within the second instead of sitting on a stale screen
+    // until its next request. Fire-and-forget — the row is already gone, so a missed push only
+    // costs immediacy, never correctness.
+    revokeSessionSockets(evict, "signed_in_elsewhere");
   }
   return sid;
 }
@@ -105,10 +122,24 @@ export async function touch(sid: string): Promise<void> {
 
 export async function endSession(sid: string): Promise<void> {
   await sessionRepo.deleteBySid(sid);
+  // Ordinary logout, and it revokes the socket for the SAME reason the other three paths do: until
+  // the socket is closed, a device whose session row is gone still sits in the broadcast rooms it
+  // joined at connect and keeps receiving job, purchase-order and rental payloads it can no longer
+  // fetch over REST. This was the one deleting call site that did not, which contradicted the
+  // invariant stated at the top of this file — the whole reason revocation lives beside the delete.
+  //
+  // `sid` is the caller's argument, not something read back off the deleted row, so the ordering is
+  // safe: the identifier the revocation needs cannot be lost by the delete that precedes it.
+  //
+  // "signed_out_remotely" rather than a reason of its own: this fires for every tab on the device,
+  // and a sibling tab that did not press Logout is being told exactly what the copy says — this
+  // device's session was ended. The tab that DID press it has already navigated itself.
+  revokeSessionSockets([sid], "signed_out_remotely");
 }
 
 export async function endAll(principalId: string, principalType: Actor): Promise<void> {
   await sessionRepo.deleteAllForPrincipal(principalId, principalType);
+  revokePrincipalSockets(principalId, "signed_out_remotely");
 }
 
 export async function endOthers(
@@ -117,6 +148,9 @@ export async function endOthers(
   keepSid: string,
 ): Promise<void> {
   await sessionRepo.deleteOthersForPrincipal(principalId, principalType, keepSid);
+  // Everything but the device that asked. Same push as the cap eviction so "Sign out other
+  // devices" and a password change land on those screens as fast as a new sign-in does.
+  revokePrincipalSockets(principalId, "signed_out_remotely", keepSid);
 }
 
 /**

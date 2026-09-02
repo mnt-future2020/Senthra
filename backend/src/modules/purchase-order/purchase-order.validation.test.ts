@@ -4,8 +4,10 @@ import {
   createPurchaseOrderSchema,
   createPurchaseOrdersSplitSchema,
   poCancelSchema,
+  poMarkSentSchema,
   poRejectSchema,
   poSupplierAcceptSchema,
+  PO_ISSUE_CHANNELS,
   updatePurchaseOrderSchema,
 } from "./purchase-order.validation.js";
 
@@ -233,5 +235,51 @@ describe("rental lines on a purchase order", () => {
     expect(line).not.toHaveProperty("lineTotalPence");
     expect(line).not.toHaveProperty("notifyOnDate");
     expect(line).not.toHaveProperty("hireStatus");
+  });
+});
+
+// ── poMarkSentSchema ("Mark as sent") ─────────────────────────────────────────────────────────
+//
+// Both fields are optional and both are AUDIT METADATA ONLY — nothing on the order stores them, and
+// nothing downstream branches on them. The schema's job is therefore narrow: accept an empty body,
+// reject anything that isn't one of the five known channels, and cap the note.
+describe("poMarkSentSchema", () => {
+  it("accepts an empty body — the order being issued is the whole business fact", () => {
+    const res = poMarkSentSchema.safeParse({});
+    expect(res.success).toBe(true);
+    expect(res.success && res.data.channel).toBeUndefined();
+    expect(res.success && res.data.note).toBeUndefined();
+  });
+
+  it.each(PO_ISSUE_CHANNELS)("accepts the '%s' channel", (channel) => {
+    expect(poMarkSentSchema.safeParse({ channel }).success).toBe(true);
+  });
+
+  it("rejects a channel outside the known set — no arbitrary values reach the ledger", () => {
+    expect(poMarkSentSchema.safeParse({ channel: "carrier-pigeon" }).success).toBe(false);
+    expect(poMarkSentSchema.safeParse({ channel: "EMAIL" }).success).toBe(false);
+    expect(poMarkSentSchema.safeParse({ channel: 1 }).success).toBe(false);
+  });
+
+  // A cleared picker posts "", which must read as "not given" rather than as an invalid channel —
+  // the same preprocessing every other optional enum in this file uses.
+  it("treats an empty channel string as absent", () => {
+    const res = poMarkSentSchema.safeParse({ channel: "" });
+    expect(res.success).toBe(true);
+    expect(res.success && res.data.channel).toBeUndefined();
+  });
+
+  it("trims the note", () => {
+    const res = poMarkSentSchema.parse({ note: "  Sent via WhatsApp to Dave  " });
+    expect(res.note).toBe("Sent via WhatsApp to Dave");
+  });
+
+  it("caps the note at 500 characters", () => {
+    expect(poMarkSentSchema.safeParse({ note: "x".repeat(500) }).success).toBe(true);
+    expect(poMarkSentSchema.safeParse({ note: "x".repeat(501) }).success).toBe(false);
+  });
+
+  it("accepts a blank note (the service treats it as absent)", () => {
+    expect(poMarkSentSchema.safeParse({ note: "   " }).success).toBe(true);
   });
 });

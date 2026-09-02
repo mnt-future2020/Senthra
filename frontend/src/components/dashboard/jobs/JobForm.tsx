@@ -47,8 +47,15 @@ import type { CustomerProject, CustomerSite } from "@/types/customer";
 import type { Job, JobLineType } from "@/types/job";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 import { isHttpUrl } from "@/lib/validation";
-import { ATTACHMENT_MEDIA_TYPE, parseJobAttachment } from "./jobAttachment";
+import { canAddJobAttachment, JOB_ATTACHMENT_MAX, parseJobAttachment } from "./jobAttachment";
 import { uploadDirectForUrl } from "@/lib/upload";
+import { allowedFrom, BUSINESS_DOC_ACCEPT, BUSINESS_DOC_LABEL, EXT_MEDIA_TYPE, resolveFileType } from "@/lib/uploadPolicy";
+import { dropRing, useFileDrop } from "@/hooks/useFileDrop";
+
+// The spreadsheet-capable document policy. A job carries the paperwork the engineer needs on site —
+// a schedule, an equipment list, a survey — and those arrive as workbooks as often as PDFs.
+const ATTACH_ACCEPT = BUSINESS_DOC_ACCEPT;
+const ATTACH_ALLOWED = allowedFrom(ATTACH_ACCEPT);
 import { shrinkImage } from "@/lib/image";
 
 const JOBS_LIST = "/dashboard/jobs";
@@ -627,13 +634,24 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
     clearError("attachments");
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const rawFile = e.target.files?.[0];
-    if (!rawFile) return;
+  // Takes the File itself, so the input's onChange and a DROP call one function. The old signature
+  // took the change event, which is why a drop could not have reused it without a second copy of
+  // every rule below.
+  // Blank rows are the form's own placeholders, never attachments — counted the same way in every
+  // place that asks "how many are attached?".
+  const activeAttachmentCount = attachments.filter((a) => a.trim().length > 0).length;
 
-    const pickedExt = rawFile.name.split(".").pop()?.toLowerCase() ?? "";
-    if (!(pickedExt in ATTACHMENT_MEDIA_TYPE)) {
-      pushToast("Unsupported file type. Use PDF, DOCX, PNG, JPG, or JPEG.", "alert");
+  const handleFile = async (rawFile: File) => {
+    // The cap is checked HERE rather than only on the buttons, so a DROP obeys it too. The buttons
+    // still disable at the ceiling — that is the better affordance when there is one to give — but
+    // a drop target has no disabled state the user can see mid-drag, so it needs the message.
+    if (!canAddJobAttachment(activeAttachmentCount)) {
+      pushToast(`You can attach at most ${JOB_ATTACHMENT_MAX} files.`, "alert");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+    if (resolveFileType(rawFile.name, ATTACH_ALLOWED) == null) {
+      pushToast(`Unsupported file type. Use ${BUSINESS_DOC_LABEL}.`, "alert");
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
@@ -653,12 +671,14 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
 
     setUploadingDoc(true);
     try {
-      // Straight to Cloudinary. The browser's own `file.type` is what the server signs against, and
-      // `ATTACHMENT_MEDIA_TYPE[ext]` stands in when the browser reports none — a .docx on a machine
-      // with no Office install — so the purpose's accepted-type list still recognises it.
+      // Straight to Cloudinary. `EXT_MEDIA_TYPE` stands in when the browser reports no type at all (a .docx on a machine
+      // with no Office install) AND when it reports a misleading one — Windows hands back
+      // `application/vnd.ms-excel` for a .csv when Excel is the registered handler, which would
+      // declare a text file as a binary workbook and fail its OLE2 magic-byte check at finalize.
+      const declared = EXT_MEDIA_TYPE[ext];
       const url = await uploadDirectForUrl({
         purpose: "job_attachment",
-        file: file.type ? file : new File([file], file.name, { type: ATTACHMENT_MEDIA_TYPE[ext] }),
+        file: declared && file.type !== declared ? new File([file], file.name, { type: declared }) : file,
       });
       setAttachments((rows) => {
         const active = rows.filter((r) => r.trim().length > 0);
@@ -675,6 +695,10 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
+
+  // One at a time, matching the input — the job form appends each upload's URL to a list, and two
+  // in flight would both read the same `attachments` snapshot and drop one of the two.
+  const { dragging, dropProps } = useFileDrop((files) => void handleFile(files[0]), uploadingDoc);
 
   // Demand from OTHER active jobs for a line's item+warehouse, and the stock TRULY free to plan
   // (on-hand − that demand). null free = availability not loaded yet (no cap can be applied).
@@ -1250,12 +1274,14 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept=".pdf,.docx,.png,.jpg,.jpeg"
+                  accept={ATTACH_ACCEPT}
                   className="hidden"
-                  onChange={handleFileUpload}
+                  onChange={(e) => { const f = e.target.files?.[0]; if (f) void handleFile(f); }}
                 />
 
-                <div className="space-y-2">
+                {/* The drop target is the ROW LIST plus the buttons below it — the region that
+                    already means "the attachments on this job". It adds no height of its own. */}
+                <div {...dropProps} className={`space-y-2 p-1 ${dropRing(dragging)}`}>
                   {attachments.map((a, i) => {
                     const meta = parseJobAttachment(a);
                     // Only files WE uploaded render as a fixed row. A pasted link — whatever its
@@ -1362,7 +1388,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                     <button
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
-                      disabled={uploadingDoc || attachments.filter((a) => a.trim()).length >= 20}
+                      disabled={uploadingDoc || !canAddJobAttachment(activeAttachmentCount)}
                       className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2 text-xs font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60"
                     >
                       {uploadingDoc ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
@@ -1372,7 +1398,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                     <button
                       type="button"
                       onClick={addAttachment}
-                      disabled={uploadingDoc || attachments.filter((a) => a.trim()).length >= 20}
+                      disabled={uploadingDoc || !canAddJobAttachment(activeAttachmentCount)}
                       className="flex items-center gap-1.5 rounded-xl border border-dashed border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--accent)] hover:bg-[var(--surface-2)] disabled:opacity-60"
                     >
                       <Plus className="h-3.5 w-3.5" /> Add link
@@ -1382,7 +1408,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
 
                 <FieldError message={errors.attachments} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">
-                  Upload documents, drawings, site photos, or quotes (PDF, DOCX, PNG, JPG, max 10 MB) or paste external links.
+                  Upload documents, drawings, site photos, or quotes — drag them onto the list or use Upload ({BUSINESS_DOC_LABEL}, max 10 MB) — or paste external links.
                 </p>
               </div>
               <div>

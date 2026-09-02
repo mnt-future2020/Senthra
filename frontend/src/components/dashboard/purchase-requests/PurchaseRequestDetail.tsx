@@ -19,12 +19,18 @@ import { DOCUMENT_GROUPS, filesInGroup, type PrfDocumentGroup } from "./document
 import type { AuditEntry } from "@/types/audit";
 import type { PrfAttachment, PrfDocumentType, PurchaseRequest } from "@/types/purchase-request";
 import { uploadDirect } from "@/lib/upload";
+import { allowedFrom, BUSINESS_DOC_ACCEPT, BUSINESS_DOC_LABEL, resolveFileType } from "@/lib/uploadPolicy";
+import { dropRing, useFileDrop } from "@/hooks/useFileDrop";
 import { shrinkImage } from "@/lib/image";
 import { returnLegSummary } from "@/lib/rentalReturn";
 import { hireDeliveryWarning } from "@/lib/hireDelivery";
 import { Notice } from "@/components/ui/Notice";
 
-const EXT_TYPE: Record<string, string> = { pdf: "pdf", docx: "docx", png: "png", jpg: "jpg", jpeg: "jpg" };
+// The spreadsheet-capable policy, and the SAME one for both document groups. Which group a file
+// joins is decided by the area it is dropped on or chosen in — never by what kind of file it is —
+// so a rule that differed between the two would be inventing a second meaning for the split.
+const ATTACH_ACCEPT = BUSINESS_DOC_ACCEPT;
+const ATTACH_ALLOWED = allowedFrom(ATTACH_ACCEPT);
 
 type Tab = "overview" | "attachments" | "audit";
 
@@ -603,9 +609,10 @@ function Attachments({ prf, setPrf, canEdit }: { prf: PurchaseRequest; setPrf: (
   const [deleting, setDeleting] = React.useState(false);
 
   const onFile = (documentType: PrfDocumentType, rawFile: File) => {
-    const ext = rawFile.name.split(".").pop()?.toLowerCase() ?? "";
-    if (!EXT_TYPE[ext]) {
-      pushToast("Unsupported file. Use PDF, DOCX, PNG or JPG.", "alert");
+    // Resolved against this surface's accept string. Runs on a DROPPED file too, which nothing else
+    // constrains — an OS dialog can be told what to offer, a drag cannot.
+    if (resolveFileType(rawFile.name, ATTACH_ALLOWED) == null) {
+      pushToast(`Unsupported file. Use ${BUSINESS_DOC_LABEL}.`, "alert");
       return;
     }
     setUploading(documentType);
@@ -720,26 +727,33 @@ function AttachmentGroup({
   onRequestRemove: (id: string) => void;
 }) {
   const inputRef = React.useRef<HTMLInputElement>(null);
+  // Disabled on `busy` — SOME group's upload — for the same reason the buttons are: two uploads in
+  // flight race on the full-DTO response. A drop must not be the way around a gate the click path has.
+  const { dragging, dropProps } = useFileDrop((files) => onFile(group.type, files[0]), busy || !canEdit);
   return (
     <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5" aria-labelledby={`prf-att-${group.type}`}>
       <h3 id={`prf-att-${group.type}`} className="text-xs font-extrabold uppercase tracking-wider text-[var(--faint)]">{group.detailLabel}</h3>
       {canEdit && (
-        <div className="mt-3 mb-4">
+        // The drop target is THIS group's, not the card's or the tab's — dropping a quote on the
+        // "Other documents" area must file it as `other`. Two targets, each labelled by the heading
+        // above it, is what keeps the group the user's choice rather than a guess.
+        <div {...dropProps} className={`mt-3 mb-4 ${dropRing(dragging)}`}>
           <input
             ref={inputRef}
             type="file"
-            accept=".pdf,.docx,.png,.jpg,.jpeg"
+            accept={ATTACH_ACCEPT}
             className="sr-only"
             aria-label={`Upload ${group.detailLabel}`}
+            aria-describedby={`prf-att-help-${group.type}`}
             onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onFile(group.type, f); }}
           />
           {/* Disabled by `busy` (any upload), spinner driven by `uploading` (this one) — so the
               other group's button greys out while this one visibly works, instead of staying live
               and inviting the race described above. */}
-          <button type="button" onClick={() => inputRef.current?.click()} disabled={busy} className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60">
+          <button type="button" onClick={() => inputRef.current?.click()} disabled={busy} className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] disabled:opacity-60">
             {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />} Upload file
           </button>
-          <p className="mt-1.5 text-[11px] text-[var(--faint)]">{group.help} PDF, DOCX, PNG or JPG (max 10 MB). Attachments are locked once the request leaves draft.</p>
+          <p id={`prf-att-help-${group.type}`} className="mt-1.5 text-[11px] text-[var(--faint)]">{group.help} Drag a file here or use the button. {BUSINESS_DOC_LABEL} (max 10 MB). Attachments are locked once the request leaves draft.</p>
         </div>
       )}
       {files.length === 0 ? (

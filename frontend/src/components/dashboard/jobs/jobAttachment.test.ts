@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ATTACHMENT_MEDIA_TYPE, parseJobAttachment, withMediaType } from "./jobAttachment";
+import { canAddJobAttachment, JOB_ATTACHMENT_MAX, parseJobAttachment, withMediaType } from "./jobAttachment";
 
 const UPLOAD = "https://res.cloudinary.com/demo/raw/upload/v1/senthra/jobs/site-survey-a3f91b2c.pdf";
 
@@ -69,7 +69,8 @@ describe("parseJobAttachment", () => {
 // accepted is the media type we state.
 describe("withMediaType", () => {
   it("replaces a media type the browser guessed wrong", () => {
-    expect(withMediaType("data:application/octet-stream;base64,QUJD", ATTACHMENT_MEDIA_TYPE.docx!)).toBe(
+    const DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    expect(withMediaType("data:application/octet-stream;base64,QUJD", DOCX)).toBe(
       "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,QUJD",
     );
   });
@@ -98,26 +99,118 @@ describe("withMediaType", () => {
   );
 });
 
-// The picker's `accept` list, the client check and the server's allow-list are three statements of
-// one rule. This pins the middle one to the shape the server names.
-describe("ATTACHMENT_MEDIA_TYPE", () => {
-  it("covers exactly the extensions the picker offers", () => {
-    expect(Object.keys(ATTACHMENT_MEDIA_TYPE).sort()).toEqual(["docx", "jpeg", "jpg", "pdf", "png"]);
+// Spreadsheets are DOCUMENTS on screen, not pasted links.
+//
+// Jobs began accepting CSV/XLS/XLSX without this file learning about them, so `isDoc` stayed
+// docx/doc-only and every spreadsheet fell through to the LinkIcon branch — the affordance that
+// means "somebody typed a URL here" — on the job form, the job detail, the engineer's job page and
+// the customer portal. Four screens, one shared parser, one missing list.
+describe("spreadsheet attachments render as documents", () => {
+  const url = (name: string) => `https://res.cloudinary.com/demo/raw/upload/v1/senthra/jobs/${name}`;
+
+  it.each(["prices.csv", "prices.xls", "prices.xlsx"])("%s is a document, not a link", (name) => {
+    const a = parseJobAttachment(url(name))!;
+    expect(a.isDoc, `${name} should be a document`).toBe(true);
+    expect(a.isImg).toBe(false);
+    expect(a.isPdf).toBe(false);
   });
 
-  it("maps both JPEG spellings to one media type", () => {
-    expect(ATTACHMENT_MEDIA_TYPE.jpg).toBe(ATTACHMENT_MEDIA_TYPE.jpeg);
+  // The renderers branch on `isPdf || isDoc`, so this is the property that actually decides the icon.
+  it.each(["quote.pdf", "spec.docx", "spec.doc", "boq.csv", "boq.xls", "boq.xlsx"])(
+    "%s takes the file icon rather than the link icon",
+    (name) => {
+      const a = parseJobAttachment(url(name))!;
+      expect(a.isPdf || a.isDoc).toBe(true);
+    },
+  );
+
+  // A genuinely pasted link must still read as one — that branch is what keeps it editable.
+  it.each(["https://example.com/somewhere", "https://sharepoint.example.com/a/b"])(
+    "%o stays a link",
+    (raw) => {
+      const a = parseJobAttachment(raw)!;
+      expect(a.isPdf || a.isDoc || a.isImg).toBe(false);
+    },
+  );
+
+  it("still treats images as images rather than documents", () => {
+    const a = parseJobAttachment(url("site.png"))!;
+    expect(a.isImg).toBe(true);
+    expect(a.isDoc).toBe(false);
+  });
+});
+
+// ── The real delivery-URL shape ────────────────────────────────────────────────────────────────
+//
+// Cloudinary appends an analytics parameter to signed delivery URLs, so a stored attachment looks
+// like `…/schedule-<uuid>.xlsx?_a=BAMAPqfm0`. Every extension test that read the WHOLE string
+// therefore failed on it. `isImg`/`isPdf` masked that with their `/image/upload/` and `/raw/upload/`
+// fallbacks; `isDoc` had none, so DOCX rendered as an external link long before spreadsheets did.
+//
+// These use the exact shape observed in the browser. Without the path fix they all fail.
+describe("extension is read from the path, not the query string", () => {
+  const signed = (name: string) =>
+    `https://res.cloudinary.com/demo/raw/upload/s--BIe-y1sY--/v1/senthra/jobs/${name}?_a=BAMAPqfm0`;
+
+  it.each(["schedule.xlsx", "prices.xls", "boq.csv", "spec.docx"])(
+    "%s with an analytics query is still a document",
+    (name) => {
+      expect(parseJobAttachment(signed(name))!.isDoc).toBe(true);
+    },
+  );
+
+  it("a PDF with an analytics query is still a PDF", () => {
+    expect(parseJobAttachment(signed("quote.pdf"))!.isPdf).toBe(true);
   });
 
-  it("names the media types the server's allow-list accepts", () => {
-    expect(Object.values(ATTACHMENT_MEDIA_TYPE)).toEqual(
-      expect.arrayContaining([
-        "application/pdf",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "image/png",
-        "image/jpeg",
-      ]),
-    );
+  it("an image with an analytics query is still an image", () => {
+    const url = "https://res.cloudinary.com/demo/image/upload/v1/senthra/jobs/site.png?_a=BAMAPqfm0";
+    const a = parseJobAttachment(url)!;
+    expect(a.isImg).toBe(true);
+    expect(a.isDoc).toBe(false);
+  });
+
+  // None of them may be mistaken for a pasted link — that branch makes the row an editable text box.
+  it.each(["schedule.xlsx", "boq.csv", "spec.docx", "quote.pdf"])("%s never falls through to the link branch", (name) => {
+    const a = parseJobAttachment(signed(name))!;
+    expect(a.isImg || a.isPdf || a.isDoc).toBe(true);
+  });
+
+  // A fragment must be stripped for the same reason, and `#internal` must still be understood.
+  it("handles the #internal marker alongside a query string", () => {
+    const a = parseJobAttachment(`${signed("boq.csv")}#internal`)!;
+    expect(a.isInternal).toBe(true);
+    expect(a.isDoc).toBe(true);
+  });
+
+  // A half-typed value is not a URL; matching must not throw on it.
+  it.each(["", "not a url", "https://", "example.com/a.csv?x=1"])("survives the unparseable value %o", (raw) => {
+    expect(() => parseJobAttachment(raw)).not.toThrow();
+  });
+});
+
+// One cap, both interaction paths. The buttons disabled at 20 while a DROP checked nothing, so
+// dragging past the ceiling appended a 21st that persisted — the server's own limit being 50.
+describe("canAddJobAttachment", () => {
+  it("allows the last slot", () => {
+    expect(canAddJobAttachment(JOB_ATTACHMENT_MAX - 1)).toBe(true);
+  });
+
+  it("refuses once the cap is reached", () => {
+    expect(canAddJobAttachment(JOB_ATTACHMENT_MAX)).toBe(false);
+  });
+
+  // Defensive: a count already over the cap (a record written before the rule) must not reopen it.
+  it("refuses beyond the cap", () => {
+    expect(canAddJobAttachment(JOB_ATTACHMENT_MAX + 5)).toBe(false);
+  });
+
+  it("allows an empty list", () => {
+    expect(canAddJobAttachment(0)).toBe(true);
+  });
+
+  it("caps at the client-visible 20, not the server's larger ceiling", () => {
+    expect(JOB_ATTACHMENT_MAX).toBe(20);
   });
 });
 

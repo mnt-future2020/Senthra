@@ -1,3 +1,5 @@
+import { SPREADSHEET_EXTENSIONS } from "@/lib/uploadPolicy";
+
 // ── Reading a job attachment string ────────────────────────────────────────────────────────────
 //
 // A job's `attachments` are plain strings, and four screens render them: the office form (editable),
@@ -18,25 +20,11 @@
 
 // ── Uploading ──────────────────────────────────────────────────────────────────────────────────
 //
-// The server decides what may be stored by reading the MEDIA TYPE out of the data URI
-// (uploadAttachmentSchema). The picker, meanwhile, can only see the file EXTENSION — and the two do
-// not always agree: `FileReader.readAsDataURL` takes the media type from `File.type`, which the
-// browser fills in from the OS. A machine with no Office install reports `""` for a `.docx`, the
-// data URI comes out as `data:application/octet-stream`, and a file the picker just accepted is
-// refused by the server AFTER the whole upload — told "use PDF, DOCX, PNG or JPG" about a DOCX.
-//
-// So the extension we validated is also the media type we send. This is not a weakening of the
-// server's gate: that gate reads a client-supplied prefix either way, so it was never a boundary
-// against a hostile caller — it stops the wrong FILE, and this makes it stop the right ones.
-
-/** Extensions the picker offers → the media type the server's allow-list names. */
-export const ATTACHMENT_MEDIA_TYPE: Record<string, string> = {
-  pdf: "application/pdf",
-  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-};
+// There is no extension→media-type table here any more. `lib/uploadPolicy` owns it (EXT_MEDIA_TYPE),
+// alongside the accept string and the help-text wording it has to agree with, and `lib/upload`
+// derives every declaration from it. A second copy in this file was the last thing that could tell
+// a job upload a different story from the PRF and PO ones — and once Jobs began accepting
+// spreadsheets, it was already telling one: it listed five extensions and Jobs accepted eight.
 
 /**
  * Restate a data URI's media type, keeping its base64 payload untouched.
@@ -78,6 +66,52 @@ export interface JobAttachment {
 const CLOUDINARY_HOST = "res.cloudinary.com";
 
 /**
+ * Extensions that render behind a FILE icon rather than the external-link one.
+ *
+ * `.doc` is here and is NOT in the upload policy: nothing can upload one any more, but jobs created
+ * before the current picker still hold them and they are still documents on screen.
+ *
+ * The spreadsheets come from the shared policy rather than a list written out here, because that is
+ * the list that decides what can arrive in the first place. When Jobs gained CSV/XLS/XLSX this file
+ * was not updated, and every one of them rendered with the LinkIcon — the affordance that means
+ * "somebody pasted a URL" — on the office form, the office detail, the engineer's job page and the
+ * CUSTOMER PORTAL. Deriving it means the next format added cannot repeat that.
+ */
+const DOC_EXTENSIONS = [".docx", ".doc", ...SPREADSHEET_EXTENSIONS.map((e) => `.${e}`)];
+
+/** Extensions that render as a thumbnail rather than an icon. */
+const IMG_EXTENSIONS = [".png", ".jpg", ".jpeg"];
+
+/**
+ * The path part of a value, lowercased — query and fragment removed.
+ *
+ * Falls back to a plain string trim for anything that is not a parseable URL, because this field
+ * holds half-typed links while someone is editing and must never throw on one.
+ */
+function pathOf(lowerValue: string): string {
+  try {
+    return new URL(lowerValue).pathname;
+  } catch {
+    return lowerValue.split("?")[0].split("#")[0];
+  }
+}
+
+/** The client-visible ceiling on job attachments. The server allows more; this is the product rule. */
+export const JOB_ATTACHMENT_MAX = 20;
+
+/**
+ * Room for one more attachment?
+ *
+ * Shared by the buttons (which disable) and the drop handler (which refuses with a message), so the
+ * two interaction paths cannot enforce different limits. They did: the buttons stopped at 20 and a
+ * DROP did not check at all, so dragging past the cap appended a 21st that then persisted, the
+ * server's own limit being 50.
+ */
+export function canAddJobAttachment(currentCount: number): boolean {
+  return currentCount < JOB_ATTACHMENT_MAX;
+}
+
+/**
  * Strip the uniqueness suffix the upload path appends, and nothing else.
  *
  * TWO shapes, because the id changed and the older one is still in the database:
@@ -110,10 +144,19 @@ export function parseJobAttachment(value: string): JobAttachment | null {
   const isInternal = /#internal$/i.test(url);
   const rawUrl = url.replace(/#internal$/i, "");
   const lower = rawUrl.toLowerCase();
+  // The extension is read from the PATH, never from the whole URL.
+  //
+  // A Cloudinary delivery URL ends in an analytics parameter — `…/schedule-<uuid>.xlsx?_a=BAMAPqfm0`
+  // — so `endsWith(".xlsx")` is false for every file this app has ever uploaded. `isImg` and `isPdf`
+  // survived that by accident, via their `/image/upload/` and `/raw/upload/` fallbacks; `isDoc` had
+  // no fallback, which is why DOCX attachments have been rendering with the external-LINK icon since
+  // before spreadsheets existed. Stripping the query once, here, fixes the whole family rather than
+  // adding a fourth special case.
+  const path = pathOf(lower);
 
-  const isImg = lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.includes("/image/upload/");
-  const isPdf = lower.endsWith(".pdf") || (lower.includes("/raw/upload/") && lower.includes(".pdf"));
-  const isDoc = lower.endsWith(".docx") || lower.endsWith(".doc");
+  const isImg = IMG_EXTENSIONS.some((ext) => path.endsWith(ext)) || path.includes("/image/upload/");
+  const isPdf = path.endsWith(".pdf") || (path.includes("/raw/upload/") && path.includes(".pdf"));
+  const isDoc = DOC_EXTENSIONS.some((ext) => path.endsWith(ext));
 
   // A value that isn't a parseable URL is shown verbatim rather than blanked — half-typed links live
   // in this field while someone is editing, and swallowing them would look like data loss.

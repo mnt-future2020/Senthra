@@ -31,6 +31,8 @@ import { earliestHireStart, hireDeliveryWarning, lateHireDeliveryDays } from "@/
 import { viewFileInNewTab } from "@/lib/download";
 import { shrinkImage } from "@/lib/image";
 import { uploadDirect } from "@/lib/upload";
+import { allowedFrom, BUSINESS_DOC_ACCEPT, BUSINESS_DOC_LABEL, resolveFileType } from "@/lib/uploadPolicy";
+import { dropRing, useFileDrop } from "@/hooks/useFileDrop";
 import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { Notice } from "@/components/ui/Notice";
 import { formatMoney } from "./prfStatus";
@@ -62,7 +64,10 @@ type LineRow = { _key: string; irmItemId: string; quantity: string; unitPrice: s
 // UI arrangement, and this is the fact.
 type PendingFile = { _key: string; documentType: PrfDocumentType; fileType: string; file: File };
 
-const ATTACH_EXT: Record<string, string> = { pdf: "pdf", docx: "docx", png: "png", jpg: "jpg", jpeg: "jpg" };
+// The spreadsheet-capable policy, shared with the detail page's Attachments tab so a file accepted
+// when creating a draft is not refused when added to the same request an hour later.
+const ATTACH_ACCEPT = BUSINESS_DOC_ACCEPT;
+const ATTACH_ALLOWED = allowedFrom(ATTACH_ACCEPT);
 const MAX_ATTACH_BYTES = 10 * 1024 * 1024;
 
 const dateInput = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : "");
@@ -266,15 +271,19 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
   const removeLine = (idx: number) => { setLineRows((rows) => rows.filter((_, i) => i !== idx)); touch(); };
 
   // Document picker (create form). Validates type + size like the detail-page uploader, then holds
-  // the file until the PRF is created. Same allowed types (pdf/docx/png/jpg) and 10 MB cap the
-  // backend attachment schema enforces — BOTH groups run through this one function, so neither can
-  // drift to a laxer rule than the other.
-  const onPickFile = (documentType: PrfDocumentType, fileList: FileList | null) => {
+  // the file until the PRF is created. The accepted types are not named here on purpose: they come
+  // from BUSINESS_DOC_ACCEPT in lib/uploadPolicy, which is also what the input advertises and what
+  // the help text reads back, so this comment cannot go stale the way its predecessor did (it still
+  // said "pdf/docx/png/jpg" after spreadsheets were added). The 10 MB cap mirrors the backend's.
+  // BOTH groups run through this one function, so neither can drift to a laxer rule than the other.
+  // Takes a plain array as well as a FileList, so a DROP and a click reach the same function rather
+  // than two that have to be kept in step. Everything below — the type gate, the shrink, the size
+  // cap, the `readingCount` that holds the submit button — is therefore shared by construction.
+  const onPickFile = (documentType: PrfDocumentType, fileList: FileList | File[] | null) => {
     if (!fileList || fileList.length === 0) return;
     for (const rawFile of Array.from(fileList)) {
-      const ext = rawFile.name.split(".").pop()?.toLowerCase() ?? "";
-      if (!ATTACH_EXT[ext]) {
-        pushToast(`"${rawFile.name}" isn't a supported type. Use PDF, DOCX, PNG or JPG.`, "alert");
+      if (resolveFileType(rawFile.name, ATTACH_ALLOWED) == null) {
+        pushToast(`"${rawFile.name}" isn't a supported type. Use ${BUSINESS_DOC_LABEL}.`, "alert");
         continue;
       }
       // Counted BEFORE the first await, and that ordering is the point: the submit button watches
@@ -287,7 +296,7 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
           // original form and well under it once stored. PDFs and DOCX pass through unchanged.
           const file = await shrinkImage(rawFile);
           // Re-derived, because a PNG re-encoded as JPEG arrives renamed.
-          const fileType = ATTACH_EXT[file.name.split(".").pop()?.toLowerCase() ?? ""] ?? "jpg";
+          const fileType = resolveFileType(file.name, ATTACH_ALLOWED) ?? "jpg";
           if (file.size > MAX_ATTACH_BYTES) {
             pushToast(`"${file.name}" is over 10 MB.`, "alert");
             return;
@@ -572,7 +581,7 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
           {mode === "create" && (
             <FormSection
               title="Documents"
-              description="PDF, DOCX, PNG or JPG · max 10 MB each. Both upload when you create the draft."
+              description={`Drag files onto an area or choose them. ${BUSINESS_DOC_LABEL} · max 10 MB each. Both upload when you create the draft.`}
             >
               {/* `xl`, not `md`, and the difference is not taste. This form sits beside the financial
                   summary aside, so the column these two share is far narrower than the viewport: at a
@@ -787,28 +796,37 @@ function DocumentGroupPicker({
 }: {
   group: PrfDocumentGroup;
   files: PendingFile[];
-  onPick: (documentType: PrfDocumentType, fileList: FileList | null) => void;
+  onPick: (documentType: PrfDocumentType, fileList: FileList | File[] | null) => void;
   onRemove: (key: string) => void;
   onView: (f: PendingFile) => void;
 }) {
   const inputId = `prf-docs-${group.type}`;
   const helpId = `${inputId}-help`;
+  // Each GROUP is its own drop target, wrapping only the label + button + help line — not the file
+  // list under it. A quote dropped on the "Other documents" area is filed as `other`, because the
+  // area is the user's statement of which group they meant. Nothing here decides a group from the
+  // file's TYPE, which is what would make a CSV land somewhere the user did not put it.
+  const { dragging, dropProps } = useFileDrop((files) => onPick(group.type, files));
   return (
     <div>
       <label className={labelCls} htmlFor={inputId}>{group.formLabel}</label>
-      <div className="flex flex-wrap items-center gap-2">
+      <div {...dropProps} className={`flex flex-wrap items-center gap-2 p-1 ${dropRing(dragging)}`}>
         {/* `sr-only` rather than `hidden`: a hidden input is unreachable by keyboard, which would
             leave the only way to add a document a mouse click on its label. */}
         <input
           id={inputId}
           type="file"
-          accept=".pdf,.docx,.png,.jpg,.jpeg"
+          accept={ATTACH_ACCEPT}
           multiple
           aria-describedby={helpId}
           className="sr-only"
           onChange={(e) => { onPick(group.type, e.target.files); e.target.value = ""; }}
         />
+        {/* A real <label> for a real focusable input: Tab reaches the input, Enter/Space opens the
+            dialog, and the browser's own focus ring shows on the label. Drag/drop adds a way in
+            without taking one away. */}
         <label htmlFor={inputId} className={`${ghostBtn} cursor-pointer`}>Choose file(s)</label>
+        <span className="text-[11px] text-[var(--faint)]">or drag them here</span>
       </div>
       <p id={helpId} className="mt-1.5 text-[11px] text-[var(--faint)]">{group.help}</p>
       {files.length > 0 && (

@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { deleteMany } = vi.hoisted(() => ({ deleteMany: vi.fn() }));
 vi.mock("../../lib/prisma.js", () => ({ prisma: { session: { deleteMany } } }));
+// session.service reaches for realtime to hang up on revoked devices; this suite is about the
+// expiry sweep, which touches no live socket. Stubbed so it doesn't drag socket.io + env in.
+vi.mock("../../lib/realtime.js", () => ({
+  revokeSessionSockets: vi.fn(),
+  revokePrincipalSockets: vi.fn(),
+}));
 
 import { deleteExpired } from "./session.repository.js";
 import { purgeExpiredSessions } from "./session.service.js";

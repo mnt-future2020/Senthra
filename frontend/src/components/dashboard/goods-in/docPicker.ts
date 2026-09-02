@@ -1,32 +1,10 @@
+import { resolveFileType } from "@/lib/uploadPolicy";
+
 // The file picker's two rules, extracted so they can be tested — the picker itself is JSX.
 //
 // Both existed inline and both were wrong in the same way: they were written for the goods receipt,
 // then reused by a surface with different limits and different accepted types, and nothing tied them
 // back to what that surface advertises.
-
-/**
- * Extension → the `fileType` we record.
- *
- * Every type ANY picker advertises has to be in here. It is the second half of a two-part gate whose
- * first half is the surface's `accept` string, and when the two disagree the OS dialog offers a file
- * the picker then refuses — with a toast that lists the type it just rejected.
- *
- * `gif` and `webp` are here because hire condition photos accept them, and so does the server
- * (`EVIDENCE_IMAGE_TYPES` in upload.catalog.ts). They are also what `shrinkImage` can hand back: GIF
- * is passed through untouched (a canvas keeps one frame, and an animated GIF is usually the whole
- * point of the evidence), and a WebP small enough to skip the downscale keeps its own extension.
- *
- * `jpeg` maps to `jpg` so one format has one name. Everything else maps to itself.
- */
-const EXT_TYPE: Record<string, string> = {
-  pdf: "pdf",
-  docx: "docx",
-  png: "png",
-  jpg: "jpg",
-  jpeg: "jpg",
-  gif: "gif",
-  webp: "webp",
-};
 
 /**
  * Types that render in the lightbox rather than behind a file icon.
@@ -49,14 +27,14 @@ export const isImageType = (fileType: string): boolean => IMAGE_TYPES.has(fileTy
  *
  * `allowed` comes from the surface's own `accept` string, so the gate can only ever be NARROWER than
  * what the dialog offered — never a different set.
+ *
+ * The extension→fileType map this reads now lives in `lib/uploadPolicy`, next to the accept strings
+ * and the help-text wording it has to agree with, and is shared with the PRF, PO and job pickers.
+ * This is kept as a named re-export because the goods-in surfaces call it by this name and its
+ * behaviour has tests written against it.
  */
 export function resolveDocType(fileName: string, allowed: Set<string>): string | null {
-  const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
-  // A file with no dot at all: `split` returns the whole name, which must not be read as an
-  // extension that happens to be listed.
-  if (!fileName.includes(".")) return null;
-  if (!allowed.has(ext)) return null;
-  return EXT_TYPE[ext] ?? null;
+  return resolveFileType(fileName, allowed);
 }
 
 /**

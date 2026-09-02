@@ -404,6 +404,39 @@ export function update(id: string, data: Prisma.PurchaseOrderUncheckedUpdateInpu
   return prisma.purchaseOrder.update({ where: { id }, data, include: withRelations });
 }
 
+/**
+ * Guarded header transition — the same defence `updateRentalLineIf` gives a hire line, applied to the
+ * ORDER HEADER.
+ *
+ * Every workflow action reads the order, checks it against `ALLOWED_TRANSITIONS`, then writes. Between
+ * those two steps a second request can pass the identical check against the identical status, and
+ * Mongo raises no conflict of its own because the two writes never overlap in time. While issuing had
+ * exactly one entry point the window was only reachable by double-clicking one button (which the
+ * frontend already blocks); with a second entry point — Send to supplier and Mark as sent, on two
+ * different desks — it is a race between two PEOPLE, and it costs a duplicate supplier email and a
+ * duplicate archived document of record.
+ *
+ * Carrying the expected status INTO the write closes it: Mongo applies the filter and the update as
+ * one operation, so the loser matches nothing.
+ *
+ * `updateMany`, because `update` takes a UNIQUE where and cannot carry the guard column — the same
+ * reason `updateRentalLineIf` uses it. Returns the fresh row when the guard held and `null` when it
+ * did not; the caller turns `null` into a 409 naming the status somebody else moved it to, rather than
+ * a 500 they would retry straight back into.
+ *
+ * No `deletedAt` guard, deliberately: the caller has already loaded the order through `findById`
+ * (which filters it), and soft-delete is draft-only — no status that can transition here is deletable.
+ */
+export async function updateStatusIf(
+  id: string,
+  expectedStatus: string,
+  data: Prisma.PurchaseOrderUncheckedUpdateInput,
+): Promise<PurchaseOrderWithRelations | null> {
+  const res = await prisma.purchaseOrder.updateMany({ where: { id, status: expectedStatus }, data });
+  if (res.count !== 1) return null;
+  return findById(id);
+}
+
 export function softDelete(id: string): Promise<PurchaseOrder> {
   return prisma.purchaseOrder.update({ where: { id }, data: { deletedAt: new Date() } });
 }

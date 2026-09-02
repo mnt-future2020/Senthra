@@ -217,6 +217,23 @@ export const poCancelSchema = z.object({
 });
 export type PoCancelInput = z.infer<typeof poCancelSchema>;
 
+// --- manual issue ("Mark as sent" — the order already reached the supplier outside Senthra) ---
+//
+// Both fields are OPTIONAL and land in AUDIT METADATA ONLY. The business fact being recorded is
+// "this order has been issued", which the status carries on its own; how the paperwork travelled is
+// colour for a dispute, not something any downstream rule branches on — so there is no column for it.
+//
+// `channel: "email"` means "I emailed it myself, from my own mailbox". It is NOT an instruction to
+// send one, and the service never reads it as such.
+export const PO_ISSUE_CHANNELS = ["email", "whatsapp", "printed", "phone", "other"] as const;
+export const poMarkSentSchema = z.object({
+  // Preprocessed like every other optional enum here (`sharedHeader.priority`): a cleared picker
+  // posts "", which must read as "not given" rather than as an invalid channel.
+  channel: z.preprocess(emptyToUndef, z.enum(PO_ISSUE_CHANNELS, { error: "Select how the order was sent." }).optional()),
+  note: z.string().trim().max(500).optional(),
+});
+export type PoMarkSentInput = z.infer<typeof poMarkSentSchema>;
+
 // --- PM routing (approved → pm_review; re-assign while in pm_review) ---------
 export const poAssignPmSchema = z.object({
   pmUserId: z.string({ error: "Select a project manager." }).regex(OBJECT_ID_RE, "Select a project manager."),
