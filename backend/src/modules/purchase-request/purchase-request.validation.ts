@@ -1,7 +1,13 @@
 import { z } from "zod";
 
-import { RETURN_MODES } from "#modules/purchase-order/rentalReturn.js";
-import { RATE_PERIODS } from "../../utils/rental-pricing.js";
+import {
+  hasAnyLine,
+  hasAnyLineError,
+  MAX_NOTIFY_DAYS_BEFORE,
+  rentalItemsField,
+  rentalLineSchema,
+  type RentalLineInput,
+} from "#modules/purchase-order/rentalLine.validation.js";
 
 // Purchase Request (PRF) validation. Codes/status/totals are SYSTEM-owned and never accepted
 // from the client; sourceType/sourceId are provenance fields reserved for future request-module
@@ -10,7 +16,6 @@ import { RATE_PERIODS } from "../../utils/rental-pricing.js";
 // (qty ≥ 1, quoted unit price ≥ 0). Money is integer GBP pence.
 
 import { INCOTERM_CODES } from "#modules/purchase-order/purchase-order.validation.js";
-import { toCalendarDay } from "../../utils/calendar-day.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -99,141 +104,12 @@ const itemsField = z
 
 // ── Rental lines ──────────────────────────────────────────────────────────────────────────────
 //
-// A hired item on the request: an IRM line plus a hire period and an optional delivery address.
-// Every rule shared with an IRM line is mirrored field-for-field, so the two can never disagree
-// about what a valid quantity or price is.
-
-export const MAX_NOTIFY_DAYS_BEFORE = 365;
-
-/**
- * A hire date is a CALENDAR DAY, not an instant — normalised to UTC midnight before anything
- * compares or stores it.
- *
- * Load-bearing for more than tidiness: the DB's compound unique index includes both hire dates, so
- * without this the same item, period and address could be added twice by sending one of them with a
- * time on it, and the duplicate the index exists to refuse would sail through.
- */
-const calendarDayField = (message: string) =>
-  z.preprocess((v) => {
-    if (typeof v !== "string" && !(v instanceof Date)) return v;
-    try {
-      return toCalendarDay(v);
-    } catch {
-      return undefined;
-    }
-  }, z.date({ error: message }));
-
-export const rentalLineSchema = z
-  .object({
-    rentalItemId: z.string().regex(OBJECT_ID_RE, "Select a rental item."),
-    quantity: z.coerce
-      .number({ error: "Quantity is required." })
-      .int("Use a whole number.")
-      .min(1, "Quantity must be at least 1.")
-      .max(10_000_000),
-    hireStartDate: calendarDayField("Select a hire start date."),
-    hireEndDate: calendarDayField("Select a hire end date."),
-    // A sanity range only. A lead LONGER than the hire is legitimate and gets clamped to the start
-    // date when stored — refusing it here would make every hire shorter than four days unsavable,
-    // because the lead defaults to 3.
-    notifyDaysBefore: z.coerce
-      .number()
-      .int("Use a whole number of days.")
-      .min(0, "Reminder days must be between 0 and 365.")
-      .max(MAX_NOTIFY_DAYS_BEFORE, "Reminder days must be between 0 and 365.")
-      .optional(),
-    deliveryAddress: z.preprocess(
-      (v) => (typeof v === "string" && v.trim() === "" ? null : v),
-      z.string().trim().max(300, "Delivery address is too long.").nullable().optional(),
-    ),
-    // HOW the price was arrived at. Optional on the way in: absent means `total`, which is what
-    // every line meant before a rate could be quoted.
-    ratePeriod: z.enum(RATE_PERIODS, { error: "Choose how the hire is priced." }).optional(),
-    ratePence: z.preprocess(
-      emptyToUndef,
-      z.coerce
-        .number()
-        .int("The rate must be a whole number of pence.")
-        .min(0, "The rate can't be negative.")
-        .max(1_000_000_000)
-        .nullable()
-        .optional(),
-    ),
-    // Says the agreed price is NOT the arithmetic — someone negotiated it. The service trusts the
-    // sent price only on such a line; otherwise it recomputes from the rate.
-    priceOverridden: z.coerce.boolean().optional(),
-    // Where the hire goes BACK. A mode rather than a bare address — see rentalReturn.ts. Optional
-    // on the way in so an older client (or a line written before the field existed) still saves;
-    // absent means `delivery`, which is what every such line already meant.
-    returnMode: z.enum(RETURN_MODES, { error: "Choose where the hire is collected from." }).optional(),
-    returnAddress: z.preprocess(
-      (v) => (typeof v === "string" && v.trim() === "" ? null : v),
-      z.string().trim().max(300, "Return address is too long.").nullable().optional(),
-    ),
-    unitPricePence: z.coerce
-      .number({ error: "Unit price is required." })
-      .int("Unit price must be a whole number of pence.")
-      .min(0, "Unit price can't be negative.")
-      .max(1_000_000_000),
-    vatRate: z.preprocess(
-      emptyToUndef,
-      z.coerce.number().min(0, "VAT can't be negative.").max(100, "VAT must be 0–100%.").optional(),
-    ),
-    notes: z.string().trim().max(2000).optional(),
-  })
-  // Drops anything the client invents — notably `lineTotalPence` and `notifyOnDate`, both of which
-  // the service computes. Accepting either is how a stored total stops matching its own line.
-  .strip()
-  // Both sides are already UTC midnights, so this compares calendar days.
-  .refine((l) => l.hireEndDate.getTime() > l.hireStartDate.getTime(), {
-    message: "The hire end date must be after the start date.",
-    path: ["hireEndDate"],
-  })
-  // A rate basis with no rate is a line whose price cannot be arrived at — and the price it would
-  // then carry is whatever the client happened to send, which is the ambiguity this replaces.
-  .refine((l) => (l.ratePeriod ?? "total") === "total" || l.ratePence != null, {
-    message: "Enter the rate for the chosen pricing basis.",
-    path: ["ratePence"],
-  })
-  // "Other" is the one mode that carries no fallback: the other two resolve to an address that
-  // already exists. Accepting it empty would store a line whose collection point is a promise the
-  // document cannot keep.
-  .refine((l) => l.returnMode !== "other" || Boolean(l.returnAddress), {
-    message: "Enter the address the hire is collected from.",
-    path: ["returnAddress"],
-  })
-  .refine((l) => l.quantity * l.unitPricePence <= Number.MAX_SAFE_INTEGER, {
-    message: "This line total is too large. Reduce the quantity or unit price.",
-    path: ["unitPricePence"],
-  });
-export type PrfRentalLineInput = z.infer<typeof rentalLineSchema>;
-
-// The same rental item MAY repeat with a different period or address — that is why those fields are
-// line-level. Only an identical (item, period, address) triple is an error, because that one merges
-// into quantity. Same rule the DB's compound unique index enforces, checked here for a readable
-// message rather than a raw Prisma collision.
-const noDupRentalLines = (lines: PrfRentalLineInput[]) => {
-  const keys = lines.map(
-    (l) =>
-      `${l.rentalItemId}|${l.hireStartDate.toISOString()}|${l.hireEndDate.toISOString()}|${l.deliveryAddress ?? ""}`,
-  );
-  return new Set(keys).size === keys.length;
-};
-
-const rentalItemsField = z.array(rentalLineSchema).refine(noDupRentalLines, {
-  // The second sentence names what the key IGNORES. Without it the rule reads as arbitrary to the one
-  // person it fires on most: someone who did change something — the pricing basis — and cannot see
-  // why the line is still "the same". The form shows this wording verbatim.
-  message:
-    "The same rental item, period and delivery address can only be added once — use quantity instead. " +
-    "Pricing basis, rate and return details don't make it a separate line.",
-});
-
-// At least one line of SOME kind. `items` alone used to carry this as `.min(1)`; a rental-only
-// request is legitimate now, so the rule moved to where both arrays are visible.
-const hasAnyLine = (b: { items?: unknown[]; rentalItems?: unknown[] }) =>
-  (b.items?.length ?? 0) + (b.rentalItems?.length ?? 0) > 0;
-const hasAnyLineError = { message: "Add at least one item or rental line.", path: ["items"] };
+// A hired item on the request: an IRM line plus a hire period, a pricing basis and where the kit is
+// delivered and collected. The schema is SHARED with the purchase order — an order raised directly
+// carries the same line under the same rules — and lives in the purchase-order module
+// (rentalLine.validation.ts). Re-exported here so every existing importer keeps its path.
+export { MAX_NOTIFY_DAYS_BEFORE, rentalLineSchema };
+export type PrfRentalLineInput = RentalLineInput;
 
 // ── Reorder-workbench generation ──────────────────────────────────────────────
 // The confirmed workbench rows. The service re-validates and CAPS each row against the LIVE

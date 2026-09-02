@@ -26,6 +26,11 @@ vi.mock("./purchase-order.repository.js", () => ({
 vi.mock("#modules/supplier/supplier.service.js", () => ({ requireActiveSupplier: vi.fn() }));
 vi.mock("#modules/warehouse/warehouse.service.js", () => ({ requireActiveWarehouse: vi.fn() }));
 vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), requireActiveIrmItems: vi.fn() }));
+// The rental catalogue behind a hire line — the shared builder checks and reads it once per document.
+vi.mock("#modules/rental-item/rental-item.service.js", () => ({
+  requireActiveRentalItems: vi.fn(),
+  getRentalItemsByIds: vi.fn(),
+}));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
 vi.mock("#modules/attachment/attachment.service.js", () => ({ releaseAsset: vi.fn() }));
@@ -60,6 +65,7 @@ import * as documentService from "#modules/document/document.service.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
 import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
+import * as rentalItemService from "#modules/rental-item/rental-item.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
@@ -1427,5 +1433,306 @@ describe("cancelPurchaseOrder — hired kit still in our hands", () => {
   it("closePurchaseOrder still refuses a hire that is genuinely still out", async () => {
     mockFindById.mockResolvedValue(poRow({ status: "fully_received", rentalItems: [held()] }));
     await expect(closePurchaseOrder(PO_ID)).rejects.toThrow(/still on hire/i);
+  });
+});
+
+// ── Rental lines raised DIRECTLY on an order — the same hire a request carries ─────────────────
+// The order form can now put hired equipment on an order with no request behind it. Everything a
+// hire IS on an order — its builder, its committed shape, its money — is shared with conversion, so
+// these tests are about the order paths carrying it correctly, not about re-deriving the line.
+describe("direct purchase orders carry hires — the same line a request does", () => {
+  const RNT_ID = "6a1d7f5bfa7d25704f02b963";
+  const RNT_ID_2 = "6a1d7f5bfa7d25704f02b964";
+  const mockReqRentals = rentalItemService.requireActiveRentalItems as ReturnType<typeof vi.fn>;
+  const mockRentalLookup = rentalItemService.getRentalItemsByIds as ReturnType<typeof vi.fn>;
+  const mockReplace = poRepo.replaceItemsAndTotals as ReturnType<typeof vi.fn>;
+  const rentalRef = (id: string) => ({ id, code: `RNT-${id.slice(-4)}`, name: "Fibre Tester", status: "active" });
+  const hire = (over: Record<string, unknown> = {}) => ({
+    rentalItemId: RNT_ID,
+    quantity: 2,
+    hireStartDate: new Date("2026-09-01T00:00:00Z"),
+    hireEndDate: new Date("2026-10-01T00:00:00Z"),
+    unitPricePence: 15000,
+    vatRate: 20,
+    ...over,
+  });
+  // A stored hire nothing has happened to — what a draft's rental lines always are.
+  const storedHire = (over: Record<string, unknown> = {}) => ({
+    id: "rl1",
+    ...hire(),
+    itemName: "Fibre Tester",
+    baseUnit: "Each",
+    notifyDaysBefore: 3,
+    notifyOnDate: new Date("2026-09-28T00:00:00Z"),
+    deliveryAddress: null,
+    ratePeriod: "total",
+    ratePence: null,
+    priceOverridden: false,
+    returnMode: "delivery",
+    returnAddress: null,
+    lineTotalPence: 30000,
+    notes: null,
+    sortOrder: 0,
+    hireStatus: "awaiting_delivery",
+    receivedQuantity: 0,
+    returnedQuantity: 0,
+    issuedQuantity: 0,
+    cancelledQuantity: 0,
+    lostQuantity: 0,
+    extensionChargePence: 0,
+    extensions: [],
+    returnedAt: null,
+    returnedBy: null,
+    rentalItem: rentalRef(RNT_ID),
+    ...over,
+  });
+  const storedItem = {
+    id: "li1",
+    irmItemId: IRM_ID,
+    itemName: "CAT6",
+    sku: "C6",
+    baseUnit: "Each",
+    quantity: 5,
+    unitPricePence: 1000,
+    vatRate: 20,
+    lineTotalPence: 5000,
+    receivedQuantity: 0,
+    notes: null,
+    sortOrder: 0,
+    irmItem: { id: IRM_ID, code: "IRM-0001", name: "CAT6", status: "active" },
+  };
+  type Group = { header: Record<string, unknown>; lines: unknown[]; rentalLines?: Record<string, unknown>[] };
+  const asStored = (l: Record<string, unknown>, j: number) => ({
+    id: `rl${j}`,
+    ...l,
+    extensions: [],
+    returnedAt: null,
+    returnedBy: null,
+    rentalItem: rentalRef(l.rentalItemId as string),
+  });
+  const wireCreateMany = () =>
+    mockCreateMany.mockImplementation((groups: Group[]) =>
+      Promise.resolve(
+        groups.map((g, i) =>
+          poRow({ ...g.header, id: `${"1".repeat(23)}${i}`, code: `PO-000${i + 1}`, items: g.lines, rentalItems: (g.rentalLines ?? []).map(asStored) }),
+        ),
+      ),
+    );
+  const splitBase = { supplierId: SUP_ID, orderDate: "2026-06-01", expectedDeliveryDate: "2026-06-10" };
+  const split = (over: Record<string, unknown>) => ({ ...splitBase, ...over }) as Parameters<typeof createPurchaseOrdersBySplit>[0];
+
+  beforeEach(() => {
+    // The guard returns the snapshot it read — one catalogue query per document, not two.
+    mockReqRentals.mockImplementation((ids: string[]) =>
+      Promise.resolve(new Map(ids.map((id) => [id, { name: "Fibre Tester", baseUnit: "Each" }]))),
+    );
+    mockRentalLookup.mockResolvedValue(new Map());
+    mockReplace.mockImplementation((_id: string, lines: unknown[] | undefined, _t: unknown, _p: unknown, rentalLines?: Record<string, unknown>[]) =>
+      Promise.resolve(poRow({ status: "draft", items: lines ?? [storedItem], rentalItems: (rentalLines ?? [storedHire()]).map((l, j) => ("id" in l ? l : asStored(l, j))) })),
+    );
+  });
+
+  it("split create: a hire joins the group of the warehouse it is delivered to, beside that warehouse's items", async () => {
+    wireCreateMany();
+    await createPurchaseOrdersBySplit(
+      split({
+        items: [{ irmItemId: IRM_ID, warehouseId: WH_ID, quantity: 10, unitPricePence: 500, vatRate: 20 }],
+        rentalItems: [hire({ warehouseId: WH_ID }), hire({ rentalItemId: RNT_ID_2, warehouseId: WH_ID_2 })],
+      }),
+    );
+    const groups = mockCreateMany.mock.calls[0][0] as Group[];
+    expect(groups).toHaveLength(2);
+    expect(groups[0].header.warehouseId).toBe(WH_ID);
+    expect(groups[0].lines).toHaveLength(1);
+    expect(groups[0].rentalLines).toHaveLength(1);
+    // Committed exactly as conversion commits a request's hire.
+    expect(groups[0].rentalLines![0]).toMatchObject({
+      rentalItemId: RNT_ID,
+      itemName: "Fibre Tester",
+      baseUnit: "Each",
+      quantity: 2,
+      unitPricePence: 15000,
+      lineTotalPence: 30000,
+      sortOrder: 0,
+      hireStatus: "awaiting_delivery",
+      notifyOnDate: new Date("2026-09-28T00:00:00Z"),
+    });
+    // The header roll-up covers BOTH kinds of line.
+    expect(groups[0].header.subtotalPence).toBe(10 * 500 + 2 * 15000);
+    expect(groups[0].header.vatPence).toBe(Math.round((10 * 500 + 2 * 15000) * 0.2));
+    // The second warehouse was named only by a hire: a hire-only order, no item rows at all.
+    expect(groups[1].header.warehouseId).toBe(WH_ID_2);
+    expect(groups[1].lines).toEqual([]);
+    expect(groups[1].rentalLines).toHaveLength(1);
+    expect(groups[1].header.subtotalPence).toBe(30000);
+  });
+
+  it("split create: a hire-only request yields a hire-only order, and comes back as the public order with its hire", async () => {
+    wireCreateMany();
+    const result = await createPurchaseOrdersBySplit(split({ rentalItems: [hire({ warehouseId: WH_ID })] }));
+    expect(result).toHaveLength(1);
+    expect(result[0].items).toEqual([]);
+    expect(result[0].rentalItems[0]).toMatchObject({ rentalItemId: RNT_ID, hireStatus: "awaiting_delivery", hireDays: 30, lineTotal: 300 });
+    expect(auditActions().filter((a) => a === "purchase_order.created")).toHaveLength(1);
+  });
+
+  // The N+1 guard at the service: three hires over two warehouses is ONE catalogue check and ONE read.
+  it("split create: checks and reads the rental catalogue once for the whole request", async () => {
+    wireCreateMany();
+    await createPurchaseOrdersBySplit(
+      split({
+        rentalItems: [
+          hire({ warehouseId: WH_ID }),
+          hire({ rentalItemId: RNT_ID_2, warehouseId: WH_ID }),
+          hire({ warehouseId: WH_ID_2 }),
+        ],
+      }),
+    );
+    expect(mockReqRentals).toHaveBeenCalledTimes(1);
+    expect(mockReqRentals).toHaveBeenCalledWith([RNT_ID, RNT_ID_2, RNT_ID]);
+    // And ONE query, not two — the guard's result is the snapshot source.
+    expect(mockRentalLookup).not.toHaveBeenCalled();
+  });
+
+  it("split create: an inactive hire fails the whole request before any write", async () => {
+    wireCreateMany();
+    mockReqRentals.mockRejectedValueOnce(Object.assign(new Error("One or more rental items are no longer active. Remove them from the request."), { status: 400 }));
+    await expect(
+      createPurchaseOrdersBySplit(
+        split({ items: [{ irmItemId: IRM_ID, warehouseId: WH_ID, quantity: 1, unitPricePence: 500, vatRate: 20 }], rentalItems: [hire({ warehouseId: WH_ID })] }),
+      ),
+    ).rejects.toThrow(/no longer active/);
+    expect(mockCreateMany).not.toHaveBeenCalled();
+  });
+
+  it("split create: a warehouse-scoped actor cannot raise a hire for a depot outside their set (403, no write)", async () => {
+    wireCreateMany();
+    const actor = { type: "user", email: "wm@x.com", assignedWarehouseIds: [WH_ID] } as never;
+    await expect(createPurchaseOrdersBySplit(split({ rentalItems: [hire({ warehouseId: WH_ID_2 })] }), actor)).rejects.toThrow(
+      /access to this warehouse/i,
+    );
+    expect(mockCreateMany).not.toHaveBeenCalled();
+    // Refused for FREE: the access check is synchronous and runs before any catalogue is read.
+    expect(mockReqRentals).not.toHaveBeenCalled();
+  });
+
+  it("single create: carries the hires to the repository and totals both kinds of line", async () => {
+    mockCreateWithCode.mockImplementation((header: Record<string, unknown>, lines: unknown[], rentalLines: Record<string, unknown>[]) =>
+      Promise.resolve(poRow({ ...header, items: lines, rentalItems: rentalLines.map(asStored) })),
+    );
+    const result = await createPurchaseOrder({
+      supplierId: SUP_ID,
+      warehouseId: WH_ID,
+      orderDate: "2026-06-01",
+      expectedDeliveryDate: "2026-06-10",
+      items: [{ irmItemId: IRM_ID, quantity: 10, unitPricePence: 500, vatRate: 20 }],
+      rentalItems: [hire()],
+    } as Parameters<typeof createPurchaseOrder>[0]);
+    const [header, , rentalRows] = mockCreateWithCode.mock.calls[0] as [Record<string, unknown>, unknown[], Record<string, unknown>[]];
+    expect(rentalRows).toHaveLength(1);
+    expect(rentalRows[0]).toMatchObject({ rentalItemId: RNT_ID, hireStatus: "awaiting_delivery", lineTotalPence: 30000 });
+    expect(header.subtotalPence).toBe(5000 + 30000);
+    expect(result.rentalItems).toHaveLength(1);
+  });
+
+  it("update: resending the hires replaces them, keeps the stored items, and totals both", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "draft", items: [storedItem], rentalItems: [storedHire()] }));
+    await updatePurchaseOrder(PO_ID, { rentalItems: [hire({ quantity: 3 })] });
+    const [, lines, totals, , rentalRows] = mockReplace.mock.calls[0] as [string, unknown, Record<string, number>, unknown, Record<string, unknown>[]];
+    expect(lines).toBeUndefined(); // the items were not sent, so they are not touched
+    expect(rentalRows).toHaveLength(1);
+    expect(rentalRows[0]).toMatchObject({ quantity: 3, lineTotalPence: 45000, hireStatus: "awaiting_delivery", sortOrder: 0 });
+    // 5 x £10 of stored items + 3 x £150 of hire, all at 20%.
+    expect(totals).toEqual({ subtotalPence: 5000 + 45000, vatPence: 10000, grandTotalPence: 60000 });
+  });
+
+  it("update: omitting the hires leaves them exactly as stored", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "draft", items: [storedItem], rentalItems: [storedHire()] }));
+    await updatePurchaseOrder(PO_ID, { items: [{ irmItemId: IRM_ID, quantity: 1, unitPricePence: 1000, vatRate: 20 }] });
+    const [, lines, totals, , rentalRows] = mockReplace.mock.calls[0] as [string, unknown[], Record<string, number>, unknown, unknown];
+    expect(lines).toHaveLength(1);
+    expect(rentalRows).toBeUndefined();
+    expect(totals.subtotalPence).toBe(1000 + 30000);
+    expect(mockReqRentals).not.toHaveBeenCalled();
+  });
+
+  it("update: the audit trail records the hire change, labelled (hire) so it cannot be read as an item", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "draft", items: [storedItem], rentalItems: [storedHire()] }));
+    await updatePurchaseOrder(PO_ID, { rentalItems: [hire({ quantity: 3 })] });
+    const entry = mockAudit.mock.calls.map((c) => c[0]).find((a) => a.action === "purchase_order.updated");
+    const labels = (entry?.metadata?.changes as { label: string }[]).map((c) => c.label);
+    expect(labels).toContain("Fibre Tester (hire) — Quantity: 2 → 3");
+  });
+
+  it("update: refuses to rewrite a hire that has already moved — its history hangs off the row", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "draft", items: [storedItem], rentalItems: [storedHire({ receivedQuantity: 1 })] }));
+    await expect(updatePurchaseOrder(PO_ID, { rentalItems: [hire()] })).rejects.toThrow(/already moved/);
+    expect(mockReplace).not.toHaveBeenCalled();
+    // And before either catalogue was read — the refusal is a check on rows already loaded.
+    expect(mockReqRentals).not.toHaveBeenCalled();
+    expect(mockReqIrms).not.toHaveBeenCalled();
+  });
+
+  it("update: refuses to leave the order with no line of either kind", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "draft", items: [storedItem], rentalItems: [storedHire()] }));
+    await expect(updatePurchaseOrder(PO_ID, { items: [], rentalItems: [] })).rejects.toThrow(/at least one item or rental line/i);
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it("update: a hire-only order may drop its last item, and an item-only order its last hire", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "draft", items: [storedItem], rentalItems: [storedHire()] }));
+    await expect(updatePurchaseOrder(PO_ID, { items: [] })).resolves.toBeDefined();
+    await expect(updatePurchaseOrder(PO_ID, { rentalItems: [] })).resolves.toBeDefined();
+    expect(mockReplace).toHaveBeenCalledTimes(2);
+  });
+
+  // Creating and editing hires touches the ORDER repository and the rental CATALOGUE, and nothing
+  // else — there is no inventory collaborator in this module to call. rental.boundary.test.ts pins
+  // that at the source level; this pins it at the call level.
+  it("never reaches beyond the order repository and the rental catalogue", async () => {
+    wireCreateMany();
+    await createPurchaseOrdersBySplit(split({ rentalItems: [hire({ warehouseId: WH_ID })] }));
+    expect(mockCreateMany).toHaveBeenCalledTimes(1);
+    expect(mockReqRentals).toHaveBeenCalledTimes(1);
+    expect(mockReqIrms).not.toHaveBeenCalled(); // no item lines → the IRM catalogue is not even read
+  });
+});
+
+describe("commerciallyMatchesPrf — hires are part of the commercial identity", () => {
+  const RNT_ID = "6a1d7f5bfa7d25704f02b963";
+  const start = new Date("2026-09-01T00:00:00Z");
+  const end = new Date("2026-10-01T00:00:00Z");
+  const hireLine = (over: Record<string, unknown> = {}) => ({
+    rentalItemId: RNT_ID, hireStartDate: start, hireEndDate: end, deliveryAddress: null, quantity: 2, unitPricePence: 15000, vatRate: 20, ...over,
+  });
+  const doc = (rentalItems: ReturnType<typeof hireLine>[]) => ({
+    supplierId: SUP_ID, warehouseId: WH_ID, currency: "GBP",
+    items: [{ irmItemId: IRM_ID, quantity: 1, unitPricePence: 100, vatRate: 20 }],
+    rentalItems,
+  });
+
+  it("matches when the hires are identical, whatever their order", () => {
+    const a = hireLine();
+    const b = hireLine({ hireEndDate: new Date("2026-10-15T00:00:00Z") });
+    expect(commerciallyMatchesPrf(doc([a, b]), doc([b, a]))).toBe(true);
+  });
+
+  it.each([
+    ["quantity", { quantity: 3 }],
+    ["unit price", { unitPricePence: 14000 }],
+    ["VAT", { vatRate: 0 }],
+    ["hire period", { hireEndDate: new Date("2026-10-15T00:00:00Z") }],
+    ["delivery address", { deliveryAddress: "12 Site Road" }],
+  ])("refuses when a hire's %s changed after finance signed it", (_what, over) => {
+    expect(commerciallyMatchesPrf(doc([hireLine(over)]), doc([hireLine()]))).toBe(false);
+  });
+
+  it("refuses a hire added to, or dropped from, the order", () => {
+    expect(commerciallyMatchesPrf(doc([hireLine(), hireLine({ deliveryAddress: "x" })]), doc([hireLine()]))).toBe(false);
+    expect(commerciallyMatchesPrf(doc([]), doc([hireLine()]))).toBe(false);
+  });
+
+  it("documents with no hires on either side still compare on their items alone", () => {
+    expect(commerciallyMatchesPrf(doc([]), doc([]))).toBe(true);
   });
 });

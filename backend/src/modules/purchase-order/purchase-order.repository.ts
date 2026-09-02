@@ -409,15 +409,26 @@ export function softDelete(id: string): Promise<PurchaseOrder> {
 }
 
 // Replace ALL line rows + recompute the header totals, atomically (draft edit).
+// Either kind of line is REPLACED when its array is given and left exactly as stored when it is
+// `undefined` — a header-only edit, or one that resent only the IRM lines, must not touch the hires
+// (a hire row is what receipts, custody and extensions hang off). The totals always cover both.
 export async function replaceItemsAndTotals(
   poId: string,
-  lines: PoLineRow[],
+  lines: PoLineRow[] | undefined,
   totals: PoTotals,
   headerPatch: Prisma.PurchaseOrderUncheckedUpdateInput,
+  rentalLines?: PoRentalLineRow[],
 ): Promise<PurchaseOrderWithRelations> {
   return withTransaction(async (tx) => {
-    await tx.purchaseOrderItem.deleteMany({ where: { purchaseOrderId: poId } });
-    if (lines.length) await tx.purchaseOrderItem.createMany({ data: lines.map((l) => ({ purchaseOrderId: poId, ...l })) });
+    if (lines) {
+      await tx.purchaseOrderItem.deleteMany({ where: { purchaseOrderId: poId } });
+      if (lines.length) await tx.purchaseOrderItem.createMany({ data: lines.map((l) => ({ purchaseOrderId: poId, ...l })) });
+    }
+    if (rentalLines) {
+      await tx.purchaseOrderRentalLine.deleteMany({ where: { purchaseOrderId: poId } });
+      if (rentalLines.length)
+        await tx.purchaseOrderRentalLine.createMany({ data: rentalLines.map((l) => ({ purchaseOrderId: poId, ...l })) });
+    }
     await tx.purchaseOrder.update({ where: { id: poId }, data: { ...headerPatch, ...totals } });
     return tx.purchaseOrder.findUniqueOrThrow({ where: { id: poId }, include: withRelations });
   });
@@ -623,7 +634,7 @@ async function ensurePoCounter(): Promise<void> {
 // Retries the whole transaction on an out-of-band code collision (fast-forward) or a transient
 // write-conflict. Returns the created POs IN INPUT ORDER.
 export async function createManyWithCodes(
-  groups: { header: Omit<Prisma.PurchaseOrderUncheckedCreateInput, "code">; lines: PoLineRow[] }[],
+  groups: { header: Omit<Prisma.PurchaseOrderUncheckedCreateInput, "code">; lines: PoLineRow[]; rentalLines?: PoRentalLineRow[] }[],
 ): Promise<PurchaseOrderWithRelations[]> {
   if (groups.length === 0) return [];
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -642,6 +653,9 @@ export async function createManyWithCodes(
           const po = await tx.purchaseOrder.create({ data: { deletedAt: null, ...g.header, code } });
           if (g.lines.length) {
             await tx.purchaseOrderItem.createMany({ data: g.lines.map((l) => ({ purchaseOrderId: po.id, ...l })) });
+          }
+          if (g.rentalLines?.length) {
+            await tx.purchaseOrderRentalLine.createMany({ data: g.rentalLines.map((l) => ({ purchaseOrderId: po.id, ...l })) });
           }
           createdIds.push(po.id);
         }
@@ -723,6 +737,7 @@ export async function createPoTx(
 export async function createWithCode(
   header: Omit<Prisma.PurchaseOrderUncheckedCreateInput, "code">,
   lines: PoLineRow[],
+  rentalLines: PoRentalLineRow[] = [],
 ): Promise<PurchaseOrderWithRelations> {
   for (let attempt = 0; attempt < 5; attempt++) {
     const seq = await nextSequence();
@@ -735,6 +750,8 @@ export async function createWithCode(
         // Mirrors supplierRepo.createWithCode.
         const po = await tx.purchaseOrder.create({ data: { deletedAt: null, ...header, code } });
         if (lines.length) await tx.purchaseOrderItem.createMany({ data: lines.map((l) => ({ purchaseOrderId: po.id, ...l })) });
+        if (rentalLines.length)
+          await tx.purchaseOrderRentalLine.createMany({ data: rentalLines.map((l) => ({ purchaseOrderId: po.id, ...l })) });
         return tx.purchaseOrder.findUniqueOrThrow({ where: { id: po.id }, include: withRelations });
       });
     } catch (e) {

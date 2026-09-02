@@ -3,6 +3,8 @@ import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
 import { downloadBlob } from "@/lib/download";
 import type { PoPriority, PurchaseOrder } from "@/types/purchase-order";
+import type { RentalLinePayload } from "@/components/dashboard/purchase-requests/rentalLineRows";
+import type { SplitRentalLinePayload } from "@/components/dashboard/purchase-orders/poRentalLines";
 
 // Typed wrappers around the backend /purchase-orders endpoints (CRUD + workflow + attachments).
 
@@ -84,6 +86,9 @@ export interface PurchaseOrderPayload {
   internalNotes?: string;
   supplierNotes?: string;
   items?: PoLinePayload[];
+  // Hired equipment on the order — the SAME line a purchase request carries. On an edit: sent →
+  // the order's hires are replaced by these; omitted → left exactly as stored.
+  rentalItems?: RentalLinePayload[];
 }
 
 // One line on the multi-warehouse split payload — like PoLinePayload but carrying its own
@@ -111,7 +116,11 @@ export interface PurchaseOrderSplitPayload {
   paymentTerms?: string | null;
   internalNotes?: string;
   supplierNotes?: string;
-  items: SplitPoLinePayload[];
+  // Both arrays are optional INDIVIDUALLY — a hire-only order is legitimate — but the backend
+  // refuses a body with no line of either kind.
+  items?: SplitPoLinePayload[];
+  // Each hire names the warehouse it is delivered to, and joins that warehouse's order.
+  rentalItems?: SplitRentalLinePayload[];
 }
 
 

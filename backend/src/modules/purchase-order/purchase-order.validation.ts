@@ -1,9 +1,23 @@
 import { z } from "zod";
 
+import {
+  hasAnyLine,
+  hasAnyLineError,
+  rentalItemsField,
+  splitRentalItemsField,
+  type RentalLineInput,
+  type SplitRentalLineInput,
+} from "./rentalLine.validation.js";
+
 // Purchase Order validation. PROCUREMENT WORKFLOW ONLY. Codes/status/totals are SYSTEM-owned
 // and never accepted from the client. Editable only in `draft` (enforced in the service).
 // Required on create: supplier, delivery warehouse, order date, expected delivery date, and
-// at least one line (qty ≥ 1, unit price ≥ 0). Money is integer GBP pence.
+// at least one line of EITHER kind — an IRM item (qty ≥ 1, unit price ≥ 0) or a hire (the shared
+// rental line, rentalLine.validation.ts). Money is integer GBP pence.
+
+// The rental line an order carries is the request's, under the request's rules — re-exported so
+// the service reads both kinds of line input from one place.
+export type { RentalLineInput, SplitRentalLineInput };
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -73,15 +87,11 @@ const noDupItems = (lines: { irmItemId: string }[]) => {
   const ids = lines.map((l) => l.irmItemId);
   return new Set(ids).size === ids.length;
 };
+// No `.min(1)`: a HIRE-ONLY order is legitimate — converted from a rental-only request, or raised
+// directly with rental lines and no IRM items — so "at least one line" is a rule about the whole
+// body (`hasAnyLine`), where both arrays are visible. On an EDIT it also has to see what is already
+// stored, so the service re-checks it there.
 const itemsField = z
-  .array(lineSchema)
-  .min(1, "Add at least one item.")
-  .refine(noDupItems, { message: "Each item can only be added once." });
-
-// The same lines on an EDIT, where an empty array is legitimate: an order converted from a
-// hire-only request has no IRM lines at all, and `.min(1)` made it impossible to edit. "Must still
-// have a line of some kind" is enforced in the service, which can see the rental lines too.
-const editableItemsField = z
   .array(lineSchema)
   .refine(noDupItems, { message: "Each item can only be added once." });
 
@@ -123,8 +133,12 @@ export const createPurchaseOrderSchema = z
     orderDate: requiredDate("Order date"),
     expectedDeliveryDate: requiredDate("Expected delivery date"),
     ...sharedHeader,
-    items: itemsField,
+    items: itemsField.optional(),
+    // Hired equipment, on the same line a purchase request carries. The order's own warehouse is
+    // where the hire is delivered unless the line names an address of its own.
+    rentalItems: rentalItemsField.optional(),
   })
+  .refine(hasAnyLine, hasAnyLineError)
   .refine(datesOk, datesError);
 export type CreatePurchaseOrderInput = z.infer<typeof createPurchaseOrderSchema>;
 
@@ -157,11 +171,16 @@ export const createPurchaseOrdersSplitSchema = z
     ...sharedHeader,
     items: z
       .array(splitLineSchema)
-      .min(1, "Add at least one item.")
       .refine(noDupItemPerWarehouse, {
         message: "The same item can't be added twice for the same warehouse. Combine those into one row.",
-      }),
+      })
+      .optional(),
+    // Hires, each naming the warehouse it is delivered to — the group it joins, and the depot its
+    // custody is anchored at once it arrives. A warehouse named only by hires yields a hire-only
+    // order, exactly as conversion mints one from a rental-only request.
+    rentalItems: splitRentalItemsField.optional(),
   })
+  .refine(hasAnyLine, hasAnyLineError)
   .refine(datesOk, datesError);
 export type CreatePurchaseOrdersSplitInput = z.infer<typeof createPurchaseOrdersSplitSchema>;
 
@@ -176,7 +195,11 @@ export const updatePurchaseOrderSchema = z
     orderDate: optionalDate,
     expectedDeliveryDate: optionalDate,
     ...sharedHeader,
-    items: editableItemsField.optional(),
+    items: itemsField.optional(),
+    // Sent → the order's hires are REPLACED by these (draft only, like every line edit here);
+    // omitted → left exactly as stored. The service refuses a replace on a hire that has already
+    // moved, which a draft's never has.
+    rentalItems: rentalItemsField.optional(),
   })
   .refine(datesOk, datesError);
 export type UpdatePurchaseOrderInput = z.infer<typeof updatePurchaseOrderSchema>;

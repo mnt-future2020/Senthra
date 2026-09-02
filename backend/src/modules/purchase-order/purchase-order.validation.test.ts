@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createPurchaseOrderSchema,
+  createPurchaseOrdersSplitSchema,
   poCancelSchema,
   poRejectSchema,
   poSupplierAcceptSchema,
@@ -178,4 +179,59 @@ describe("workflow + attachment bodies", () => {
   // same three rules — declared type is one we accept, declared size is under 10 MB, and the BYTES are
   // what the label claims — are enforced by `upload.catalog.ts` and covered by `upload.service.test.ts`
   // (see "rejects a PDF label on ZIP bytes"). Restating them here would test nothing that runs.
+});
+
+// ── Rental lines on an order — the same line a purchase request carries ────────────────────────
+describe("rental lines on a purchase order", () => {
+  const RNT_ID = "6a1d7f5bfa7d25704f02b963";
+  const hire = { rentalItemId: RNT_ID, quantity: 1, hireStartDate: "2026-09-01", hireEndDate: "2026-10-01", unitPricePence: 15000 };
+
+  it("create: accepts a hire beside the items, and a hire-only order", () => {
+    expect(createPurchaseOrderSchema.safeParse(valid({ rentalItems: [hire] })).success).toBe(true);
+    expect(createPurchaseOrderSchema.safeParse(valid({ items: [], rentalItems: [hire] })).success).toBe(true);
+    expect(createPurchaseOrderSchema.safeParse(valid({ items: undefined, rentalItems: [hire] })).success).toBe(true);
+  });
+
+  it("create: still refuses an order with no line of either kind", () => {
+    expect(createPurchaseOrderSchema.safeParse(valid({ items: [], rentalItems: [] })).success).toBe(false);
+    expect(createPurchaseOrderSchema.safeParse(valid({ items: [] })).success).toBe(false);
+  });
+
+  it("create: a hire is validated by the request's rules — an inverted period is refused", () => {
+    expect(createPurchaseOrderSchema.safeParse(valid({ rentalItems: [{ ...hire, hireEndDate: "2026-08-01" }] })).success).toBe(false);
+  });
+
+  const splitValid = (over: Record<string, unknown> = {}) => ({
+    supplierId: SUP_ID,
+    orderDate: "2026-06-01",
+    expectedDeliveryDate: "2026-06-10",
+    items: [{ irmItemId: IRM_ID, quantity: 5, unitPricePence: 1000, warehouseId: WH_ID }],
+    ...over,
+  });
+
+  it("split create: a hire names the warehouse it is delivered to", () => {
+    expect(createPurchaseOrdersSplitSchema.safeParse(splitValid({ rentalItems: [{ ...hire, warehouseId: WH_ID }] })).success).toBe(true);
+    expect(createPurchaseOrdersSplitSchema.safeParse(splitValid({ rentalItems: [hire] })).success).toBe(false);
+  });
+
+  it("split create: a hire-only request is legitimate, an empty one is not", () => {
+    expect(createPurchaseOrdersSplitSchema.safeParse(splitValid({ items: [], rentalItems: [{ ...hire, warehouseId: WH_ID }] })).success).toBe(true);
+    expect(createPurchaseOrdersSplitSchema.safeParse(splitValid({ items: [], rentalItems: [] })).success).toBe(false);
+  });
+
+  it("update: accepts the replacement hires, and a header-only patch still omits them", () => {
+    const withHires = updatePurchaseOrderSchema.safeParse({ rentalItems: [hire] });
+    expect(withHires.success).toBe(true);
+    const headerOnly = updatePurchaseOrderSchema.safeParse({ projectRef: "PROJ-1" });
+    expect(headerOnly.success).toBe(true);
+    expect(headerOnly.success && headerOnly.data.rentalItems).toBeUndefined();
+  });
+
+  it("update: what the server computes never comes from the client", () => {
+    const res = updatePurchaseOrderSchema.parse({ rentalItems: [{ ...hire, lineTotalPence: 1, notifyOnDate: "2026-09-28", hireStatus: "returned" }] });
+    const line = res.rentalItems![0] as Record<string, unknown>;
+    expect(line).not.toHaveProperty("lineTotalPence");
+    expect(line).not.toHaveProperty("notifyOnDate");
+    expect(line).not.toHaveProperty("hireStatus");
+  });
 });
