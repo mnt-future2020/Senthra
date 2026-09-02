@@ -9,7 +9,9 @@ import { emitHireUpdated } from "./rentalHire.realtime.js";
 import { deliversToWarehouse, resolveDeliveryLocation, resolveReturnLocation, type ReturnContext } from "./rentalReturn.js";
 import { extensionChargePence, type RatePeriod } from "../../utils/rental-pricing.js";
 import * as poRepo from "./purchase-order.repository.js";
-import type { PoLineRow, PurchaseOrderWithRelations } from "./purchase-order.repository.js";
+import type { PoLineRow, PoRentalLineRow, PurchaseOrderWithRelations } from "./purchase-order.repository.js";
+import { buildRentalLineRows, committedHireRow, hireLineUntouched } from "./rentalLine.rows.js";
+import { rentalLineIdentity } from "./rentalLine.validation.js";
 import * as poEmail from "./purchase-order.email.js";
 import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
 import * as jobRepo from "#modules/job/job.repository.js";
@@ -36,7 +38,7 @@ import { emitAttentionChanged, emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM } from "
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
-import { diffProcurementChanges } from "../../utils/procurement-diff.js";
+import { diffProcurementChanges, procurementDiffLines } from "../../utils/procurement-diff.js";
 import type {
   CreatePurchaseOrderInput,
   CreatePurchaseOrdersSplitInput,
@@ -580,6 +582,19 @@ async function buildLineRows(items: POLineInput[]): Promise<PoLineRow[]> {
   return rows;
 }
 
+/**
+ * A draft edit that resends the rental lines REPLACES them — delete and re-create, as the IRM lines
+ * are. Refused outright if any stored hire has already moved: a received, issued, returned, extended
+ * or short-closed line has receipts, custody and extension rows hanging off it, and dropping the row
+ * would orphan that history. An order is only editable in draft and a draft's hires have done none
+ * of that, so this can only fire on a row that reached a draft by a path this module does not know.
+ */
+function assertHireLinesReplaceable(lines: PurchaseOrderWithRelations["rentalItems"]): void {
+  if (lines.some((l) => !hireLineUntouched(l))) {
+    throw conflict("This order's hired equipment has already moved — its rental lines can no longer be edited.");
+  }
+}
+
 // Validate an optional job link (must exist and not be soft-deleted). Returns the id or null.
 // null/undefined/"" all resolve to null (no link / cleared).
 async function resolveJobId(jobId: string | null | undefined): Promise<string | null> {
@@ -871,8 +886,18 @@ export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor
   const supplier = await supplierService.requireActiveSupplier(input.supplierId);
   await warehouseService.requireActiveWarehouse(input.warehouseId);
   const jobId = await resolveJobId(input.jobId);
-  const lineRows = await buildLineRows(input.items);
-  const totals = computeTotals(lineRows);
+  // The two catalogues are INDEPENDENT reads, so they are resolved together rather than one after
+  // the other: an order carrying both kinds of line waits for the slower lookup, not for their sum.
+  // Hires go through the SHARED builder and are committed exactly as conversion commits them
+  // (awaiting delivery, reminder date derived) — see rentalLine.rows.ts. A hire raised on a direct
+  // order and one that arrived through a request are the same row.
+  const [lineRows, builtHires] = await Promise.all([
+    input.items?.length ? buildLineRows(input.items) : Promise.resolve([]),
+    buildRentalLineRows(input.rentalItems ?? []),
+  ]);
+  const rentalRows = builtHires.map((row, i) => committedHireRow(row, i));
+  // BOTH kinds of line — a hire-only order's total is its hires.
+  const totals = computeTotals([...lineRows, ...rentalRows]);
   const actorLabel = actor?.email ?? null;
 
   const created = await poRepo.createWithCode(
@@ -901,6 +926,7 @@ export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor
       updatedBy: actorLabel,
     },
     lineRows,
+    rentalRows,
   );
   audit.record({ actor, action: "purchase_order.created", targetType: "purchase_order", targetId: created.id, targetLabel: created.code });
   emitPoUpdated(created);
@@ -921,28 +947,50 @@ export async function createPurchaseOrdersBySplit(
   const supplier = await supplierService.requireActiveSupplier(input.supplierId);
   const splitJobId = await resolveJobId(input.jobId);
   const actorLabel = actor?.email ?? null;
+  const items = input.items ?? [];
+  const rentalItems = input.rentalItems ?? [];
 
   // Group lines by destination warehouse, preserving first-appearance order (predictable PO sequence).
+  // BOTH kinds of line share the grouping: a warehouse named only by hires forms a group of its own,
+  // and the order it yields is hire-only — the same document conversion mints from a rental-only
+  // request. Hires are held as INDICES into the input so the rows built below deal out in order.
   const order: string[] = [];
-  const byWarehouse = new Map<string, typeof input.items>();
-  for (const line of input.items) {
-    let bucket = byWarehouse.get(line.warehouseId);
+  const byWarehouse = new Map<string, { items: typeof items; rentalIdx: number[] }>();
+  const groupFor = (warehouseId: string) => {
+    let bucket = byWarehouse.get(warehouseId);
     if (!bucket) {
-      bucket = [];
-      byWarehouse.set(line.warehouseId, bucket);
-      order.push(line.warehouseId);
+      bucket = { items: [], rentalIdx: [] };
+      byWarehouse.set(warehouseId, bucket);
+      order.push(warehouseId);
     }
-    bucket.push(line);
-  }
+    return bucket;
+  };
+  for (const line of items) groupFor(line.warehouseId).items.push(line);
+  rentalItems.forEach((line, i) => groupFor(line.warehouseId).rentalIdx.push(i));
+
+  // Warehouse ACCESS first, for every group, before any catalogue is touched: the check is
+  // synchronous and a scoped actor naming a depot outside their set must be refused for free.
+  for (const warehouseId of order) assertWarehouseAccess(actor, warehouseId);
+
+  // The rental catalogue is checked and read ONCE for the whole request, however many groups it
+  // splits into — through the shared builder, so a hire raised here is the row conversion would
+  // have produced from a request. An inactive item fails everything before a single write.
+  const rentalRows = await buildRentalLineRows(rentalItems);
 
   // Pre-validate EVERY group and build its header + lines BEFORE any write, so an invalid group
   // (inaccessible / inactive warehouse, inactive item) fails the whole request with zero side effects.
-  const groups: { header: Omit<Prisma.PurchaseOrderUncheckedCreateInput, "code">; lines: PoLineRow[] }[] = [];
+  const groups: {
+    header: Omit<Prisma.PurchaseOrderUncheckedCreateInput, "code">;
+    lines: PoLineRow[];
+    rentalLines: PoRentalLineRow[];
+  }[] = [];
   for (const warehouseId of order) {
-    assertWarehouseAccess(actor, warehouseId); // scoped actor: 403 on an unassigned warehouse
-    await warehouseService.requireActiveWarehouse(warehouseId);
-    const lineRows = await buildLineRows(byWarehouse.get(warehouseId) ?? []);
-    const totals = computeTotals(lineRows);
+    await warehouseService.requireActiveWarehouse(warehouseId); // access already asserted above
+    const bucket = byWarehouse.get(warehouseId)!;
+    const lineRows = bucket.items.length ? await buildLineRows(bucket.items) : [];
+    // Committed exactly as conversion commits a request's hires: awaiting delivery, reminder derived.
+    const rentalLines = bucket.rentalIdx.map((idx, i) => committedHireRow(rentalRows[idx], i));
+    const totals = computeTotals([...lineRows, ...rentalLines]);
     groups.push({
       header: {
         supplierId: input.supplierId,
@@ -968,6 +1016,7 @@ export async function createPurchaseOrdersBySplit(
         updatedBy: actorLabel,
       },
       lines: lineRows,
+      rentalLines,
     });
   }
 
@@ -1020,32 +1069,46 @@ export async function updatePurchaseOrder(id: string, input: UpdatePurchaseOrder
   if (input.supplierNotes !== undefined) headerPatch.supplierNotes = trimToNull(input.supplierNotes);
 
   let result: PurchaseOrderWithRelations;
-  if (input.items !== undefined) {
-    const lineRows = await buildLineRows(input.items);
+  const linesTouched = input.items !== undefined || input.rentalItems !== undefined;
+  if (linesTouched) {
+    // Whichever array was sent is REPLACED; whichever was omitted is left exactly as stored. The
+    // totals always cover both, because both carry money: computing them from the sent lines alone
+    // made a draft edit silently drop the hire value back out of the totals that conversion had
+    // just put in, leaving a hire-only order reading £0 with its lines still on screen.
+    // The refusal FIRST, before any catalogue read: it is a synchronous check on rows already
+    // loaded, so an edit that may not touch its hires must not pay for a lookup to be told so.
+    if (input.rentalItems !== undefined) assertHireLinesReplaceable(existing.rentalItems);
+    const [lineRows, builtHires] = await Promise.all([
+      input.items !== undefined ? buildLineRows(input.items) : Promise.resolve(undefined),
+      input.rentalItems !== undefined ? buildRentalLineRows(input.rentalItems) : Promise.resolve(undefined),
+    ]);
+    const rentalRows: PoRentalLineRow[] | undefined = builtHires?.map((row, i) => committedHireRow(row, i));
     // A line of SOME kind must remain. The schema can no longer enforce this on `items` alone —
-    // a hire-only order legitimately has none — so the check lives where the rental lines are visible.
-    if (lineRows.length === 0 && existing.rentalItems.length === 0) {
+    // a hire-only order legitimately has none — so the check lives where both the incoming arrays
+    // and the stored lines are visible.
+    const keptItems = lineRows ?? existing.items;
+    const keptRentals = rentalRows ?? existing.rentalItems;
+    if (keptItems.length === 0 && keptRentals.length === 0) {
       throw badRequest("Add at least one item or rental line.");
     }
-    // The rental lines are NOT replaced here — this endpoint only edits IRM lines — but they still
-    // carry money, so the header roll-up has to include them. Computing from `lineRows` alone made
-    // a draft edit silently drop the hire value back out of the totals that conversion had just
-    // put in, leaving a hire-only order reading £0 with its lines still on screen.
-    const totals = computeTotals([...lineRows, ...existing.rentalItems]);
-    result = await poRepo.replaceItemsAndTotals(id, lineRows, totals, headerPatch);
+    const totals = computeTotals([...keptItems, ...keptRentals]);
+    result = await poRepo.replaceItemsAndTotals(id, lineRows, totals, headerPatch, rentalRows);
   } else {
     result = await poRepo.update(id, headerPatch);
   }
   // Field-level change audit (Zoho/SAP-style): capture the before→after of the commercially-meaningful
   // fields — supplier, warehouse, and each line's qty/price/VAT — so a pre-issue edit is traceable.
-  // `result` carries the fully-resolved post-update values; lines only diffed when the update sent them.
-  const withKeys = <T extends { irmItemId: string }>(lines: T[]) => lines.map((l) => ({ ...l, lineKey: l.irmItemId }));
-  const changes = diffProcurementChanges({ ...existing, items: withKeys(existing.items) }, {
-    supplierId: result.supplierId,
-    supplierName: result.supplierName,
-    warehouseId: result.warehouseId,
-    items: input.items !== undefined ? withKeys(result.items) : undefined,
-  });
+  // `result` carries the fully-resolved post-update values; lines only diffed when the update sent
+  // them. Hires are diffed alongside the IRM lines, labelled "(hire)" — see procurementDiffLines.
+  const changes = diffProcurementChanges(
+    { ...existing, items: procurementDiffLines(existing.items, existing.rentalItems) },
+    {
+      supplierId: result.supplierId,
+      supplierName: result.supplierName,
+      warehouseId: result.warehouseId,
+      items: linesTouched ? procurementDiffLines(result.items, result.rentalItems) : undefined,
+    },
+  );
   audit.record({
     actor,
     action: "purchase_order.updated",
@@ -1116,14 +1179,30 @@ export async function submitPurchaseOrder(id: string, actor?: AuditActor): Promi
 // ── PRF fast-path: commercial equality ────────────────────────────────────────────────────────
 // A PRF-born PO may go draft → approved WITHOUT a second finance review ONLY while it still
 // commercially matches the approved PRF. INVARIANT: this comparison must cover EVERY input that
-// feeds computeTotals — today supplier, warehouse, currency and the line multiset
-// {irmItemId, quantity, unitPricePence, vatRate}. If a commercial field is ever added (discount,
-// delivery charge, …) it MUST be added here in the same change, or it becomes a silent bypass.
-// Exported (pure) for unit testing.
-export function commerciallyMatchesPrf(
-  po: { supplierId: string; warehouseId: string; currency: string | null; items: { irmItemId: string; quantity: number; unitPricePence: number; vatRate: number }[] },
-  prf: { supplierId: string; warehouseId: string; currency: string | null; items: { irmItemId: string; quantity: number; unitPricePence: number; vatRate: number }[] },
-): boolean {
+// feeds computeTotals — today supplier, warehouse, currency, the IRM line multiset
+// {irmItemId, quantity, unitPricePence, vatRate} and the hire multiset {item + period + address,
+// quantity, unitPricePence, vatRate}. Hires are in it because a draft's rental lines are editable
+// now: without them a reviewer's £15,000 hire could be re-priced after approval and still ride the
+// fast path. If a commercial field is ever added (discount, delivery charge, …) it MUST be added
+// here in the same change, or it becomes a silent bypass. Exported (pure) for unit testing.
+type CommercialIrmLine = { irmItemId: string; quantity: number; unitPricePence: number; vatRate: number };
+type CommercialHireLine = {
+  rentalItemId: string;
+  hireStartDate: Date;
+  hireEndDate: Date;
+  deliveryAddress: string | null;
+  quantity: number;
+  unitPricePence: number;
+  vatRate: number;
+};
+type CommercialDoc = {
+  supplierId: string;
+  warehouseId: string;
+  currency: string | null;
+  items: CommercialIrmLine[];
+  rentalItems?: CommercialHireLine[];
+};
+export function commerciallyMatchesPrf(po: CommercialDoc, prf: CommercialDoc): boolean {
   if (po.supplierId !== prf.supplierId) return false;
   if (po.warehouseId !== prf.warehouseId) return false;
   if ((po.currency ?? "GBP") !== (prf.currency ?? "GBP")) return false;
@@ -1133,6 +1212,18 @@ export function commerciallyMatchesPrf(
   const prfByItem = new Map(prf.items.map((l) => [l.irmItemId, l]));
   for (const line of po.items) {
     const ref = prfByItem.get(line.irmItemId);
+    if (!ref) return false;
+    if (line.quantity !== ref.quantity || line.unitPricePence !== ref.unitPricePence || line.vatRate !== ref.vatRate) return false;
+  }
+  // Hires are unique per (item, period, address) on both documents — the request's compound index
+  // and the shared line validation — so the same keyed comparison holds. The PERIOD is in the key
+  // deliberately: a longer hire for the same money is a different deal, not the one finance signed.
+  const poHires = po.rentalItems ?? [];
+  const prfHires = prf.rentalItems ?? [];
+  if (poHires.length !== prfHires.length) return false;
+  const prfByHire = new Map(prfHires.map((l) => [rentalLineIdentity(l), l]));
+  for (const line of poHires) {
+    const ref = prfByHire.get(rentalLineIdentity(line));
     if (!ref) return false;
     if (line.quantity !== ref.quantity || line.unitPricePence !== ref.unitPricePence || line.vatRate !== ref.vatRate) return false;
   }

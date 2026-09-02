@@ -10,8 +10,15 @@ import { withHistoricalOption } from "@/lib/historicalOption";
 import { supplierDetailNotice } from "@/lib/supplierPanel";
 import { listWarehouses, listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
+import { listRentalItems } from "@/services/rental.service";
 import { IrmItemPicker } from "@/components/dashboard/irm/IrmItemPicker";
 import { mergeIrmItems } from "@/components/dashboard/irm/irmItemPickerModel";
+import { RentalLinesEditor } from "@/components/dashboard/purchase-requests/RentalLinesEditor";
+import { toRentalPayload, validateRentalLines, type RentalLineRow } from "@/components/dashboard/purchase-requests/rentalLineRows";
+import { rentalEstimate, rentalRowsChanged, rentalRowsFromOrder, rentalRowsMissingWarehouse, savedRentalEstimate, toSplitRentalPayload } from "./poRentalLines";
+import { mergeById, missingIds } from "@/lib/cataloguePicker";
+import { useRentalItemsByIds } from "@/hooks/useRentalItemsByIds";
+import { earliestHireStart, hireDeliveryWarning, lateHireDeliveryDays } from "@/lib/hireDelivery";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
@@ -23,8 +30,10 @@ import { PaymentTermsField } from "@/components/ui/PaymentTermsField";
 import { INCOTERM_OPTIONS } from "@/lib/incoterms";
 import { resolveSupplierPaymentTerms } from "@/lib/paymentTerms";
 import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { Notice } from "@/components/ui/Notice";
 import { formatDate, formatMoney, PoStatusBadge } from "./poStatus";
 import type { PoPriority, PurchaseOrder } from "@/types/purchase-order";
+import type { RentalItem } from "@/types/rental";
 import type { Supplier } from "@/types/supplier";
 import type { Warehouse } from "@/types/warehouse";
 import type { IrmItem } from "@/types/irm";
@@ -51,6 +60,13 @@ function ContextChip({ icon: Icon, children }: { icon: React.ElementType; childr
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
+// "Today" for the RENDER path (the hire-period notice on a rental line), as opposed to `today()`
+// above which is only ever called from validate(). Read through useSyncExternalStore with a null
+// server snapshot — the treatment the request form and UserForm give their date bounds: nothing
+// impure is read during render, and SSR (UTC) and the browser (local) can disagree either side of
+// midnight, so the server emits no notice and the client fills it in. Hydration always matches.
+const subscribeNever = () => () => {};
+const serverToday = () => null;
 const dateInput = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : "");
 const blankLine = (): LineRow => ({ _key: crypto.randomUUID(), irmItemId: "", warehouseId: "", quantity: "1", unitPrice: "", vatRate: "20", notes: "" });
 
@@ -84,11 +100,24 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
   const [overrideAddress, setOverrideAddress] = React.useState(Boolean(o?.deliveryAddress));
   const [internalNotes, setInternalNotes] = React.useState(o?.internalNotes ?? "");
   const [supplierNotes, setSupplierNotes] = React.useState(o?.supplierNotes ?? "");
-  const [lineRows, setLineRows] = React.useState<LineRow[]>(() =>
-    o && o.items.length
-      ? o.items.map((i) => ({ _key: crypto.randomUUID(), irmItemId: i.irmItemId, warehouseId: o.warehouseId ?? "", quantity: String(i.quantity), unitPrice: i.unitPrice.toFixed(2), vatRate: String(i.vatRate), notes: i.notes ?? "" }))
-      : [blankLine()],
-  );
+  const [lineRows, setLineRows] = React.useState<LineRow[]>(() => {
+    if (o && o.items.length) {
+      return o.items.map((i) => ({ _key: crypto.randomUUID(), irmItemId: i.irmItemId, warehouseId: o.warehouseId ?? "", quantity: String(i.quantity), unitPrice: i.unitPrice.toFixed(2), vatRate: String(i.vatRate), notes: i.notes ?? "" }));
+    }
+    // A saved HIRE-ONLY order: its author already decided there are no IRM items, so don't hand
+    // the empty card back on every edit. A brand-new order still gets one row ready to type.
+    if (o?.rentalItems.length) return [];
+    return [blankLine()];
+  });
+
+  // Hired equipment on the order — the SAME rows the purchase request form edits, through the
+  // same editor. Shown only to a user who can READ the rental catalogue (`rentals.view`): without
+  // it the picker cannot search, and a grid that 403s on every keystroke is worse than none. The
+  // hires such an edit cannot show are left exactly as stored — see buildEditPayload.
+  const canSeeRentals = can("rentals.view");
+  const [rentalItems, setRentalItems] = React.useState<RentalItem[]>([]);
+  const [rentalRows, setRentalRows] = React.useState<RentalLineRow[]>(() => rentalRowsFromOrder(o));
+  const todayForNotice = React.useSyncExternalStore(subscribeNever, today, serverToday);
 
   // The COMPLETE active set, lean — see listSupplierOptions. The full record for the chosen
   // supplier is fetched by id, so the dropdown can never hide one behind a page boundary.
@@ -121,13 +150,29 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
         ? { label: "warehouses", load: () => listWarehouseOptions(), onData: (opts) => setWarehouseOptions(opts) }
         : { label: "warehouses", load: () => listWarehouses({ status: "active", pageSize: 100 }), onData: (r) => setWarehouses(r.warehouses) },
       { label: "the item catalogue", load: () => listIrmItems({ status: "active", pageSize: 100 }), onData: (r) => setItems(r.items) },
+      ...(canSeeRentals
+        ? [{ label: "the rental catalogue", load: () => listRentalItems({ status: "active", pageSize: 100 }), onData: (r: { items: RentalItem[] }) => setRentalItems(r.items) }]
+        : []),
     ],
-    [mode],
+    [mode, canSeeRentals],
+  );
+
+  /**
+   * A saved rental line can name an item outside the page loaded at mount, and the saved line
+   * carries no code — only `itemName` — so there is nothing to build a picker label from locally.
+   * Resolve them by id, all in ONE request; until they land the picker is told it is loading, so a
+   * line that IS set never reads as empty. Same treatment the request form gives its hires.
+   */
+  const resolvingRentalItems = useRentalItemsByIds(
+    canSeeRentals ? missingIds(rentalRows.map((row) => row.rentalItemId), rentalItems) : [],
+    (found) => setRentalItems((prev) => mergeById(prev, found)),
   );
 
   // Warehouse-scoped manager with exactly ONE warehouse → auto-select + lock every row's warehouse.
   const lockedWarehouseId = mode === "create" && warehouseOptions.length === 1 ? warehouseOptions[0].id : null;
-  const rowWarehouseId = (r: LineRow) => lockedWarehouseId ?? r.warehouseId;
+  // The destination for ANY row on the create form — an item's or a hire's. One resolver, so the
+  // single-warehouse manager's lock can never apply to one grid and not the other.
+  const rowWarehouseId = (r: { warehouseId?: string }) => lockedWarehouseId ?? r.warehouseId ?? "";
 
   useReportDirty("po-form", dirty && !saved);
 
@@ -198,6 +243,11 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
     return { map, list: items };
   }, [items]);
 
+  // A hire's destination follows the same rule as an item's: the locked depot for a single-warehouse
+  // manager, else the row's own pick. On an edit the header warehouse is the one and only.
+  const rentalWarehouseNameFor = (r: RentalLineRow) =>
+    mode === "create" ? (warehouseOptions.find((w) => w.id === rowWarehouseId(r))?.name ?? null) : (selectedWarehouse?.name ?? null);
+
   /**
    * Label fallback for a saved line whose item is not in the page loaded at mount.
    *
@@ -232,7 +282,10 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
     });
   };
   const addLine = () => { setLineRows((rows) => [...rows, blankLine()]); touch(); };
-  const removeLine = (idx: number) => { setLineRows((rows) => (rows.length === 1 ? rows : rows.filter((_, i) => i !== idx))); touch(); };
+  // Any item row can be removed — the last one included, exactly as on the request form. An order
+  // may be hire-only, so "keep at least one item row" stopped being a rule; "at least one line of
+  // EITHER kind" is checked at submit, where the rental rows are visible too.
+  const removeLine = (idx: number) => { setLineRows((rows) => rows.filter((_, i) => i !== idx)); touch(); clearError("items"); };
 
   // Live financial preview (pounds).
   const totals = React.useMemo(() => {
@@ -245,8 +298,27 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
       subtotal += lineEx;
       vat += (lineEx * (Number(r.vatRate) || 0)) / 100;
     }
+    // BOTH kinds of line, matching the server's roll-up. When the grid is hidden (no catalogue read
+    // permission) the SAVED hires still count — the server keeps and totals them regardless.
+    const hire = canSeeRentals ? rentalEstimate(rentalRows) : savedRentalEstimate(o?.rentalItems ?? []);
+    subtotal += hire.subtotal;
+    vat += hire.vat;
     return { subtotal, vat, grand: subtotal + vat };
-  }, [lineRows]);
+  }, [lineRows, rentalRows, canSeeRentals, o]);
+
+  // The kit has to be on site the day the hire starts, so the earliest hire start is the natural
+  // expected delivery date — prefilled ONCE per form while the field is still empty, exactly as the
+  // request form prefills its required-by date. After that the field is the user's.
+  const earliestHire = React.useMemo(() => earliestHireStart(rentalRows), [rentalRows]);
+  const prefilledExpected = React.useRef(false);
+  React.useEffect(() => {
+    if (prefilledExpected.current || !earliestHire || expectedDeliveryDate) return;
+    prefilledExpected.current = true;
+    setExpectedDeliveryDate(earliestHire);
+  }, [earliestHire, expectedDeliveryDate]);
+
+  // Advisory only — never blocks the save. See lib/hireDelivery.ts for why.
+  const hireDaysLate = lateHireDeliveryDays(expectedDeliveryDate, rentalRows);
 
   const validate = (): Record<string, string> => {
     const errs: Record<string, string> = {};
@@ -258,7 +330,13 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
     else if (orderDate && expectedDeliveryDate < orderDate) errs.expectedDeliveryDate = "Can't be before the order date.";
 
     const effective = lineRows.filter((r) => r.irmItemId);
-    if (effective.length === 0) errs.items = "Add at least one item.";
+    const effectiveRentals = canSeeRentals ? rentalRows.filter((r) => r.rentalItemId) : [];
+    // An edit that cannot show the hires still keeps them, so they still count as lines.
+    const keptRentals = canSeeRentals ? 0 : (o?.rentalItems.length ?? 0);
+    // A hire-only order is legitimate, so "at least one line" spans BOTH grids — the same rule the
+    // server applies to the request body.
+    if (effective.length === 0 && effectiveRentals.length === 0 && keptRentals === 0) errs.items = "Add at least one item or rental line.";
+    else if (effective.length === 0) { /* hire-only: the IRM checks below have nothing to say */ }
     else if (mode === "create" && effective.some((r) => !rowWarehouseId(r))) errs.items = "Select a warehouse for every item.";
     else if (
       // Create: the same item to the same warehouse twice clashes (one PO per warehouse can't hold a
@@ -273,6 +351,12 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
           : "Each item can only be added once.";
     else if (effective.some((r) => !(Number(r.quantity) >= 1))) errs.items = "Every line needs a quantity of at least 1.";
     else if (effective.some((r) => Number(r.unitPrice) < 0 || Number.isNaN(Number(r.unitPrice)))) errs.items = "Enter a valid unit price for every line.";
+    if (canSeeRentals) {
+      const rentalError = validateRentalLines(rentalRows);
+      if (rentalError) errs.rentalItems = rentalError;
+      // Each hire joins the order of the depot it is delivered to, so on create it has to name one.
+      else if (mode === "create" && rentalRowsMissingWarehouse(rentalRows, rowWarehouseId)) errs.rentalItems = "Select a warehouse for every rental line.";
+    }
     return errs;
   };
 
@@ -308,12 +392,20 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
     ...sharedHeader(),
     warehouseId,
     items: lineRows.filter((r) => r.irmItemId).map(lineCore),
+    // Only when the grid is on screen AND the hires actually moved. Sending them makes the server
+    // replace every hire row — a delete and a re-create with fresh ids — so a header-only save
+    // would rewrite rows nobody touched. A user who cannot read the catalogue never sends the key
+    // at all, and either way the server leaves the stored hires exactly as they are.
+    ...(canSeeRentals && rentalRowsChanged(rentalRows, o) ? { rentalItems: toRentalPayload(rentalRows) } : {}),
   });
 
   // Create sends each line WITH its warehouse; the backend groups + auto-splits into one PO each.
   const buildSplitPayload = (): poService.PurchaseOrderSplitPayload => ({
     ...sharedHeader(),
     items: lineRows.filter((r) => r.irmItemId).map((r) => ({ ...lineCore(r), warehouseId: rowWarehouseId(r) })),
+    // Each hire names its depot and joins that depot's order — a depot named only by hires yields a
+    // hire-only order.
+    ...(canSeeRentals ? { rentalItems: toSplitRentalPayload(rentalRows, rowWarehouseId) } : {}),
   });
 
   const submit = async (e: React.FormEvent) => {
@@ -370,7 +462,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
   // then shows only what differs (warehouse + value) as a clickable link to that PO.
   if (splitResult) {
     const totalValue = splitResult.reduce((sum, po) => sum + (po.grandTotal ?? 0), 0);
-    const totalItems = splitResult.reduce((sum, po) => sum + po.items.length, 0);
+    const totalItems = splitResult.reduce((sum, po) => sum + po.items.length + po.rentalItems.length, 0);
     const first = splitResult[0];
     const supplierName = first?.supplierName ?? null;
     const expected = first?.expectedDeliveryDate ?? null;
@@ -394,7 +486,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
         <div className="flex flex-wrap items-center justify-center gap-2">
           {supplierName && <ContextChip icon={Truck}>{supplierName}</ContextChip>}
           <ContextChip icon={Package}>
-            {totalItems} item{totalItems === 1 ? "" : "s"} total
+            {totalItems} line{totalItems === 1 ? "" : "s"} total
           </ContextChip>
           {expected && <ContextChip icon={CalendarDays}>Expected {formatDate(expected)}</ContextChip>}
         </div>
@@ -421,8 +513,8 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
                     <PoStatusBadge status={po.status} />
                   </div>
                   <p className="mt-0.5 truncate text-xs text-[var(--muted)]">
-                    {po.warehouse ? `${po.warehouse.name} (${po.warehouse.code})` : "—"} · {po.items.length} item
-                    {po.items.length === 1 ? "" : "s"}
+                    {po.warehouse ? `${po.warehouse.name} (${po.warehouse.code})` : "—"} · {po.items.length + po.rentalItems.length} line
+                    {po.items.length + po.rentalItems.length === 1 ? "" : "s"}
                   </p>
                 </div>
                 <div className="shrink-0 text-right">
@@ -501,6 +593,11 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
                 <input type="date" className={inputCls} value={expectedDeliveryDate} onChange={(e) => { setExpectedDeliveryDate(e.target.value); touch(); clearError("expectedDeliveryDate"); }} aria-invalid={Boolean(errors.expectedDeliveryDate)} placeholder="dd-mm-yyyy" />
                 <FieldError id="err-expectedDeliveryDate" message={errors.expectedDeliveryDate} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">When you expect the supplier to deliver the goods.</p>
+                {hireDaysLate !== null && earliestHire ? (
+                  <div className="mt-1.5">
+                    <Notice msg={{ type: "warn", text: hireDeliveryWarning(hireDaysLate, earliestHire) }} size="xs" />
+                  </div>
+                ) : null}
               </div>
               <div>
                 <label className={labelCls}>Reference number</label>
@@ -548,7 +645,14 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
             </FormSection>
           )}
 
-          <FormSection title={<>Items<RequiredMark /></>} description="Add one or more IRM items to this order. Prices and VAT pre-fill from each item's settings. Quantity must be greater than zero. Unit price can be adjusted if required. UK standard VAT is 20%.">
+          <FormSection
+            title={canSeeRentals ? "Items" : <>Items<RequiredMark /></>}
+            description={
+              canSeeRentals
+                ? "Add the IRM items on this order — or none, for a hire-only order. Prices and VAT pre-fill from each item's settings. Quantity must be greater than zero. Unit price can be adjusted if required. UK standard VAT is 20%."
+                : "Add one or more IRM items to this order. Prices and VAT pre-fill from each item's settings. Quantity must be greater than zero. Unit price can be adjusted if required. UK standard VAT is 20%."
+            }
+          >
             <div className="space-y-3">
               {lineRows.map((row, idx) => {
                 const qty = Number(row.quantity) || 0;
@@ -618,7 +722,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
                         <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">Line total </span>
                         <span className="font-semibold text-[var(--ink)]">{formatMoney(qty * price)}</span>
                       </div>
-                      <button type="button" onClick={() => removeLine(idx)} disabled={lineRows.length === 1} className="rounded-lg p-2 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--neg)] disabled:opacity-40" title="Remove line" aria-label="Remove line">
+                      <button type="button" onClick={() => removeLine(idx)} className="rounded-lg p-2 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--neg)]" title="Remove line" aria-label="Remove line">
                         <Trash2 className="h-4 w-4" />
                       </button>
                     </div>
@@ -631,6 +735,45 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
               <FieldError id="err-items" message={errors.items} />
             </div>
           </FormSection>
+
+          {/* Hired equipment — the SAME grid the purchase request form uses, so a hire is one line
+              with one set of rules whichever document it is raised on. On create every hire names
+              the depot it is delivered to and joins that depot's order, exactly as the item rows do. */}
+          {canSeeRentals && (
+            <RentalLinesEditor
+              rows={rentalRows}
+              setRows={setRentalRows}
+              catalogue={rentalItems}
+              onCatalogue={(found) => setRentalItems((prev) => mergeById(prev, found))}
+              canCreate={can("rentals.create")}
+              loading={refLoading || resolvingRentalItems}
+              today={todayForNotice}
+              warehouseNameFor={rentalWarehouseNameFor}
+              // Only a SET override changes where a blank line goes — the box may be ticked and
+              // still empty, and the server resolves on the trimmed text, not the tick.
+              orderDeliveryAddress={overrideAddress ? deliveryAddress : ""}
+              rowWarehouse={
+                mode === "create"
+                  ? {
+                      options: warehouseOptions.map((w) => ({ value: w.id, label: `${w.code} — ${w.name}` })),
+                      valueFor: rowWarehouseId,
+                      locked: Boolean(lockedWarehouseId),
+                      loading: refLoading,
+                    }
+                  : undefined
+              }
+              onTouch={() => {
+                touch();
+                clearError("rentalItems");
+              }}
+              error={errors.rentalItems}
+              description={
+                mode === "create"
+                  ? "Equipment hired for a fixed period. Each line sets its own hire dates and the warehouse it is delivered to — a hire joins that warehouse's order — plus its own delivery address when it should not go to the warehouse."
+                  : "Equipment hired for a fixed period. Each line sets its own hire dates, and its own delivery address when it should not go to the selected warehouse."
+              }
+            />
+          )}
 
           <FormSection title="Delivery" description="Where the supplier should deliver this order.">
             <div className="grid gap-4">
@@ -663,7 +806,13 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
                 />
                 <span className="text-xs text-[var(--ink)]">
                   <span className="font-bold">Deliver to a different address</span>
-                  <span className="block text-[11px] text-[var(--faint)]">Tick only when goods go somewhere other than this warehouse.</span>
+                  <span className="block text-[11px] text-[var(--faint)]">
+                    Tick only when goods go somewhere other than this warehouse.
+                    {/* The override is the DEFAULT for every line, hires included; a rental line's own
+                        address is the exception. Said here because the two fields sit in different
+                        sections and read as competing answers to one question. */}
+                    {canSeeRentals && " Applies to hired equipment too, unless a rental line sets its own address."}
+                  </span>
                 </span>
               </label>
               {overrideAddress && (

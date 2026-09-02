@@ -133,3 +133,38 @@ export function diffProcurementChanges(existing: ProcurementDocLike, incoming: P
 
   return changes;
 }
+
+/**
+ * Both kinds of line, in the shape the diff pairs them by.
+ *
+ * IRM lines are keyed by item — unique per document. A RENTAL line is not: the same item may appear
+ * again with a different period or address, so it is keyed by the same composite the request's
+ * compound unique index uses. Hires are labelled "(hire)" so an entry reads unambiguously and an IRM
+ * item sharing a name cannot be mistaken for one.
+ *
+ * Shared by the request's and the order's update paths — a hire's quantity or price changing before
+ * approval is exactly the kind of edit this trail exists to record, and either document leaving its
+ * rental lines out of the diff made every such change invisible.
+ */
+export function procurementDiffLines(
+  items: { irmItemId: string; itemName: string; quantity: number; unitPricePence: number; vatRate: number }[],
+  rentals: {
+    rentalItemId: string;
+    itemName: string;
+    hireStartDate: Date | string;
+    hireEndDate: Date | string;
+    deliveryAddress: string | null;
+    quantity: number;
+    unitPricePence: number;
+    vatRate: number;
+  }[],
+): ProcurementLineLike[] {
+  return [
+    ...items.map((i) => ({ ...i, lineKey: i.irmItemId })),
+    ...rentals.map((r) => ({
+      ...r,
+      itemName: `${r.itemName} (hire)`,
+      lineKey: [r.rentalItemId, String(r.hireStartDate), String(r.hireEndDate), r.deliveryAddress ?? ""].join("|"),
+    })),
+  ];
+}

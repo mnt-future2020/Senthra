@@ -1311,7 +1311,9 @@ describe("update — rental lines and the wipe guard", () => {
   };
 
   beforeEach(() => {
-    (rentalItemService.requireActiveRentalItems as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (rentalItemService.requireActiveRentalItems as ReturnType<typeof vi.fn>).mockImplementation((ids: string[]) =>
+      Promise.resolve(new Map(ids.map((id) => [id, { name: "Fibre Tester", baseUnit: "Each" }]))),
+    );
     (rentalItemService.getRentalItemsByIds as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Map([["e".repeat(24), { name: "Fibre Tester", baseUnit: "Each", vatRatePercent: 20 }]]),
     );
@@ -1419,7 +1421,9 @@ describe("duplicate — the revision carries the whole request", () => {
     };
     mockFindById.mockResolvedValue(prfRow({ status: "converted", items: [], rentalItems: [rentalRow] }));
     mockCreateWithCode.mockResolvedValue(prfRow({ status: "draft", items: [], rentalItems: [rentalRow] }));
-    (rentalItemService.requireActiveRentalItems as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (rentalItemService.requireActiveRentalItems as ReturnType<typeof vi.fn>).mockImplementation((ids: string[]) =>
+      Promise.resolve(new Map(ids.map((id) => [id, { name: "Fibre Tester", baseUnit: "Each" }]))),
+    );
 
     await duplicatePurchaseRequest(PRF_ID);
 
@@ -1448,7 +1452,9 @@ describe("rental lines take their commercial terms from the line, not the catalo
   const header = () => ({ supplierId: SUP_ID, warehouseId: WH_ID, requiredByDate: FUTURE_REQUIRED_BY.toISOString() });
 
   beforeEach(() => {
-    (rentalItemService.requireActiveRentalItems as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (rentalItemService.requireActiveRentalItems as ReturnType<typeof vi.fn>).mockImplementation((ids: string[]) =>
+      Promise.resolve(new Map(ids.map((id) => [id, { name: "Fibre Tester", baseUnit: "Each" }]))),
+    );
     // Name and unit only — there is no rate or VAT to hand back.
     (rentalItemService.getRentalItemsByIds as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Map([[RENTAL_ID, { name: "Fibre Tester", baseUnit: "Each" }]]),

@@ -164,8 +164,11 @@ describe("deleteRentalItem", () => {
 
 describe("requireActiveRentalItems", () => {
   it("passes when every id resolves to a live active item", async () => {
-    findActiveByIds.mockResolvedValue([{ id: "a" }, { id: "b" }] as never);
-    await expect(requireActiveRentalItems(["a", "b"])).resolves.toBeUndefined();
+    findActiveByIds.mockResolvedValue([{ id: "a", name: "Tester", baseUnit: "Each" }, { id: "b", name: "Genset", baseUnit: "Each" }] as never);
+    // It RETURNS the snapshot it read, so a line builder needs no second query — see the service.
+    const map = await requireActiveRentalItems(["a", "b"]);
+    expect(map.get("a")).toEqual({ name: "Tester", baseUnit: "Each" });
+    expect(findActiveByIds).toHaveBeenCalledTimes(1);
   });
 
   it("refuses when one was retired while the request waited", async () => {
@@ -176,13 +179,13 @@ describe("requireActiveRentalItems", () => {
   // Duplicates must not make the count disagree with itself — the same item twice on one request
   // is legitimate (different periods), and it is still ONE item to check.
   it("counts a repeated id once", async () => {
-    findActiveByIds.mockResolvedValue([{ id: "a" }] as never);
-    await expect(requireActiveRentalItems(["a", "a"])).resolves.toBeUndefined();
+    findActiveByIds.mockResolvedValue([{ id: "a", name: "Tester", baseUnit: "Each" }] as never);
+    await expect(requireActiveRentalItems(["a", "a"])).resolves.toBeInstanceOf(Map);
     expect(findActiveByIds).toHaveBeenCalledWith(["a"]);
   });
 
   it("does nothing at all for an empty list", async () => {
-    await expect(requireActiveRentalItems([])).resolves.toBeUndefined();
+    expect((await requireActiveRentalItems([])).size).toBe(0);
     expect(findActiveByIds).not.toHaveBeenCalled();
   });
 });

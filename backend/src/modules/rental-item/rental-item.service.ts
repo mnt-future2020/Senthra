@@ -262,18 +262,22 @@ export async function getRentalItemsByIds(ids: string[]): Promise<Map<string, { 
 }
 
 /**
- * Every id must still be a live, ACTIVE rental item.
+ * Every id must still be a live, ACTIVE rental item — and the rows behind them.
  *
  * Called at conversion so a purchase order is never issued for an item that was retired while the
- * request sat waiting for approval — the same guard `requireActiveIrmItems` gives the IRM lines.
+ * request sat waiting for approval — the same guard `requireActiveIrmItems` gives the IRM lines,
+ * and like that one it RETURNS what it read. A line builder needs both the check and the snapshot,
+ * and fetching them separately was the same query run twice on every write that carries a hire.
+ * Callers that only want the guard ignore the result.
  */
-export async function requireActiveRentalItems(ids: string[]): Promise<void> {
+export async function requireActiveRentalItems(ids: string[]): Promise<Map<string, { name: string; baseUnit: string }>> {
   const unique = [...new Set(ids)];
-  if (unique.length === 0) return;
-  const found = await rentalRepo.findActiveByIds(unique);
-  if (found.length !== unique.length) {
+  if (unique.length === 0) return new Map();
+  const found = await getRentalItemsByIds(unique);
+  if (found.size !== unique.length) {
     throw badRequest("One or more rental items are no longer active. Remove them from the request.");
   }
+  return found;
 }
 
 // ── CSV export ────────────────────────────────────────────────────────────────────────────────

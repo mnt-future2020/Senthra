@@ -7,10 +7,12 @@ import {
   type RatePeriod,
 } from "@/lib/rentalPricing";
 
-// The PRF form's rental-line row model.
+// The rental-line row model — the PRF form's, and the purchase order form's.
 //
-// Every rule here is UX ONLY — the server's rentalLineSchema is authoritative. The messages are kept
-// WORD-FOR-WORD identical to it, so a user never sees two different wordings for one rule.
+// A hire is the same line on both documents (the server validates both through ONE schema,
+// rentalLine.validation.ts), so the row that edits it is shared too. Every rule here is UX ONLY —
+// the server's rentalLineSchema is authoritative. The messages are kept WORD-FOR-WORD identical to
+// it, so a user never sees two different wordings for one rule.
 
 /**
  * Where the hire goes back. A MODE, not a bare address: an optional address field is blank on almost
@@ -54,6 +56,20 @@ export function returnModeOptions(warehouseName: string | null): { value: Return
 }
 
 /**
+ * Where a rental line with NO address of its own is delivered — the noun the row's placeholder and
+ * its return-mode hint name.
+ *
+ * Mirrors the server's resolution chain (rentalReturn.ts `resolveDeliveryLocation`): the line's own
+ * address, else the ORDER's "deliver to a different address" override, else the warehouse. A request
+ * has no order-level override, so it always names the warehouse; an order names the override while
+ * one is set. Whitespace is not an override — the server trims before it looks, so the form must too,
+ * or the placeholder would promise a delivery address the document will not print.
+ */
+export function rentalDeliveryFallback(orderDeliveryAddress?: string | null): string {
+  return orderDeliveryAddress?.trim() ? "the order's delivery address" : "the selected warehouse";
+}
+
+/**
  * How the hire price was arrived at.
  *
  * Suppliers quote either a figure for the whole hire or a RATE. Both are kept: the rate is the input
@@ -68,6 +84,13 @@ export type { RatePeriod };
 export interface RentalLineRow {
   _key: string;
   rentalItemId: string;
+  /**
+   * The depot this hire is delivered to — the multi-warehouse ORDER create only, where every line
+   * names its own destination and the order auto-splits by it. A request has one warehouse on its
+   * header and never sets this; it stays undefined there and is ignored by every rule below except
+   * the identity, where an absent value reads as "".
+   */
+  warehouseId?: string;
   quantity: string;
   hireStartDate: string;
   hireEndDate: string;
@@ -109,8 +132,15 @@ export const blankRentalLine = (): RentalLineRow => ({
   notes: "",
 });
 
-/** A row the user has actually started filling in. Blank spare rows are dropped, never validated. */
-const isFilled = (r: RentalLineRow) => Boolean(r.rentalItemId);
+/**
+ * A row the user has actually started filling in. Blank spare rows are dropped, never validated.
+ *
+ * Exported because every reader of a hire grid asks it — validation, the payload builders, the
+ * estimate, the duplicate scan — and a second copy is how one of them starts sending or pricing a
+ * row another one drops.
+ */
+export const isFilledRentalRow = (r: RentalLineRow) => Boolean(r.rentalItemId);
+const isFilled = isFilledRentalRow;
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -296,7 +326,9 @@ export function hireDateNotice(r: RentalLineRow, today: string): string | undefi
  * only in spaces is the same address on both sides of the wire.
  */
 function rentalLineKey(r: RentalLineRow): string {
-  return [r.rentalItemId, r.hireStartDate, r.hireEndDate, r.deliveryAddress.trim()].join("|");
+  // The destination is part of the identity on the order create only (see `warehouseId`): the same
+  // hire to two depots is two orders, which the server's per-warehouse duplicate rule also allows.
+  return [r.rentalItemId, r.hireStartDate, r.hireEndDate, r.deliveryAddress.trim(), r.warehouseId ?? ""].join("|");
 }
 
 /**
@@ -329,6 +361,54 @@ export function duplicateRentalRowKeys(rows: RentalLineRow[]): Set<string> {
  */
 export const DUPLICATE_ROW_MESSAGE =
   "Same item, period and delivery address as a line above — raise that line's quantity instead.";
+
+/** The saved line shape a row is rebuilt from — a request's or an order's hire, as the API returns it. */
+export interface SavedRentalLine {
+  rentalItemId: string;
+  quantity: number;
+  hireStartDate: string;
+  hireEndDate: string;
+  notifyDaysBefore: number;
+  deliveryAddress: string | null;
+  returnMode: string;
+  returnAddress: string | null;
+  ratePeriod: string;
+  ratePence: number | null;
+  priceOverridden: boolean;
+  unitPrice: number;
+  vatRate: number;
+  notes: string | null;
+}
+
+/**
+ * A SAVED hire, back into an editable row — the one mapping both the request and the order form
+ * reopen a document through.
+ *
+ * Identity is the `rentalItemId`, never the item's name: the picker resolves the id against the
+ * catalogue (useRentalItemsByIds), so a renamed or since-retired item still lands on the same
+ * line. Pence come back as pounds because that is what the boxes hold, and a stored mode or basis
+ * the row does not know falls back to the default every line meant before the field existed —
+ * exactly as the server reads such a row.
+ */
+export function savedRentalLineRow(r: SavedRentalLine): RentalLineRow {
+  return {
+    _key: crypto.randomUUID(),
+    rentalItemId: r.rentalItemId,
+    quantity: String(r.quantity),
+    hireStartDate: r.hireStartDate.slice(0, 10),
+    hireEndDate: r.hireEndDate.slice(0, 10),
+    notifyDaysBefore: String(r.notifyDaysBefore),
+    deliveryAddress: r.deliveryAddress ?? "",
+    returnMode: (RETURN_MODES as readonly string[]).includes(r.returnMode) ? (r.returnMode as ReturnMode) : "delivery",
+    returnAddress: r.returnAddress ?? "",
+    ratePeriod: (RATE_PERIODS as readonly string[]).includes(r.ratePeriod) ? (r.ratePeriod as RatePeriod) : "total",
+    rate: r.ratePence == null ? "" : (r.ratePence / 100).toFixed(2),
+    priceOverridden: Boolean(r.priceOverridden),
+    unitPrice: r.unitPrice.toFixed(2),
+    vatRate: String(r.vatRate),
+    notes: r.notes ?? "",
+  };
+}
 
 /** Whole days in a hire, for the form's live "30 days" readout. */
 export function rowHireDays(r: RentalLineRow): number | null {
@@ -434,6 +514,25 @@ export function toRentalPayload(rows: RentalLineRow[]): RentalLinePayload[] {
       ...(notes ? { notes } : {}),
     };
   });
+}
+
+/**
+ * The rental half of a form's live estimate, in POUNDS — subtotal and VAT.
+ *
+ * A row's price is `agreedUnitPrice`, NOT its price box: on a rate basis the box holds the
+ * calculated figure for display while the row's own `unitPrice` is still empty, so reading the box
+ * showed £0.00 beside a line about to save at £600. Shared by the request and the order forms, so
+ * the two estimates cannot disagree with each other or with the server's roll-up.
+ */
+export function rentalEstimate(rows: RentalLineRow[]): { subtotal: number; vat: number } {
+  let subtotal = 0;
+  let vat = 0;
+  for (const row of rows.filter(isFilled)) {
+    const lineEx = (Number(row.quantity) || 0) * agreedUnitPrice(row);
+    subtotal += lineEx;
+    vat += (lineEx * (Number(row.vatRate) || 0)) / 100;
+  }
+  return { subtotal, vat };
 }
 
 /** The rental half of the form's estimated total, in pence. */

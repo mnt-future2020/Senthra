@@ -93,3 +93,19 @@ describe("rental stays outside stock", () => {
     }
   });
 });
+
+// A hire raised DIRECTLY on a purchase order (no request behind it) is still procurement plus a
+// deadline. The writers that path runs through — the order service, its repository and the shared
+// rental-line builder — must never reach an owned-stock primitive: a rental line becomes a
+// PurchaseOrderRentalLine and nothing else.
+describe("a directly-raised hire is procurement, not stock", () => {
+  const OWNED_STOCK = /inventoryBalance|InventoryBalance|inventoryTransaction|InventoryTransaction|engineerStockBalance|EngineerStockBalance/;
+
+  it.each(["purchase-order.service.ts", "purchase-order.repository.ts", "rentalLine.rows.ts", "rentalLine.validation.ts"])(
+    "purchase-order/%s never references an owned-stock primitive",
+    (file) => {
+      const code = codeLinesOf(readFileSync(join(process.cwd(), "src", "modules", "purchase-order", file), "utf8"));
+      expect(OWNED_STOCK.test(code)).toBe(false);
+    },
+  );
+});

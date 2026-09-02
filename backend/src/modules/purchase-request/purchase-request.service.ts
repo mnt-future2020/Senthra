@@ -8,9 +8,8 @@ import * as jobRepo from "#modules/job/job.repository.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
 import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import { daysBetween } from "../../utils/calendar-day.js";
-import { computeNotifyOnDate } from "#modules/purchase-order/rentalHire.predicate.js";
 import { resolveDeliveryLocation, resolveReturnLocation, type ReturnContext } from "#modules/purchase-order/rentalReturn.js";
-import { calculateUnitPricePence, type RatePeriod } from "../../utils/rental-pricing.js";
+import { buildRentalLineRows, committedHireRow } from "#modules/purchase-order/rentalLine.rows.js";
 import * as irmService from "#modules/irm/irm.service.js";
 import * as rentalItemService from "#modules/rental-item/rental-item.service.js";
 // Safe one-way edge: inventory.service reaches back only to purchase-request.REPOSITORY (never this
@@ -34,12 +33,11 @@ import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
 import { calendarDayWindow } from "../../utils/filter-date.js";
-import { diffProcurementChanges } from "../../utils/procurement-diff.js";
+import { diffProcurementChanges, procurementDiffLines } from "../../utils/procurement-diff.js";
 import type {
   CreatePurchaseRequestInput,
   GenerateReorderInput,
   PrfLineInput,
-  PrfRentalLineInput,
   UpdatePurchaseRequestInput,
 } from "./purchase-request.validation.js";
 import { incotermLabel } from "#modules/purchase-order/purchase-order.validation.js";
@@ -388,54 +386,6 @@ export function computeTotals(lines: { quantity: number; unitPricePence: number;
     vat += Math.round((lineTotal * l.vatRate) / 100);
   }
   return { subtotalPence: subtotal, vatPence: vat, grandTotalPence: subtotal + vat };
-}
-
-/**
- * Validate each rental line's item is ACTIVE, snapshot its name/unit, and compute the line total.
- *
- * The dates arrive already normalised to UTC midnight by the validation layer, so nothing here has
- * to think about time-of-day — see utils/calendar-day.ts.
- */
-async function buildRentalLineRows(lines: PrfRentalLineInput[]): Promise<prfRepo.PrfRentalLineRow[]> {
-  if (lines.length === 0) return [];
-  await rentalItemService.requireActiveRentalItems(lines.map((l) => l.rentalItemId));
-  // One lookup for the whole set, so the snapshots come from the same read the guard validated.
-  const items = await rentalItemService.getRentalItemsByIds(lines.map((l) => l.rentalItemId));
-  return lines.map((line, i) => {
-    const item = items.get(line.rentalItemId)!; // guaranteed by requireActiveRentalItems
-    // Resolved ONCE and used for both the unit price and the line total. Computing it twice is how
-    // a line ends up filed with a £2,475 unit price and a £0.03 total: the second reader used the
-    // figure the client sent instead of the one the server decided.
-    const unitPricePence = agreedUnitPricePence(line);
-    return {
-      rentalItemId: line.rentalItemId,
-      itemName: item.name,
-      baseUnit: item.baseUnit ?? null,
-      quantity: line.quantity,
-      hireStartDate: line.hireStartDate,
-      hireEndDate: line.hireEndDate,
-      notifyDaysBefore: line.notifyDaysBefore ?? 3,
-      deliveryAddress: line.deliveryAddress ?? null,
-      // The MONEY is decided here, not by the client. On a rate basis the price is arithmetic, so a
-      // sent figure is at best redundant and at worst a way to file a number that does not match the
-      // rate printed beside it. The one exception is a line someone deliberately overrode — a
-      // negotiated price is not the arithmetic, and the rate stays on the line to show the gap.
-      ratePeriod: line.ratePeriod ?? "total",
-      ratePence: (line.ratePeriod ?? "total") === "total" ? null : (line.ratePence ?? null),
-      priceOverridden: Boolean(line.priceOverridden) && (line.ratePeriod ?? "total") !== "total",
-      // Absent means `delivery` — what every line meant before the field existed.
-      returnMode: line.returnMode ?? "delivery",
-      returnAddress: line.returnMode === "other" ? (line.returnAddress ?? null) : null,
-      unitPricePence,
-      // The LINE's own VAT, with no catalogue fallback: the rental master carries no pricing at
-      // all, because what a hire costs is negotiated per period and per supplier. An IRM line still
-      // falls back to its item's rate — that master legitimately holds one.
-      vatRate: line.vatRate ?? 0,
-      lineTotalPence: line.quantity * unitPricePence,
-      sortOrder: i,
-      notes: trimToNull(line.notes),
-    };
-  });
 }
 
 // Validate each line's IRM item is ACTIVE, snapshot its name/sku/unit, and compute the line total.
@@ -790,37 +740,14 @@ export async function updatePurchaseRequest(id: string, input: UpdatePurchaseReq
   // approval is exactly the kind of edit this trail exists to record, and leaving them out made
   // every rental change invisible. They are labelled "(hire)" so the entry reads unambiguously and
   // an IRM item sharing a name cannot be mistaken for one.
-  const asDiffLines = (
-    items: { irmItemId: string; itemName: string; quantity: number; unitPricePence: number; vatRate: number }[],
-    rentals: {
-      rentalItemId: string;
-      itemName: string;
-      hireStartDate: Date | string;
-      hireEndDate: Date | string;
-      deliveryAddress: string | null;
-      quantity: number;
-      unitPricePence: number;
-      vatRate: number;
-    }[],
-  ) => [
-    ...items.map((i) => ({ ...i, lineKey: i.irmItemId })),
-    ...rentals.map((r) => ({
-      ...r,
-      itemName: `${r.itemName} (hire)`,
-      // The same composite the compound unique index uses — a rental item may legitimately appear
-      // twice with different periods, so its id alone would pair the wrong before with the wrong after.
-      lineKey: [r.rentalItemId, String(r.hireStartDate), String(r.hireEndDate), r.deliveryAddress ?? ""].join("|"),
-    })),
-  ];
-
   const linesTouched = input.items !== undefined || input.rentalItems !== undefined;
   const changes = diffProcurementChanges(
-    { ...existing, items: asDiffLines(existing.items, existing.rentalItems) },
+    { ...existing, items: procurementDiffLines(existing.items, existing.rentalItems) },
     {
       supplierId: result.supplierId,
       supplierName: result.supplierName,
       warehouseId: result.warehouseId,
-      items: linesTouched ? asDiffLines(result.items, result.rentalItems) : undefined,
+      items: linesTouched ? procurementDiffLines(result.items, result.rentalItems) : undefined,
     },
   );
   audit.record({
@@ -975,29 +902,6 @@ export interface ConvertResult {
   purchaseOrderCode: string;
 }
 
-/**
- * The money a rental line is stored with.
- *
- * On a rate basis it is the arithmetic — computed here so the figure filed can never disagree with
- * the rate filed beside it. An OVERRIDDEN line keeps what was sent: a supplier-negotiated price is
- * a commercial fact, not a calculation, and the rate is still recorded so the difference is visible.
- */
-function agreedUnitPricePence(line: {
-  ratePeriod?: string;
-  ratePence?: number | null;
-  priceOverridden?: boolean;
-  unitPricePence: number;
-  hireStartDate: Date;
-  hireEndDate: Date;
-}): number {
-  const period = (line.ratePeriod ?? "total") as RatePeriod;
-  if (period === "total" || line.priceOverridden) return line.unitPricePence;
-  return (
-    calculateUnitPricePence(period, line.ratePence, line.hireStartDate, line.hireEndDate) ??
-    line.unitPricePence
-  );
-}
-
 export async function convertPurchaseRequest(id: string, actor?: AuditActor): Promise<ConvertResult> {
   const prf = await loadOrThrow(id, actor);
   assertTransition(prf.status, "converted"); // clear pre-check (the tx re-checks authoritatively)
@@ -1072,32 +976,11 @@ export async function convertPurchaseRequest(id: string, actor?: AuditActor): Pr
         }));
         // The COMPLETE rental line, not just the id — the PO is the record the supplier reads and
         // the deadline alert counts, so a partial copy would leave the hire without its period or
-        // its price. notifyOnDate is recomputed rather than copied because the PRF has no such
-        // column: the alert is a PO-side concept (a PRF that never converted hired nothing).
-        const rentalLines = live.rentalItems.map((l, i) => ({
-          rentalItemId: l.rentalItemId,
-          itemName: l.itemName,
-          baseUnit: l.baseUnit,
-          quantity: l.quantity,
-          hireStartDate: l.hireStartDate,
-          hireEndDate: l.hireEndDate,
-          notifyDaysBefore: l.notifyDaysBefore,
-          deliveryAddress: l.deliveryAddress,
-          ratePeriod: l.ratePeriod,
-          ratePence: l.ratePence,
-          priceOverridden: l.priceOverridden,
-          returnMode: l.returnMode,
-          returnAddress: l.returnAddress,
-          unitPricePence: l.unitPricePence,
-          vatRate: l.vatRate,
-          lineTotalPence: l.lineTotalPence,
-          sortOrder: i,
-          notes: l.notes,
-          // Committed, NOT delivered. The warehouse confirms arrival (POST .../receive), and only
-          // then does the hire start counting towards any return deadline.
-          hireStatus: "awaiting_delivery",
-          notifyOnDate: computeNotifyOnDate(l.hireStartDate, l.hireEndDate, l.notifyDaysBefore),
-        }));
+        // its price. Through committedHireRow, the SAME mapping an order raised directly uses, so a
+        // hire reaches the order in one shape whichever door it came through: awaiting delivery,
+        // with notifyOnDate recomputed rather than copied because the PRF has no such column (the
+        // alert is a PO-side concept — a PRF that never converted hired nothing).
+        const rentalLines = live.rentalItems.map((l, i) => committedHireRow(l, i));
         poId = await poRepo.createPoTx(
           tx,
           {
