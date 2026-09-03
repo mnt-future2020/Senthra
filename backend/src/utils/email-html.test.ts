@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { renderBodyToHtml } from "./email-html.js";
+import { buildEmailHeaderRow, DEFAULT_BRAND_COLOR, renderBodyToHtml } from "./email-html.js";
 import { renderEmail } from "./template-render.js";
 
 // The generated email HTML is what recipients actually see, and the account-creation
@@ -150,5 +150,81 @@ describe("renderBodyToHtml + renderEmail — end to end", () => {
       { temporaryPassword: `a<b>&"'` },
     );
     expect(text).toBe(`Temporary password: a<b>&"'`);
+  });
+});
+
+// The header bar is the one part of every email that is assembled from admin-controlled
+// settings rather than from a template, and `emailLogoSrc` is the only thing standing between
+// an uploaded SVG and a logo-less inbox. Nothing here was covered before, so these pin the
+// three ways it can silently break: the format transform going missing, the idempotency guard
+// drifting out of sync with the prefix it guards, and a brand name escaping into markup.
+
+const CLOUDINARY_PNG =
+  "https://res.cloudinary.com/demo/image/upload/v1782297715/senthra/branding/logo.png";
+const CLOUDINARY_SVG =
+  "https://res.cloudinary.com/demo/image/upload/v1782297715/senthra/branding/logo.svg";
+
+function imgSrc(html: string): string | null {
+  return html.match(/<img [^>]*src="([^"]*)"/)?.[1] ?? null;
+}
+
+describe("buildEmailHeaderRow — logo delivery", () => {
+  it("forces a raster PNG and caps the height for a Cloudinary logo", () => {
+    const src = imgSrc(buildEmailHeaderRow("Senthra", CLOUDINARY_PNG));
+    expect(src).toBe(
+      "https://res.cloudinary.com/demo/image/upload/f_png,h_80,c_limit/v1782297715/senthra/branding/logo.png",
+    );
+  });
+
+  it("rasterises an SVG logo, which Gmail and Outlook would otherwise not render", () => {
+    const src = imgSrc(buildEmailHeaderRow("Senthra", CLOUDINARY_SVG));
+    // The transform, not the stored extension, is what decides the delivered bytes — Cloudinary
+    // rasterises on `f_png`. The `.svg` suffix staying in the path is expected.
+    expect(src).toContain("/upload/f_png,h_80,c_limit/");
+  });
+
+  it("is idempotent — an already-transformed URL is not transformed twice", () => {
+    const once = imgSrc(buildEmailHeaderRow("Senthra", CLOUDINARY_PNG))!;
+    // Feeding the output back in is what a guard checking the wrong prefix would fail. Stored
+    // URLs are untransformed today, so only this test would catch that drift.
+    expect(imgSrc(buildEmailHeaderRow("Senthra", once))).toBe(once);
+    expect(once.match(/f_png/g)).toHaveLength(1);
+  });
+
+  it("leaves a non-Cloudinary logo URL untouched", () => {
+    const url = "https://cdn.example.com/logo.png";
+    expect(imgSrc(buildEmailHeaderRow("Senthra", url))).toBe(url);
+  });
+
+  it("carries the brand name as alt text so a blocked image still reads as the brand", () => {
+    const html = buildEmailHeaderRow("Senthra", CLOUDINARY_PNG);
+    expect(html).toContain('alt="Senthra"');
+    // Logo OR name, never both — most logos are wordmarks that already contain the name.
+    expect(html).not.toContain("<span");
+  });
+
+  it("escapes a brand name containing HTML-significant characters", () => {
+    const html = buildEmailHeaderRow(`A<b>&"c`, CLOUDINARY_PNG);
+    expect(html).toContain("A&lt;b&gt;&amp;&quot;c");
+    expect(html).not.toContain("<b>");
+  });
+});
+
+describe("buildEmailHeaderRow — text fallback", () => {
+  it("renders the brand name as text when no logo is set", () => {
+    const html = buildEmailHeaderRow("Senthra", "");
+    expect(html).not.toContain("<img");
+    expect(html).toContain("Senthra");
+  });
+
+  it("falls back to the default accent for a malformed brand colour", () => {
+    expect(buildEmailHeaderRow("Senthra", "", "javascript:alert(1)")).toContain(
+      `background:${DEFAULT_BRAND_COLOR}`,
+    );
+  });
+
+  it("picks a dark wordmark on a light bar and a light one on a dark bar", () => {
+    expect(buildEmailHeaderRow("Senthra", "", "#ffffff")).toContain("color:#1a1a2e");
+    expect(buildEmailHeaderRow("Senthra", "", "#101020")).toContain("color:#ffffff");
   });
 });

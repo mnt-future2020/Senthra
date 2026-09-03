@@ -133,7 +133,15 @@ export async function endSession(sid: string): Promise<void> {
   //
   // "signed_out_remotely" rather than a reason of its own: this fires for every tab on the device,
   // and a sibling tab that did not press Logout is being told exactly what the copy says — this
-  // device's session was ended. The tab that DID press it has already navigated itself.
+  // device's session was ended.
+  //
+  // It reaches the tab that DID press Logout too, and there is no way to spare it from here: the
+  // room is the SESSION, one session covers every tab on the device, and the logout request carries
+  // a session cookie with no socket identity to exclude by. That tab is still awaiting this very
+  // response, so its revoke subscription is live and it would announce a remote sign-out to someone
+  // who just signed themselves out. AuthProvider therefore ignores a revocation it caused itself
+  // (`selfSignOut`) — the suppression has to live on the client, and this comment is the other half
+  // of it.
   revokeSessionSockets([sid], "signed_out_remotely");
 }
 

@@ -4,7 +4,13 @@ import * as React from "react";
 import { createPortal } from "react-dom";
 import { SlidersHorizontal, X } from "lucide-react";
 
-import { anchorMoved, anchorVisible, popoverPlacement, type Placement } from "./popoverPlacement";
+import {
+  anchorVisible,
+  popoverPlacement,
+  shouldReposition,
+  type Placement,
+  type PlacementCause,
+} from "./popoverPlacement";
 
 /** Panel size, in px. Kept here (not measured) so placement is decided BEFORE the first paint — a
  *  measure-then-reposition would show the panel in the wrong place for a frame. `w-72` = 288px.
@@ -83,14 +89,14 @@ export function FilterPopover({
     // and we reposition; scrolling inside a popup doesn't and we do nothing. Dismissal is reserved
     // for the case the original rule was really aiming at — the trigger leaving the viewport, where
     // the panel would be floating beside nothing.
-    const onMove = () => {
+    const reposition = (cause: PlacementCause) => {
       const rect = btnRef.current?.getBoundingClientRect();
       if (!rect) return;
       if (!anchorVisible(rect, { height: window.innerHeight })) {
         setOpen(false);
         return;
       }
-      if (!anchorMoved(anchorRef.current ?? rect, rect)) return;
+      if (!shouldReposition(cause, anchorRef.current, rect)) return;
       anchorRef.current = rect;
       setPos(
         popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, { width: window.innerWidth, height: window.innerHeight }),
@@ -99,16 +105,20 @@ export function FilterPopover({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") close();
     };
-    window.addEventListener("scroll", onMove, true);
-    window.addEventListener("resize", onMove);
+    // Two events, two questions — see shouldReposition. A resize always re-places; a scroll only
+    // when the trigger itself moved.
+    const onScroll = () => reposition("scroll");
+    const onResize = () => reposition("resize");
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
     window.addEventListener("keydown", onKey);
     // preventScroll: the panel is capped to the room its side had, so on a short window it scrolls —
     // and the browser bringing the freshly focused control "into view" scrolls the panel's own header
     // off the top of it. The control is the first thing inside; no scrolling is the right amount.
     panelRef.current?.querySelector<HTMLElement>("button, select, input")?.focus({ preventScroll: true });
     return () => {
-      window.removeEventListener("scroll", onMove, true);
-      window.removeEventListener("resize", onMove);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKey);
     };
   }, [open, close]);

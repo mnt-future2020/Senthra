@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { anchorMoved, anchorVisible, popoverPlacement, type Rect } from "./popoverPlacement";
+import {
+  anchorMoved,
+  anchorVisible,
+  popoverPlacement,
+  shouldReposition,
+  type Rect,
+} from "./popoverPlacement";
 
 // The bug this exists to prevent, as it happened: the Inventory filter panel right-aligned under a
 // trigger in the middle of the toolbar, so it opened LEFTWARD and covered the Item column — hiding
@@ -177,5 +183,48 @@ describe("anchorVisible — is the trigger still on screen?", () => {
   it("counts a trigger straddling an edge as still visible", () => {
     expect(anchorVisible({ left: 0, right: 90, top: -10, bottom: 28 }, view)).toBe(true);
     expect(anchorVisible({ left: 0, right: 90, top: 850, bottom: 888 }, view)).toBe(true);
+  });
+});
+
+describe("shouldReposition — a resize is not a scroll", () => {
+  // The bug, as it happens: dock DevTools to the bottom, or let a mobile URL bar collapse, and the
+  // viewport loses height while a toolbar trigger near the top does not move by a single pixel. The
+  // anchor-moved guard is written for scroll — it asks whether the thing we are pinned to shifted —
+  // and on resize it answers "no" and skips the recompute. The cap the panel is wearing was measured
+  // against the OLD, taller window, so the panel keeps that height and hangs past the bottom of the
+  // new one: precisely the overflow maxHeight was introduced to end.
+  const anchor = at(300, 120);
+
+  it("repositions on resize even when the trigger has not moved", () => {
+    expect(anchorMoved(anchor, anchor)).toBe(false); // the guard that used to short-circuit this
+    expect(shouldReposition("resize", anchor, anchor)).toBe(true);
+  });
+
+  it("repositions on resize when there is no previous rect to compare", () => {
+    expect(shouldReposition("resize", null, anchor)).toBe(true);
+  });
+
+  // Why the guard exists at all, and must survive: a capture-phase scroll listener fires for
+  // scrolling ANYWHERE, including inside a <Select> that Base UI portals out of the panel. That
+  // scroll does not move the trigger, and reacting to it tore the panel down mid-interaction.
+  it("ignores a scroll that did not move the trigger", () => {
+    expect(shouldReposition("scroll", anchor, anchor)).toBe(false);
+  });
+
+  it("follows the trigger on a scroll that did move it", () => {
+    expect(shouldReposition("scroll", anchor, at(300, 60))).toBe(true);
+  });
+
+  it("treats a scroll with no previous rect as no movement", () => {
+    expect(shouldReposition("scroll", null, anchor)).toBe(false);
+  });
+
+  // The consequence the resize branch is protecting against, stated as a measurement rather than an
+  // assertion about handlers: the same trigger in a shorter window is owed a smaller cap.
+  it("a shorter viewport owes the same trigger a smaller cap", () => {
+    const tall = popoverPlacement(anchor, PANEL, VIEW);
+    const short = popoverPlacement(anchor, PANEL, { width: VIEW.width, height: 420 });
+    expect(short.maxHeight!).toBeLessThan(tall.maxHeight!);
+    expect(short.maxHeight!).toBeLessThanOrEqual(420);
   });
 });
