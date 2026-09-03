@@ -38,6 +38,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = React.useState(true);
   const router = useRouter();
 
+  /**
+   * Is the sign-out happening on this tab, at this user's request?
+   *
+   * `endSession` revokes the socket for the whole DEVICE, and a device is one session shared by every
+   * tab on it — the server cannot address a single tab, because the request that logs out carries a
+   * session cookie and no socket identity. So the revocation lands on the tab that pressed Log out as
+   * well, while its `logout()` is still awaiting the response and this subscription is therefore
+   * still live. Without this flag that tab greets the person who just signed themselves out with
+   * "This device's session was ended" — copy written for a sibling tab, and alarming as an answer to
+   * a button you pressed on purpose.
+   *
+   * A ref rather than state: it must be readable by the socket handler in the same tick it is set,
+   * and it must not re-render anything. Ordering is not a race — the server cannot emit before it has
+   * the request, and the flag is set before the request is sent.
+   */
+  const selfSignOut = React.useRef(false);
+
   // Re-read the current session (cookies are sent automatically).
   const refresh = React.useCallback(async () => {
     try {
@@ -70,6 +87,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const login = React.useCallback(
     async (email: string, password: string, remember = true) => {
       const next = await authService.login(email, password, remember);
+      // A new session on this tab: whatever the last sign-out was, it is over.
+      selfSignOut.current = false;
       setPrincipal(next);
       return next;
     },
@@ -78,11 +97,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const loginWithGoogle = React.useCallback(async (credential: string) => {
     const next = await authService.loginWithGoogle(credential);
+    selfSignOut.current = false;
     setPrincipal(next);
     return next;
   }, []);
 
   const logout = React.useCallback(async () => {
+    // Before the request, not after: this is what the revoke handler reads when the server's push
+    // comes back, and the push cannot arrive before the request that causes it.
+    selfSignOut.current = true;
     try {
       await authService.logout();
     } catch {
@@ -114,6 +137,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     if (!principalId) return; // signed out here — nothing to revoke, and no socket worth holding
     return onSessionRevoked((reason) => {
+      // Our own Log out, echoed back at us — `logout()` is already clearing the caches and dropping
+      // the principal, and AuthGuard takes it to /login. Announcing it would be untrue.
+      if (selfSignOut.current) return;
       clearAllClientCaches();
       setSignedOutNotice(reason ?? "signed_out_remotely");
       setPrincipal(null);

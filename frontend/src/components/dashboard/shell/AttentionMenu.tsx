@@ -7,7 +7,13 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { useAttention } from "@/hooks/useAttention";
 import { countPillCls } from "@/components/ui/styles";
-import { anchorMoved, anchorVisible, popoverPlacement, type Placement } from "@/components/ui/popoverPlacement";
+import {
+  anchorVisible,
+  popoverPlacement,
+  shouldReposition,
+  type Placement,
+  type PlacementCause,
+} from "@/components/ui/popoverPlacement";
 import { clearedQuery, clearedQueryAll } from "./attentionChip";
 import { activeItems, attentionRollup, triggerState } from "./attentionRollup";
 import type { AttentionItem, AttentionTone } from "@/services/attention.service";
@@ -171,22 +177,26 @@ export function AttentionMenu({
   // portalled popup that is not a descendant of this panel.
   React.useEffect(() => {
     if (!panelOpen) return;
-    const onMove = () => {
+    const reposition = (cause: PlacementCause) => {
       const rect = btnRef.current?.getBoundingClientRect();
       if (!rect) return;
       if (!anchorVisible(rect, { height: window.innerHeight })) {
         setOpen(false);
         return;
       }
-      if (!anchorMoved(anchorRef.current ?? rect, rect)) return;
+      if (!shouldReposition(cause, anchorRef.current, rect)) return;
       anchorRef.current = rect;
       setPos(popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, { width: window.innerWidth, height: window.innerHeight }));
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") close();
     };
-    window.addEventListener("scroll", onMove, true);
-    window.addEventListener("resize", onMove);
+    // Two events, two questions — see shouldReposition. A resize always re-places; a scroll only
+    // when the trigger itself moved.
+    const onScroll = () => reposition("scroll");
+    const onResize = () => reposition("resize");
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
     window.addEventListener("keydown", onKey);
     // The first QUEUE, not the Close button that precedes it in the DOM — opening this panel is how
     // you pick something to work on, so that is where the keyboard should land.
@@ -199,8 +209,8 @@ export function AttentionMenu({
     (panelRef.current?.querySelector<HTMLElement>("ul a, ul button") ??
       panelRef.current?.querySelector<HTMLElement>("button"))?.focus({ preventScroll: true });
     return () => {
-      window.removeEventListener("scroll", onMove, true);
-      window.removeEventListener("resize", onMove);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKey);
     };
   }, [panelOpen, close]);

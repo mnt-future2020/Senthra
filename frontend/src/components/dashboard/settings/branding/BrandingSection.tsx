@@ -355,7 +355,7 @@ export function BrandingSection() {
 
         <Field
           label="Brand color"
-          hint="Accent colour for your emails."
+          hint="Accent colour across the app and your sent emails."
         >
           <div className="flex items-center gap-3">
             <input
@@ -497,10 +497,19 @@ export function BrandingSection() {
           </div>
         </Field>
 
-        <div className="grid gap-5 sm:grid-cols-2">
+        {/* Two across only when each one actually FITS, rather than at a viewport breakpoint.
+            An uploader cannot be narrower than 274px — a 64px preview, a 16px gap and a Replace +
+            Remove row that has no way to shrink — but `sm:grid-cols-2` handed it a bare 1fr, which
+            on a 1440px window is 236px and on a 1366px one 199px. The buttons do not wrap or
+            truncate; they simply painted over the Favicon column beside them, and the narrower the
+            window the further in they reached. Every common laptop width sat inside that range.
+            auto-fit asks the question the layout actually cares about — is there room for another
+            column of at least 280px — and stacks when there is not. The `min(…, 100%)` keeps the
+            track from exceeding a container narrower than the minimum itself. */}
+        <div className="grid gap-5 grid-cols-[repeat(auto-fit,minmax(min(280px,100%),1fr))]">
           <ImageUploader
             title="Logo"
-            hint="PNG or SVG, up to 2 MB. Shown in the sidebar & login."
+            hint="PNG or SVG, up to 2 MB. Used in the sidebar, login, emails and PDFs."
             url={logoUrl}
             uploading={uploading === "logo"}
             onPick={(f) => handleUpload("logo", f)}

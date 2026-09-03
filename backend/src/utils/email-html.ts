@@ -58,16 +58,31 @@ function frame(bodyHtml: string): string {
 </html>`;
 }
 
-// Cap a Cloudinary logo's height for email (retina 2x of the 40px display) and
-// keep the original format — email clients don't reliably render webp/avif, so
-// we avoid f_auto here. No-op for non-Cloudinary URLs.
+// Force a raster PNG and cap a Cloudinary logo's height for email (retina 2x of the 40px display).
+//
+// `f_png` is not an optimisation — it is what makes the header work at all for the vector formats
+// branding accepts. Gmail and Outlook don't render an SVG `<img>` (Apple Mail does), so an admin who
+// uploads a vector wordmark would otherwise get a bare alt-text header in most inboxes. Rasterising
+// at DELIVERY leaves the stored URL untouched, so the sidebar and login keep serving the crisp
+// original. PNG rather than JPEG because a logo is normally transparent, and JPEG would replace that
+// transparency with a white rectangle sitting on the brand-colour bar.
+//
+// Deliberately NOT f_auto: that serves webp/avif, which email clients don't reliably render. The PO
+// PDF letterhead rasterises this same asset for its own reason (pdfkit embeds only PNG/JPEG — see
+// `pdfSafeImageUrl`) and shares the `f_png` + `/upload/f_` guard convention. It does NOT share the
+// height, and the two should not be made to: 400px is sized for print, 80px is retina for a 34px
+// logo in a mail client. Keep the convention in step; leave the heights apart.
+//
+// The `/upload/f_` guard is what keeps this idempotent, and it must match the prefix written below:
+// a guard on `h_` stops matching once the transform starts with `f_png`, which would apply the whole
+// transform twice. No-op for non-Cloudinary URLs.
 function emailLogoSrc(url: string): string {
   if (
     url.includes("res.cloudinary.com/") &&
     url.includes("/upload/") &&
-    !url.includes("/upload/h_")
+    !url.includes("/upload/f_")
   ) {
-    return url.replace("/upload/", "/upload/h_80,c_limit/");
+    return url.replace("/upload/", "/upload/f_png,h_80,c_limit/");
   }
   return url;
 }

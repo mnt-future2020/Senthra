@@ -4,7 +4,13 @@ import * as React from "react";
 import { createPortal } from "react-dom";
 import { MapPin, Search, X } from "lucide-react";
 
-import { anchorMoved, anchorVisible, popoverPlacement, type Placement } from "./popoverPlacement";
+import {
+  anchorVisible,
+  popoverPlacement,
+  shouldReposition,
+  type Placement,
+  type PlacementCause,
+} from "./popoverPlacement";
 import { toolbarInputCls } from "./styles";
 
 // ── The SITE filter's picker ───────────────────────────────────────────────────────────────────
@@ -123,24 +129,28 @@ export function SitePicker({
   // only when it leaves. A containment check cannot work here — the panel is portalled to <body>.
   React.useEffect(() => {
     if (!open) return;
-    const onMove = () => {
+    const reposition = (cause: PlacementCause) => {
       const rect = btnRef.current?.getBoundingClientRect();
       if (!rect) return;
       if (!anchorVisible(rect, { height: window.innerHeight })) { setOpen(false); return; }
-      if (!anchorMoved(anchorRef.current ?? rect, rect)) return;
+      if (!shouldReposition(cause, anchorRef.current, rect)) return;
       anchorRef.current = rect;
       setPos(popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, { width: window.innerWidth, height: window.innerHeight }));
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
-    window.addEventListener("scroll", onMove, true);
-    window.addEventListener("resize", onMove);
+    // Two events, two questions — see shouldReposition. A resize always re-places; a scroll only
+    // when the trigger itself moved.
+    const onScroll = () => reposition("scroll");
+    const onResize = () => reposition("resize");
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
     window.addEventListener("keydown", onKey);
     // preventScroll — see FilterPopover: the panel is capped to the room its side had, and focusing
     // the search box would scroll the panel's own header out of its top on a short window.
     panelRef.current?.querySelector<HTMLInputElement>("input")?.focus({ preventScroll: true });
     return () => {
-      window.removeEventListener("scroll", onMove, true);
-      window.removeEventListener("resize", onMove);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKey);
     };
   }, [open, close]);

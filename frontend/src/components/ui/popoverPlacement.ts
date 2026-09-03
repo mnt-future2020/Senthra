@@ -69,6 +69,42 @@ export function anchorMoved(a: Rect, b: Rect, tolerance = 1): boolean {
 }
 
 /**
+ * What prompted a placement re-check.
+ *
+ * The distinction matters because these two events carry different information. A scroll says
+ * "something in the document moved" and may have nothing to do with this panel. A resize says the
+ * VIEWPORT changed, and every number `popoverPlacement` returns is derived from the viewport.
+ */
+export type PlacementCause = "scroll" | "resize";
+
+/**
+ * Should the panel be re-placed?
+ *
+ * Split from `anchorMoved` because binding one handler to both `scroll` and `resize` quietly applied
+ * a scroll rule to a resize. The bug: dock DevTools to the bottom of the window, or let a mobile URL
+ * bar collapse, and the viewport loses height while a trigger near the top of the page does not move
+ * by a pixel. `anchorMoved` answers "no" — correctly, for the question it asks — the recompute is
+ * skipped, and the panel keeps a `maxHeight` measured against the taller window it was opened in. It
+ * then hangs past the bottom of the shorter one, which is the exact overflow `maxHeight` exists to
+ * prevent.
+ *
+ * So a resize ALWAYS re-places: the viewport is the input, and it just changed. A scroll keeps the
+ * anchor test, because that test is the only thing distinguishing page scroll (the trigger moves,
+ * follow it) from scrolling inside a portalled `<Select>` popup (it doesn't, leave the panel alone) —
+ * and reacting to the latter used to tear the panel down mid-interaction.
+ *
+ * `previous` is null before the first rect has been recorded; a scroll then has nothing to compare
+ * against and reports no movement, which is the same answer the caller's own fallback gave.
+ */
+export function shouldReposition(
+  cause: PlacementCause,
+  previous: Rect | null,
+  current: Rect,
+): boolean {
+  return cause === "resize" || anchorMoved(previous ?? current, current);
+}
+
+/**
  * Is the trigger still on screen?
  *
  * Once it has scrolled out of view the panel is floating beside nothing, which is the case the
