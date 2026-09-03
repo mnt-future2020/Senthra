@@ -1371,7 +1371,7 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
 
   // One file at a time, matching the input (which has no `multiple`) — a dropped set takes the
   // first, because each upload here answers with a whole PO DTO and two in flight would race.
-  const { dragging, dropProps } = useFileDrop((files) => onFile(files[0]), uploading || !canEdit);
+  const { dragging, armed, dropProps } = useFileDrop((files) => onFile(files[0]), uploading || !canEdit);
 
   const onDelete = async () => {
     if (!confirm.id || deleting) return;
@@ -1388,9 +1388,15 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
   };
 
   return (
-    <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
+    // The whole card is the target, attachment list included — it was the button row, 38px of a
+    // card several hundred tall. `dropProps` stays on when the order is locked so a drop there is
+    // absorbed instead of navigating the tab to the file.
+    <div
+      {...dropProps}
+      className={`rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 ${dropRing(dragging, armed)}`}
+    >
       {canEdit && (
-        <div {...dropProps} className={`mb-4 ${dropRing(dragging)}`}>
+        <div className="mb-4">
           <input ref={inputRef} type="file" accept={ATTACH_ACCEPT} className="hidden" onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
           <button type="button" onClick={() => inputRef.current?.click()} disabled={uploading} className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] disabled:opacity-60">
             {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />} Upload file

@@ -166,10 +166,10 @@ export function DocPicker({
   const onDropFiles = (files: File[]) => {
     void stageFiles(multiple ? files : files.slice(0, 1), { bytes: totalBytes, count }, onFile);
   };
-  const { dragging, dropProps } = useFileDrop(onDropFiles, disabled || busy || atCount);
+  const { dragging, armed, dropProps } = useFileDrop(onDropFiles, disabled || busy || atCount);
 
   return (
-    <div {...dropProps} className={dropRing(dragging)}>
+    <div {...dropProps} className={`-m-2 rounded-xl p-2 ${dropRing(dragging, armed)}`}>
       <input
         ref={inputRef}
         type="file"
