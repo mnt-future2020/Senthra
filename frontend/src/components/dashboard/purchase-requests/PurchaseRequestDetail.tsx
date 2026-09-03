@@ -729,15 +729,20 @@ function AttachmentGroup({
   const inputRef = React.useRef<HTMLInputElement>(null);
   // Disabled on `busy` — SOME group's upload — for the same reason the buttons are: two uploads in
   // flight race on the full-DTO response. A drop must not be the way around a gate the click path has.
-  const { dragging, dropProps } = useFileDrop((files) => onFile(group.type, files[0]), busy || !canEdit);
+  const { dragging, armed, dropProps } = useFileDrop((files) => onFile(group.type, files[0]), busy || !canEdit);
   return (
-    <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5" aria-labelledby={`prf-att-${group.type}`}>
+    // The whole card is the target — heading, button, help line and the files already attached —
+    // not just the button row it used to be. Costs no layout: the card was already this size.
+    // It carries `dropProps` even when locked, so a drop on a non-editable group is absorbed rather
+    // than left to the browser to navigate away with.
+    <section
+      {...dropProps}
+      className={`rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 ${dropRing(dragging, armed)}`}
+      aria-labelledby={`prf-att-${group.type}`}
+    >
       <h3 id={`prf-att-${group.type}`} className="text-xs font-extrabold uppercase tracking-wider text-[var(--faint)]">{group.detailLabel}</h3>
       {canEdit && (
-        // The drop target is THIS group's, not the card's or the tab's — dropping a quote on the
-        // "Other documents" area must file it as `other`. Two targets, each labelled by the heading
-        // above it, is what keeps the group the user's choice rather than a guess.
-        <div {...dropProps} className={`mt-3 mb-4 ${dropRing(dragging)}`}>
+        <div className="mt-3 mb-4">
           <input
             ref={inputRef}
             type="file"

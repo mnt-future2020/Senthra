@@ -802,15 +802,26 @@ function DocumentGroupPicker({
 }) {
   const inputId = `prf-docs-${group.type}`;
   const helpId = `${inputId}-help`;
-  // Each GROUP is its own drop target, wrapping only the label + button + help line — not the file
-  // list under it. A quote dropped on the "Other documents" area is filed as `other`, because the
-  // area is the user's statement of which group they meant. Nothing here decides a group from the
-  // file's TYPE, which is what would make a CSV land somewhere the user did not put it.
-  const { dragging, dropProps } = useFileDrop((files) => onPick(group.type, files));
+  // Each GROUP is its own drop target, and the target is the WHOLE group block — its heading, its
+  // button, its help line and the files already in it. A quote dropped on the "Other documents"
+  // block is filed as `other`, because the block is the user's statement of which group they meant.
+  // Nothing here reads the file's TYPE to choose a group, which is what would make a CSV land
+  // somewhere the user did not put it.
+  //
+  // It used to wrap only the button row: 547x38 inside a 547x83 block, so more than half of the
+  // area a user aims at was a miss — and a miss on a page with no guard navigated the tab to the
+  // file and took the unsaved request with it. The block costs no extra height, because the heading
+  // and help text were already sitting there being useless to the drag.
+  //
+  // `-m-2 p-2` rather than a bare `p-2`: the padding gives the outline room to sit clear of the
+  // label, and the equal negative margin puts the content back exactly where it was. Padding alone
+  // indented these two group headings 8px past every other label on the form (measured: 321px
+  // against 313px everywhere else), which is the kind of drift nothing fails on and everyone sees.
+  const { dragging, armed, dropProps } = useFileDrop((files) => onPick(group.type, files));
   return (
-    <div>
+    <div {...dropProps} className={`-m-2 rounded-xl p-2 ${dropRing(dragging, armed)}`}>
       <label className={labelCls} htmlFor={inputId}>{group.formLabel}</label>
-      <div {...dropProps} className={`flex flex-wrap items-center gap-2 p-1 ${dropRing(dragging)}`}>
+      <div className="flex flex-wrap items-center gap-2">
         {/* `sr-only` rather than `hidden`: a hidden input is unreachable by keyboard, which would
             leave the only way to add a document a mouse click on its label. */}
         <input

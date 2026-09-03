@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { decideDrag, dragCarriesFiles, dragTransition, dropRing } from "./useFileDrop";
+import { decideDrag, dragCarriesFiles, dragTransition, dropRing, isOverInSession, strayDragAction } from "./useFileDrop";
 
 // The hook itself is DOM plumbing and this repo has no DOM test environment (vitest runs in Node;
 // jsdom is not installed and adding it for a handful of assertions is not worth a dependency). What
@@ -12,6 +12,9 @@ import { decideDrag, dragCarriesFiles, dragTransition, dropRing } from "./useFil
 // structural rather than testable here: every surface passes its EXISTING pick handler to the hook,
 // so there is only one function and nothing to diverge. It is verified in the browser.
 
+// `dragCarriesFiles` decides whether a drag is an upload at all. It gates the per-element handlers
+// AND the app-wide swallow, so a regression here either stops every drop target working or starts
+// eating the browser's own text and link drops across the whole app.
 describe("dragCarriesFiles", () => {
   it("recognises a file drag", () => {
     expect(dragCarriesFiles(["Files"])).toBe(true);
@@ -19,8 +22,8 @@ describe("dragCarriesFiles", () => {
     expect(dragCarriesFiles(["Files", "application/x-moz-file"])).toBe(true);
   });
 
-  // Dragging selected text or a link across the form must not light the target — the drop would
-  // yield no files and the ring would have promised something that then did nothing.
+  // Dragging selected text or a link across the form must not light a target — and must not be
+  // swallowed by the window guard either, or every text input in the app stops accepting drops.
   it.each([
     ["selected text", ["text/plain"]],
     ["a link", ["text/uri-list", "text/plain"]],
@@ -35,26 +38,10 @@ describe("dragCarriesFiles", () => {
   it("treats a missing type list as not a file drag", () => {
     expect(dragCarriesFiles(undefined)).toBe(false);
   });
-});
 
-describe("dropRing", () => {
-  // A RING, not a border. `ring` draws outside the box, so the target does not shift by 2px the
-  // moment a file is dragged over it — which on a form with two pickers side by side would nudge
-  // the whole row.
-  it("adds a visible ring only while dragging", () => {
-    expect(dropRing(true)).toContain("ring-2");
-    expect(dropRing(false)).not.toContain("ring-2");
-  });
-
-  // The idle and active states must agree on every non-ring class, or the element changes shape when
-  // a drag begins. Both keep the same corner radius.
-  it("keeps the same geometry in both states", () => {
-    expect(dropRing(true)).toContain("rounded-xl");
-    expect(dropRing(false)).toContain("rounded-xl");
-  });
-
-  it("never uses a border, which would resize the element", () => {
-    expect(dropRing(true)).not.toMatch(/\bborder\b/);
+  it("matches the type exactly rather than by prefix", () => {
+    expect(dragCarriesFiles(["FilesX"])).toBe(false);
+    expect(dragCarriesFiles(["files"])).toBe(false);
   });
 });
 
@@ -289,5 +276,190 @@ describe("dragTransition", () => {
       expect(dragTransition("over", 1, FILES, false).effect).toBe("copy");
       expect(dragTransition("over", 1, FILES, true).effect).toBe("none");
     });
+  });
+});
+
+// ── The app-wide guard ─────────────────────────────────────────────────────────────────────────
+//
+// A drop target protects only the pixels it covers. Everywhere else on the page the BROWSER is the
+// drop target, and its default for a file is to navigate the tab to it — on a half-filled purchase
+// request, the whole form with no undo. Measured on the PRF create form: the strip was 547x38 inside
+// a 547x83 group, so over half of the block being aimed at was a destructive miss.
+//
+// `strayDragAction` is that guard's whole decision, read in the BUBBLE phase at the window.
+describe("strayDragAction", () => {
+  const FILES = ["Files"];
+
+  it("swallows a file drop that no target claimed", () => {
+    expect(strayDragAction(FILES, false)).toBe("swallow");
+  });
+
+  // A real picker cancelled it on the way up; second-guessing that would fight the surface.
+  it("leaves a file drop that a target already claimed", () => {
+    expect(strayDragAction(FILES, true)).toBe("ignore");
+  });
+
+  // THE rule that keeps the browser usable. Dragging a URL into the job form's attachment-link
+  // input, or text into any field, is the browser's business — swallowing it app-wide would break
+  // every text input on every page at once.
+  it.each([
+    ["selected text", ["text/plain"]],
+    ["a link", ["text/uri-list", "text/plain"]],
+    ["an HTML fragment", ["text/html"]],
+    ["nothing", [] as string[]],
+    ["no type list", undefined],
+  ])("never swallows %s, claimed or not", (_label, types) => {
+    for (const claimed of [true, false]) {
+      expect(strayDragAction(types, claimed), `claimed=${claimed}`).toBe("ignore");
+    }
+  });
+
+  // Stated as the invariant that matters: the only thing ever swallowed is an unclaimed FILE drag.
+  it("swallows nothing except an unclaimed file drag", () => {
+    const cases: [readonly string[] | undefined, boolean][] = [
+      [FILES, true], [FILES, false],
+      [["text/plain"], true], [["text/plain"], false],
+      [undefined, true], [undefined, false],
+    ];
+    for (const [types, claimed] of cases) {
+      const swallowed = strayDragAction(types, claimed) === "swallow";
+      expect(swallowed).toBe(dragCarriesFiles(types) && !claimed);
+    }
+  });
+});
+
+// ── The three affordance states ────────────────────────────────────────────────────────────────
+//
+// idle → armed → over. `armed` is the answer to "I cannot see where to drop": the picker stays a
+// plain button at rest and outlines itself only while a drag is actually in flight, so it costs no
+// height in either state.
+describe("dropRing states", () => {
+  const idle = dropRing(false, false);
+  const armed = dropRing(false, true);
+  const over = dropRing(true, false);
+
+  it("shows nothing at rest", () => {
+    expect(idle).not.toMatch(/outline-(2|\[)/);
+  });
+
+  it("outlines dashed when armed but not yet hovered", () => {
+    expect(armed).toContain("outline-dashed");
+    expect(armed).not.toContain("outline-solid");
+  });
+
+  it("outlines solid and thicker when the file is over this target", () => {
+    expect(over).toContain("outline-solid");
+    expect(over).toContain("outline-[3px]");
+    expect(over).not.toContain("outline-dashed");
+  });
+
+  // Mutually exclusive, so two outlines never fight. `over` wins — it is the more specific
+  // statement, and with two groups side by side it is what disambiguates them.
+  it("prefers the hovered state over the armed one", () => {
+    const both = dropRing(true, true);
+    expect(both).toContain("outline-solid");
+    expect(both).not.toContain("outline-dashed");
+  });
+
+  /**
+   * THE structural rule, and the bug it closes.
+   *
+   * This string is appended to elements that already carry their own classes — the PO and PRF
+   * attachment cards bring `bg-[var(--surface)]` and `rounded-2xl`. It once also emitted
+   * `bg-[var(--surface-2)]/50` and `rounded-xl`, so two rules set the same property on one element
+   * and the winner was whichever Tailwind happened to emit last. Restricting this helper to
+   * `outline-*` makes that collision impossible rather than merely fixed.
+   */
+  it.each([[false, false], [false, true], [true, false], [true, true]])(
+    "only ever emits outline utilities (dragging=%s armed=%s)",
+    (dragging, armedState) => {
+      const classes = dropRing(dragging, armedState).split(/\s+/).filter(Boolean);
+      for (const c of classes) {
+        expect(c, `${c} touches a property the host element owns`).toMatch(/^(outline-|transition-|duration-)/);
+      }
+    },
+  );
+
+  it.each([[false, false], [false, true], [true, false], [true, true]])(
+    "never sets a background or a radius (dragging=%s armed=%s)",
+    (dragging, armedState) => {
+      const cls = dropRing(dragging, armedState);
+      expect(cls).not.toMatch(/bg-/);
+      expect(cls).not.toMatch(/rounded/);
+    },
+  );
+
+  // No state may change the element's SIZE, or the form reflows the moment a drag starts. `outline`
+  // paints outside the box and reserves no space; `border` would not.
+  it.each([[false, false], [false, true], [true, false], [true, true]])(
+    "never resizes the element (dragging=%s armed=%s)",
+    (dragging, armedState) => {
+      expect(dropRing(dragging, armedState)).not.toMatch(/border(-|)/);
+    },
+  );
+
+  /**
+   * THE clipping bug, pinned.
+   *
+   * A positive `outline-offset` paints outside the element's box, where an ancestor with
+   * `overflow: auto` clips it. Every drop target here has one — the PO/PRF tab panel is
+   * `overflow-auto` and flush with the card on three sides — so a positive offset was clipped on
+   * top, left and right and left a single line under the card. Inside the box, nothing can clip it.
+   */
+  it.each([[false, true], [true, false], [true, true]])(
+    "draws the outline INSIDE the box so a scroll container cannot clip it (dragging=%s armed=%s)",
+    (dragging, armedState) => {
+      const offset = dropRing(dragging, armedState).match(/outline-offset-\[(-?\d+)px\]/);
+      expect(offset, "an outlined state must declare an explicit offset").not.toBeNull();
+      expect(Number(offset![1]), "offset must be negative — a positive one gets clipped").toBeLessThan(0);
+    },
+  );
+
+  // Back-compat: every existing call site passes one argument.
+  it("defaults to not-armed when called with one argument", () => {
+    expect(dropRing(false)).toBe(idle);
+    expect(dropRing(true)).toBe(over);
+  });
+});
+
+// ── Stale state cannot cross a drag ────────────────────────────────────────────────────────────
+//
+// The browser promises no closing event. Escape, or a release over another window, fires neither
+// `dragleave` nor `drop` on the element the file was last over, so that element keeps saying "the
+// file is over me" for the rest of the page's life.
+//
+// Hiding it while no drag is in flight was not enough, and this is the sequence that proved it:
+// hover the Quote group, press Escape, then start a SECOND drag and hover the OTHER group — both
+// groups showed the solid "over" outline at once, on a form where that outline is the only thing
+// telling you which of the two will receive the file.
+//
+// Numbering the drags makes it structural: state from session N is simply not a match in N+1.
+describe("isOverInSession", () => {
+  it("is over when the recorded session is the one in flight", () => {
+    expect(isOverInSession(4, 4)).toBe(true);
+  });
+
+  // THE regression, as one assertion.
+  it("is NOT over when the record belongs to an earlier drag", () => {
+    expect(isOverInSession(4, 5)).toBe(false);
+  });
+
+  it("is not over when no drag is in flight", () => {
+    expect(isOverInSession(4, 0)).toBe(false);
+    expect(isOverInSession(0, 0)).toBe(false);
+  });
+
+  it("is not over when the element was never entered in this drag", () => {
+    expect(isOverInSession(0, 5)).toBe(false);
+  });
+
+  // Every element that did not record THIS session reads as not-over, whatever it is carrying —
+  // which is what stops two side-by-side groups both claiming the file.
+  it("matches only the exact session in flight", () => {
+    const current = 7;
+    for (const recorded of [0, 1, 5, 6, 8, 99]) {
+      expect(isOverInSession(recorded, current), `recorded=${recorded}`).toBe(false);
+    }
+    expect(isOverInSession(current, current)).toBe(true);
   });
 });

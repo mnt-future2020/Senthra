@@ -698,7 +698,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
 
   // One at a time, matching the input — the job form appends each upload's URL to a list, and two
   // in flight would both read the same `attachments` snapshot and drop one of the two.
-  const { dragging, dropProps } = useFileDrop((files) => void handleFile(files[0]), uploadingDoc);
+  const { dragging, armed, dropProps } = useFileDrop((files) => void handleFile(files[0]), uploadingDoc);
 
   // Demand from OTHER active jobs for a line's item+warehouse, and the stock TRULY free to plan
   // (on-hand − that demand). null free = availability not loaded yet (no cap can be applied).
@@ -1281,7 +1281,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
 
                 {/* The drop target is the ROW LIST plus the buttons below it — the region that
                     already means "the attachments on this job". It adds no height of its own. */}
-                <div {...dropProps} className={`space-y-2 p-1 ${dropRing(dragging)}`}>
+                <div {...dropProps} className={`-m-2 space-y-2 rounded-xl p-2 ${dropRing(dragging, armed)}`}>
                   {attachments.map((a, i) => {
                     const meta = parseJobAttachment(a);
                     // Only files WE uploaded render as a fixed row. A pasted link — whatever its
