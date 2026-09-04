@@ -7,7 +7,7 @@ import { ArrowRight, Check, ChevronDown, Loader2, Plus, Settings2 } from "lucide
 import { useAuth } from "@/hooks/useAuth";
 import * as jobTitleService from "@/services/jobTitle.service";
 import type { JobTitle } from "@/types/jobTitle";
-import { inputCls } from "@/components/ui/styles";
+import { dropdownRadius, dropdownSurfaceCls, inputCls } from "@/components/ui/styles";
 import { useNavigationGuard } from "@/providers/NavigationGuardProvider";
 
 // A creatable combobox for the user form's Job title field: pick an existing title
@@ -126,7 +126,7 @@ export function JobTitleCombobox({
       </button>
 
       {open && !disabled && (
-        <div id={listboxId} className="absolute z-30 mt-1 w-full overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+        <div id={listboxId} className={`absolute z-30 mt-1 w-full overflow-hidden ${dropdownSurfaceCls}`} style={dropdownRadius}>
           <div className="border-b border-[var(--border-2)] p-2">
             <input
               autoFocus

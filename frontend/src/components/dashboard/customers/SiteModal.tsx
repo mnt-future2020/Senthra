@@ -5,6 +5,8 @@ import { Loader2 } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
 import { Modal } from "@/components/ui/Modal";
+import { SuggestInput } from "@/components/ui/SuggestInput";
+import { COUNTRY_OPTIONS } from "@/lib/countryOptions";
 import { Select } from "@/components/ui/Select";
 import { PostcodeField } from "@/components/ui/PostcodeField";
 import { RequiredMark } from "@/components/ui/FormScaffold";
@@ -162,17 +164,14 @@ export function SiteModal({
           </div>
           <div>
             <label className={labelCls}>Country</label>
-            <input
-              className={inputCls}
+            <SuggestInput
+              ariaLabel="Country"
               value={country}
-              onChange={(e) => setCountry(e.target.value)}
+              onChange={setCountry}
+              suggestions={COUNTRY_OPTIONS}
               placeholder="United Kingdom"
-              list="site-country-options"
               maxLength={120}
             />
-            <datalist id="site-country-options">
-              <option value="United Kingdom" />
-            </datalist>
           </div>
           <div>
             <label className={labelCls}>Status</label>

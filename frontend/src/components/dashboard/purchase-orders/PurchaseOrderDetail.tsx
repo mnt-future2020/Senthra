@@ -815,17 +815,14 @@ function MarkSentDialog({ po, busy, onConfirm, onClose }: { po: PurchaseOrder; b
         <div className="mt-4 grid gap-3">
           <div>
             <label className={labelCls} htmlFor="mark-sent-channel">How was it sent?</label>
-            <select
+            <Select
               id="mark-sent-channel"
-              className={inputCls}
               value={channel}
-              onChange={(e) => setChannel(e.target.value as poService.PoIssueChannel | "")}
-            >
-              <option value="">Not specified</option>
-              {MARK_SENT_CHANNELS.map((c) => (
-                <option key={c.value} value={c.value}>{c.label}</option>
-              ))}
-            </select>
+              onChange={(v) => setChannel(v as poService.PoIssueChannel | "")}
+              options={[{ value: "", label: "Not specified" }, ...MARK_SENT_CHANNELS]}
+              placeholder="Not specified"
+              ariaLabel="How it was sent"
+            />
           </div>
           <div>
             <label className={labelCls} htmlFor="mark-sent-note">Note</label>

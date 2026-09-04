@@ -25,6 +25,24 @@ export const ghostBtn =
 export const secondaryBtn =
   "flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-5 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-60";
 
+/**
+ * The SURFACE every dropdown popup is drawn on — `Select`'s listbox, `MultiSelect`, `CreatableSelect`,
+ * `SuggestInput`, the item pickers, the comboboxes and the row action menus.
+ *
+ * The RADIUS is the reason this is named. It has to be an inline style rather than a class, because
+ * `var(--radius)` is the user's Appearance → Corner radius setting and Tailwind's `rounded-*` scale
+ * cannot read it. Six popups had `rounded-xl` hardcoded and sat frozen at 12px while the Select
+ * beside them moved between 6px and 26px — two dropdowns on one screen, opened a second apart, with
+ * visibly different corners.
+ *
+ * Only the surface lives here. Positioning, width, padding and z-index stay at the CALL SITE: a
+ * full-width combobox list and a right-aligned action menu share this shell and nothing else.
+ */
+export const dropdownSurfaceCls = "border border-[var(--border)] bg-[var(--surface)] shadow-2xl";
+
+/** Pair with `dropdownSurfaceCls` — `style={dropdownRadius}`. */
+export const dropdownRadius = { borderRadius: "var(--radius)" } as const;
+
 // ── List-toolbar controls ─────────────────────────────────────────────────────────────────────
 // The compact family that sits in a list/filter row: a search box, one or more `<Select size="sm">`,
 // and a Clear. All three MUST share `rounded-lg` + `py-2.5` + `text-xs` or the row looks ragged.

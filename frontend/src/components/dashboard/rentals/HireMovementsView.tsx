@@ -207,7 +207,7 @@ export function HireMovementsView() {
             {/* Off by default, and phrased as the narrowing it is. A reversed note is part of the
                 period's history; it is only in the way when somebody is about to add the columns up. */}
             <label className="flex cursor-pointer items-center gap-1.5 text-[11px] font-semibold text-[var(--muted)]">
-              <input type="checkbox" checked={liveOnly} onChange={(e) => patch({ live: e.target.checked ? "1" : null })} className="accent-[var(--accent)]" />
+              <input type="checkbox" checked={liveOnly} onChange={(e) => patch({ live: e.target.checked ? "1" : null })} className="h-4 w-4 accent-[var(--accent)]" />
               Hide reversed
             </label>
           </FilterPopover>

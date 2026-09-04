@@ -5,6 +5,8 @@ import * as React from "react";
 import * as rentalService from "@/services/rental.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Modal } from "@/components/ui/Modal";
+import { Select } from "@/components/ui/Select";
+import { toolbarInputCls } from "@/components/ui/styles";
 
 /**
  * "It is not coming back" — the exit for hired equipment an engineer lost.
@@ -71,6 +73,14 @@ export function DeclareHireLostModal({
   // WHICH HIRE. One is the ordinary case and is taken without asking; more than one is a real question
   // — two providers, two deadlines, two invoices — and guessing it would put the write-off on the wrong
   // supplier's account.
+  // The Select renders a <button> trigger, which cannot be wrapped by a <label> the way the number
+  // input and textarea below are — but a button IS a labelable element, so `htmlFor` pointing at its
+  // id does the same two jobs: it names the control (including the required mark) and makes clicking
+  // the caption open the menu.
+  const hireId = React.useId();
+  const holderId = React.useId();
+  const reasonId = React.useId();
+
   const hires = target?.hires ?? [];
   const hire = hires.find((h) => h.lineId === lineId) ?? (hires.length === 1 ? hires[0] : undefined);
 
@@ -117,9 +127,6 @@ export function DeclareHireLostModal({
     }
   };
 
-  const fieldCls =
-    "w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]";
-
   return (
     <Modal open={Boolean(target)} onClose={close} title="Declare hired equipment lost">
       <div className="space-y-3">
@@ -145,29 +152,26 @@ export function DeclareHireLostModal({
         {/* Asked ONLY when there is something to ask. A single hire is taken silently — see the target
             type's note — so the ordinary case is three fields, not four. */}
         {hires.length > 1 && (
-          <label className="block">
-            <span className="mb-1.5 block text-xs font-semibold text-[var(--muted)]">
+          <div>
+            <label htmlFor={hireId} className="mb-1.5 block text-xs font-semibold text-[var(--muted)]">
               Which hire <span className="text-[var(--neg)]">*</span>
-            </span>
-            <select
+            </label>
+            <Select
+              id={hireId}
+              size="sm"
+              className="w-full"
               value={hire?.lineId ?? ""}
-              onChange={(e) => {
-                setLineId(e.target.value);
+              onChange={(v) => {
+                setLineId(v);
                 // Everything below depends on the hire, so it cannot survive the hire changing — a
                 // quantity valid for one order is not valid for another.
                 setEngineerId("");
                 setQuantity(1);
               }}
-              className={fieldCls}
-            >
-              <option value="">Select a hire…</option>
-              {hires.map((h) => (
-                <option key={h.lineId} value={h.lineId}>
-                  {h.poCode} — {h.itemName} ({h.qty} out)
-                </option>
-              ))}
-            </select>
-          </label>
+              placeholder="Select a hire…"
+              options={hires.map((h) => ({ value: h.lineId, label: `${h.poCode} — ${h.itemName} (${h.qty} out)` }))}
+            />
+          </div>
         )}
 
         {hires.length > 1 && !hire ? null : holders.length === 0 ? (
@@ -176,26 +180,28 @@ export function DeclareHireLostModal({
           </p>
         ) : (
           <>
-            <label className="block">
-              <span className="mb-1.5 block text-xs font-semibold text-[var(--muted)]">
+            <div>
+              <label htmlFor={holderId} className="mb-1.5 block text-xs font-semibold text-[var(--muted)]">
                 Who was holding it <span className="text-[var(--neg)]">*</span>
-              </span>
-              <select
+              </label>
+              <Select
+                id={holderId}
+                size="sm"
+                className="w-full"
                 value={chosen?.engineerId ?? ""}
-                onChange={(e) => {
-                  setEngineerId(e.target.value);
+                onChange={(v) => {
+                  setEngineerId(v);
                   setQuantity(1);
                 }}
-                className={fieldCls}
-              >
-                {holders.length > 1 && <option value="">Select an engineer…</option>}
-                {holders.map((h) => (
-                  <option key={h.engineerId} value={h.engineerId}>
-                    {h.engineerName} — holding {h.quantity}
-                  </option>
-                ))}
-              </select>
-            </label>
+                placeholder="Select an engineer…"
+                options={[
+                  // A lone holder is pre-selected, so there is nothing to go back TO — the empty
+                  // row only earns its place when there is a real choice to make.
+                  ...(holders.length > 1 ? [{ value: "", label: "Select an engineer…" }] : []),
+                  ...holders.map((h) => ({ value: h.engineerId, label: `${h.engineerName} — holding ${h.quantity}` })),
+                ]}
+              />
+            </div>
 
             <label className="block">
               <span className="mb-1.5 block text-xs font-semibold text-[var(--muted)]">
@@ -207,7 +213,7 @@ export function DeclareHireLostModal({
                 max={max || 1}
                 value={quantity}
                 onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}
-                className={fieldCls}
+                className={toolbarInputCls}
               />
               {/* The cap is the server's, restated so the number is refused here rather than at the
                   end of a form. */}
@@ -216,19 +222,20 @@ export function DeclareHireLostModal({
               </span>
             </label>
 
-            <label className="block">
-              <span className="mb-1.5 block text-xs font-semibold text-[var(--muted)]">
+            <div>
+              <label htmlFor={reasonId} className="mb-1.5 block text-xs font-semibold text-[var(--muted)]">
                 Reason <span className="text-[var(--neg)]">*</span>
-              </span>
-              <select value={reason} onChange={(e) => setReason(e.target.value)} className={fieldCls}>
-                <option value="">Select a reason…</option>
-                {REASONS.map((r) => (
-                  <option key={r.value} value={r.value}>
-                    {r.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+              </label>
+              <Select
+                id={reasonId}
+                size="sm"
+                className="w-full"
+                value={reason}
+                onChange={setReason}
+                placeholder="Select a reason…"
+                options={REASONS.map((r) => ({ value: r.value, label: r.label }))}
+              />
+            </div>
 
             <label className="block">
               <span className="mb-1.5 block text-xs font-semibold text-[var(--muted)]">
@@ -240,7 +247,7 @@ export function DeclareHireLostModal({
                 rows={3}
                 maxLength={2000}
                 placeholder={reason === "other" ? "Describe what happened" : "Anything the provider will ask about"}
-                className={fieldCls}
+                className={toolbarInputCls}
               />
             </label>
           </>
