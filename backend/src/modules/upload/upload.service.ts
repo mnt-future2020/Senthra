@@ -60,7 +60,7 @@ const FILE_TYPE_BY_MEDIA: Record<string, string> = {
 };
 
 /**
- * The asset's name: the user's own file name, sanitised, with a UUID after it.
+ * An IMAGE asset's name: the user's own file name, sanitised, with a UUID after it.
  *
  * The UUID is what makes it unique — the name in front is purely so a human can read the delivery URL,
  * and so the screens that show an attachment can put the ORIGINAL name back. `Job.attachments` stores
@@ -69,11 +69,69 @@ const FILE_TYPE_BY_MEDIA: Record<string, string> = {
  *
  * Sanitised to `[a-z0-9_-]` for the same reason the old server-side path did: a public id is a PATH,
  * and a `/` in a file name would move the asset out of the folder the signature committed to.
+ *
+ * DELIBERATELY not the document shape below. An image is previewed inline and never saved under this
+ * name, so the leaf-name problem that shape solves does not exist here — and its delivery URL carries
+ * no extension, because Cloudinary derives an image's format itself. Changing it would put every
+ * avatar, logo and evidence photo at risk to buy nothing.
  */
-function publicIdBase(fileName: string): string {
+function imagePublicId(fileName: string): string {
   const withoutExt = fileName.replace(/\.[^/.]+$/, "").trim();
   const safe = withoutExt.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
   return safe ? `${safe}-${randomUUID()}` : randomUUID();
+}
+
+/**
+ * A RAW document's name: `<uuid>/<the user's own file name>`.
+ *
+ * Cloudinary sends NO `Content-Disposition` header, so a browser saving a document names it after the
+ * LAST PATH SEGMENT of the delivery URL — which for a raw asset is its public id verbatim. With the
+ * uuid in the name, `Finance_Report_2026-08-26.xlsx` reached the user's Downloads folder as
+ * `finance_report_2026-08-26-d817abf6-4988-….xlsx`.
+ *
+ * So the uuid becomes a FOLDER. It still carries the whole of the uniqueness — two people uploading
+ * the same name land in different directories — while the segment the user actually reads is theirs.
+ *
+ * Chosen over Cloudinary's `fl_attachment:<name>` flag, which would name the download correctly and
+ * also force `Content-Disposition: attachment` on everything: PDFs would stop opening in the browser's
+ * viewer. This costs no behaviour change at all.
+ */
+function documentPublicId(fileName: string, extension: string): string {
+  return `${randomUUID()}/${safeLeafName(fileName)}.${extension}`;
+}
+
+/**
+ * The user's file name, reduced to something safe to be the last segment of a signed delivery URL.
+ *
+ * THE INVARIANT: the result can never introduce a path separator or climb out of the uuid folder.
+ * A public id is a path, and the signature commits to whatever this returns — a name that smuggled in
+ * a `/` would move the asset to a directory of the uploader's choosing, and one that climbed with `..`
+ * would leave the uuid folder that is the only thing making the id unique.
+ *
+ * Everything outside `[A-Za-z0-9._-]` folds to a hyphen rather than being dropped, so the words of a
+ * name stay apart: `PO-0064 (2)` reads as `PO-0064-2`, not `PO00642`. That fold is deliberately wider
+ * than "the dangerous characters" — a comma is Cloudinary's own transformation separator, and a
+ * non-Latin name would have to survive URL-encoding on a path the signature was computed over. The
+ * old sanitiser dropped these too (it allowed even less), so nothing that used to work stops working.
+ *
+ * Case and interior dots are the two things it now KEEPS. Both were casualties of an id nobody was
+ * meant to read: `Quarterly_Report` came back as `quarterly_report`, and `invoice.final.v2` lost the
+ * versioning half the world puts in a document name.
+ */
+function safeLeafName(fileName: string): string {
+  const leaf = fileName
+    .replace(/\.[^/.]+$/, "") // the real extension is re-appended by the caller, from the media type
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    // `..` cannot survive in any form — not as a segment, not buried inside one.
+    .replace(/\.{2,}/g, ".")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "")
+    .slice(0, 60)
+    // The slice can cut through a separator and leave the name ending on one.
+    .replace(/[-.]+$/, "");
+  // Nothing survived — a name of only spaces, or written in a script we fold away. The uuid folder
+  // already holds the uniqueness, so the leaf only has to be legible.
+  return leaf || "file";
 }
 
 function assertPermitted(purpose: UploadPurposeKey, actor?: AuditActor): void {
@@ -165,8 +223,12 @@ export async function createSignature(
   // A raw asset is served at exactly its public id, so the extension has to be part of it or the
   // delivery URL ends in a bare UUID and the browser downloads an extensionless blob. Same rule the
   // old server-side path used.
+  //
+  // The two shapes differ, and the difference is the point — see `documentPublicId` / `imagePublicId`.
+  // The `ext` fallback is not reachable through a validated media type (every raw type has an entry
+  // above), but a raw asset with no extension is the one outcome worth never producing by accident.
   const ext = resourceType === "raw" ? FILE_TYPE_BY_MEDIA[mediaType] : null;
-  const publicId = ext ? `${publicIdBase(input.fileName)}.${ext}` : publicIdBase(input.fileName);
+  const publicId = ext ? documentPublicId(input.fileName, ext) : imagePublicId(input.fileName);
 
   const signed = signUploadParams(
     { folder: spec.folder, publicId, resourceType, uploadPreset: uploadPresetFor(resourceType) },
