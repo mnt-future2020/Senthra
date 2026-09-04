@@ -78,6 +78,26 @@ function HeaderRow() {
   );
 }
 
+/**
+ * The item, named ONCE per group — and which row that is depends on whether the group has a header.
+ *
+ * An item holding several contracts gets a header row to total them, and the name belongs there. An
+ * item holding ONE gets no header (see the table), so the name sits on the contract's own row. Same
+ * markup in both places, so the column reads as one column rather than two that drifted apart.
+ *
+ * `lead` is the disclosure triangle when there is something to disclose; its absence leaves a spacer
+ * of exactly the triangle's width, which is what keeps the two kinds of name at the same left edge.
+ */
+function ItemName({ name, code, lead }: { name: string; code: string | null; lead?: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      {lead ?? <span className="w-3.5 shrink-0" aria-hidden />}
+      <span className="font-semibold text-[var(--ink)]">{name}</span>
+      {code && <span className="font-mono text-[11px] text-[var(--faint)]">{code}</span>}
+    </div>
+  );
+}
+
 /** Mirrors the table so the first load causes no layout shift — the sibling panes' own approach. */
 function QueueSkeleton() {
   return (
@@ -136,8 +156,8 @@ export function WarehouseHireStock({ warehouseId }: { warehouseId: string }) {
   const [page, setPage] = React.useState(1);
   const [view, setView] = React.useState<View>("all");
   // Which item groups are open. Collapsed by DEFAULT — the whole point is that eleven rows of one
-  // tester become one. A group holding a single contract opens itself (see the row): there is nothing
-  // to collapse, and a disclosure that reveals one line is a click for no information.
+  // tester become one. Only an item with SEVERAL contracts is ever in here: one holding a single
+  // contract gets no header row to expand (see the table), so it has no open/closed state to hold.
   const [expanded, setExpanded] = React.useState<ReadonlySet<string>>(() => new Set());
   const toggle = React.useCallback(
     (key: string) =>
@@ -349,39 +369,45 @@ export function WarehouseHireStock({ warehouseId }: { warehouseId: string }) {
                   <HeaderRow />
                 </thead>
                 {visible.map((g) => {
-                  // A group of ONE opens itself: there is nothing to collapse, and a disclosure that
-                  // reveals a single line is a click that buys no information.
-                  const open = g.lines.length === 1 || expanded.has(g.key);
+                  // A header row exists to TOTAL the contracts under it. With one contract there is
+                  // nothing to total: every figure on the header is that line's own figure repeated,
+                  // its Order cell says "1 hire" where the line names the actual order, and its
+                  // Delivering to and action cells sit empty where the line's do not. So the header
+                  // spends a whole row on the item name, and offers a disclosure triangle that would
+                  // reveal what is already on screen.
+                  //
+                  // Such an item renders as ONE row instead, the name moving onto the contract's own
+                  // line. Nothing is lost: that line says MORE than the header did in every column
+                  // the two share — the order it is against, "of N" ordered, the damaged and lost
+                  // splits, WHY nothing is issuable — and it is the row carrying the actions.
+                  const grouped = g.lines.length > 1;
+                  const open = grouped && expanded.has(g.key);
                   return (
                 <tbody key={g.key} className="border-b border-[var(--border)] last:border-0">
                   {/* ── The item, which is what a reader came to ask about ────────────────────────
                       Its totals are the answer to "how many have I got and how many can I give out",
                       which used to require summing eleven rows by eye and knowing which of them were
                       expired. Collapsed by default; the contracts underneath are where every action
-                      still lives, because each is a separate agreement with its own deadline. */}
-                  <tr
-                    className={`bg-[var(--surface-2)] align-middle ${g.lines.length > 1 ? "cursor-pointer" : ""}`}
-                    onClick={g.lines.length > 1 ? () => toggle(g.key) : undefined}
-                  >
+                      still lives, because each is a separate agreement with its own deadline.
+
+                      Rendered only for an item that HAS several contracts — see above. The shading is
+                      the promise that something is folded away under here, so an item with a single
+                      contract, having nothing to fold, must not wear it. */}
+                  {grouped && (
+                  <tr className="cursor-pointer bg-[var(--surface-2)] align-middle" onClick={() => toggle(g.key)}>
                     <td className="cell-y px-4">
-                      <div className="flex items-center gap-1.5">
-                        {g.lines.length > 1 ? (
+                      <ItemName
+                        name={g.itemName}
+                        code={g.rentalItemCode}
+                        lead={
                           <ChevronRight
                             className={`h-3.5 w-3.5 shrink-0 text-[var(--faint)] transition-transform ${open ? "rotate-90" : ""}`}
                             aria-hidden
                           />
-                        ) : (
-                          <span className="w-3.5 shrink-0" />
-                        )}
-                        <span className="font-semibold text-[var(--ink)]">{g.itemName}</span>
-                        {g.rentalItemCode && (
-                          <span className="font-mono text-[11px] text-[var(--faint)]">{g.rentalItemCode}</span>
-                        )}
-                      </div>
+                        }
+                      />
                     </td>
-                    <td className="cell-y px-4 text-[11px] text-[var(--muted)]">
-                      {g.lines.length === 1 ? "1 hire" : `${g.lines.length} hires`}
-                    </td>
+                    <td className="cell-y px-4 text-[11px] text-[var(--muted)]">{g.lines.length} hires</td>
                     <td className="cell-y px-4 text-[var(--muted)]">
                       <span className="font-semibold text-[var(--ink)]">{g.held}</span>
                       {g.withEngineers > 0 && (
@@ -417,7 +443,8 @@ export function WarehouseHireStock({ warehouseId }: { warehouseId: string }) {
                     <td className="cell-y px-4" />
                     <td className="cell-y px-4" />
                   </tr>
-                  {open &&
+                  )}
+                  {(!grouped || open) &&
                     g.lines.map((r) => (
                     <tr
                       key={r.id}
@@ -435,9 +462,14 @@ export function WarehouseHireStock({ warehouseId }: { warehouseId: string }) {
                         canViewPo ? () => router.push(`/dashboard/purchase-orders/${r.purchaseOrderCode}`) : undefined
                       }
                     >
-                      {/* Blank, and indented: the item is named once on the group row above. Repeating
-                          it on every contract is what made one tester look like eleven. */}
-                      <td className="cell-y px-4" />
+                      {/* Blank, and indented, WHEN a header names the item above — repeating it on
+                          every contract is what made one tester look like eleven. With no header
+                          there is nothing above to repeat and this is the item's only row, so the
+                          name belongs here. Rendered by the same component either way, which is what
+                          keeps the two shapes at one left edge in the column. */}
+                      <td className="cell-y px-4">
+                        {!grouped && <ItemName name={g.itemName} code={g.rentalItemCode} />}
+                      </td>
                       <td className="cell-y px-4">
                         {/* A real link even though the whole row navigates: a `tr` with an onClick is
                             mouse-only, and this is the one element in the row a keyboard can tab to —
