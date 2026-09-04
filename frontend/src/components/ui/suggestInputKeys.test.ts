@@ -167,6 +167,15 @@ describe("SuggestInput's suggestion rows stay out of the tab sequence", () => {
     expect(CODE).toMatch(/<button/);
   });
 
+  // Chrome makes any scrollable container keyboard-focusable by itself, so rows at tabIndex -1 were
+  // not enough: Tab out of the field landed on the scrolling listbox. An explicit tabindex opts out.
+  it("takes the scrolling listbox itself out of the tab sequence", () => {
+    const listbox = CODE.slice(CODE.indexOf('role="listbox"'));
+    expect(listbox.slice(0, 200), "Chrome's focusable scrollers make this reachable otherwise").toContain(
+      "tabIndex={-1}",
+    );
+  });
+
   it("closes the list when focus leaves the component", () => {
     expect(CODE, "a popup left open over the next field steals its clicks").toMatch(/onBlur=\{/);
     expect(CODE).toContain("relatedTarget");

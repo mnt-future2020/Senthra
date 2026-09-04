@@ -147,6 +147,13 @@ export function SuggestInput({
           id={listboxId}
           ref={listRef}
           role="listbox"
+          // Explicitly out of the tab sequence, and it has to be SAID rather than left implicit.
+          // Chrome makes any scrollable container keyboard-focusable on its own — so with the rows
+          // already at tabIndex -1, Tab out of the field landed on this box instead of on the next
+          // control, and the popup stayed open over the fields below. An explicit tabindex is the
+          // documented opt-out; the list is driven from the input by arrow keys and scrolled from
+          // code, so nothing is lost by taking it out.
+          tabIndex={-1}
           // Same popup shell as `Select` — surface, border, shadow, and the radius token so it
           // follows Appearance → Corner radius like every other dropdown.
           className={`absolute z-50 mt-1 max-h-56 w-full overflow-y-auto p-1 ${dropdownSurfaceCls}`}
