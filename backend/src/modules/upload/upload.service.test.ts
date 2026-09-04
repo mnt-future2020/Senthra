@@ -188,30 +188,8 @@ describe("createSignature — who may upload", () => {
     await createSignature(sigInput(), ACTOR);
     const args = sign.mock.calls[0]![0];
     expect(args.folder).toBe(UPLOAD_PURPOSES.po_attachment.folder);
-    expect(args.publicId).toMatch(/^quote-[0-9a-f-]{36}\.pdf$/);
+    expect(args.publicId).toMatch(/^[0-9a-f-]{36}\/quote\.pdf$/);
     expect(args.resourceType).toBe("raw");
-  });
-
-  // The user's own file name is the ONLY record of what they picked for a `String[]` attachment, which
-  // stores nothing but the URL. Without it every job attachment displayed as a bare `9096674d-….pdf` —
-  // found by uploading through the real form, not by reading the code.
-  it("puts the user's file name in front of the uuid so the screens can read it back", async () => {
-    await createSignature(sigInput({ fileName: "Site Survey Rev C.pdf" }), ACTOR);
-    expect(sign.mock.calls[0]![0].publicId).toMatch(/^site-survey-rev-c-[0-9a-f-]{36}\.pdf$/);
-  });
-
-  // A public id is a PATH. A `/` in a file name would move the asset out of the folder the signature
-  // committed to, so the name is reduced to the same character set the old server-side path used.
-  it("sanitises a file name that could escape the folder", async () => {
-    await createSignature(sigInput({ fileName: "../../etc/passwd.pdf" }), ACTOR);
-    const id = sign.mock.calls[0]![0].publicId;
-    expect(id).not.toContain("/");
-    expect(id).toMatch(/^[a-z0-9_-]+-[0-9a-f-]{36}\.pdf$/);
-  });
-
-  it("falls back to a bare uuid when the name sanitises to nothing", async () => {
-    await createSignature(sigInput({ fileName: "///.pdf" }), ACTOR);
-    expect(sign.mock.calls[0]![0].publicId).toMatch(/^[0-9a-f-]{36}\.pdf$/);
   });
 
   // A raw asset is served at exactly its public id, so without the extension the delivery URL ends in
@@ -221,7 +199,100 @@ describe("createSignature — who may upload", () => {
     expect(sign.mock.calls[0]![0].publicId).toMatch(/^quote-[0-9a-f-]{36}$/);
     expect(sign.mock.calls[0]![0].resourceType).toBe("image");
   });
+});
 
+// ── The name a document downloads as ───────────────────────────────────────────────────────────
+//
+// Cloudinary sends no Content-Disposition, so the browser names a saved file after the LAST PATH
+// SEGMENT of the delivery URL — which is the public id. That single fact is what every test here is
+// about: the uuid has to stay (it is the uniqueness), and it has to stay out of the segment the user
+// reads, so it becomes a folder and the file name becomes the leaf.
+describe("createSignature — the name a raw document downloads as", () => {
+  /** The public id minted for one document, by media type. */
+  const idFor = async (fileName: string, mediaType = "application/pdf") => {
+    await createSignature(sigInput({ fileName, mediaType }), ACTOR);
+    return sign.mock.calls.at(-1)![0].publicId;
+  };
+
+  const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+  // The whole point. Before this the URL ended `finance_report_2026-08-26-d817abf6-….xlsx` and that
+  // is what Chrome wrote to the user's Downloads folder.
+  it("ends in the user's own file name, with the uuid moved into a folder", async () => {
+    expect(await idFor("Finance_Report_2026-08-26.xlsx", XLSX))
+      .toMatch(/^[0-9a-f-]{36}\/Finance_Report_2026-08-26\.xlsx$/);
+  });
+
+  // The old sanitiser lowercased, because the id was never meant to be read as a file name. Now it is
+  // one, and `FINANCE_REPORT` coming back as `finance_report` is a name the user did not choose.
+  it("preserves the case the user typed", async () => {
+    expect(await idFor("Quarterly_Report.PDF")).toContain("/Quarterly_Report.pdf");
+  });
+
+  // A dot is only dangerous at the START of a segment (or doubled). Interior dots are how half the
+  // world versions a document, and flattening them renames the file for no gain.
+  it("keeps interior dots so a versioned name survives", async () => {
+    expect(await idFor("invoice.final.v2.pdf")).toContain("/invoice.final.v2.pdf");
+  });
+
+  // Spaces, brackets and commas all occur in real supplier paperwork. None of them is safe to put in
+  // a signed URL path verbatim — a comma is Cloudinary's own transformation separator — so they are
+  // folded to a hyphen rather than dropped, which keeps the words apart.
+  it("folds characters that are unsafe in a delivery path down to hyphens", async () => {
+    expect(await idFor("PO-0064 (2).pdf")).toContain("/PO-0064-2.pdf");
+    expect(await idFor("MZ1200,Bracket,4.csv", "text/csv")).toContain("/MZ1200-Bracket-4.csv");
+  });
+
+  // THE security invariant. A public id is a PATH: a name that added a second `/`, or climbed with
+  // `..`, would move the asset out of the folder the signature committed to — and out of the uuid
+  // folder that makes it unique, which is how one upload could land on another's id.
+  it.each([
+    ["../../evil.xlsx", XLSX],
+    ["..\\evil.xlsx", XLSX],
+    ["A/B.xlsx", XLSX],
+    ["..", "application/pdf"],
+    ["....//....//passwd.pdf", "application/pdf"],
+  ])("cannot escape the uuid folder: %s", async (fileName, mediaType) => {
+    const id = await idFor(fileName, mediaType);
+    // Exactly one separator — the one this code put there.
+    expect(id.split("/")).toHaveLength(2);
+    const [uuid, leaf] = id.split("/");
+    expect(uuid).toMatch(/^[0-9a-f-]{36}$/);
+    expect(leaf!.startsWith(".")).toBe(false);
+    expect(leaf).not.toContain("..");
+    expect(leaf).not.toContain("\\");
+  });
+
+  // A name of nothing but characters we fold away is not an error — the uuid folder already carries
+  // the uniqueness, so the leaf only has to be a legible placeholder.
+  it("falls back to a readable leaf when nothing of the name survives", async () => {
+    expect(await idFor("日本語.xlsx", XLSX)).toMatch(/^[0-9a-f-]{36}\/file\.xlsx$/);
+    expect(await idFor("   .pdf")).toMatch(/^[0-9a-f-]{36}\/file\.pdf$/);
+  });
+
+  // Cloudinary caps a public id at 255 characters and the folder and uuid have already spent 60 of
+  // them. Trimming must not leave the name ending on a separator it was cut through.
+  it("caps a very long name without leaving it ending in a separator", async () => {
+    const id = await idFor(`${"a-".repeat(200)}.pdf`);
+    const leaf = id.split("/")[1]!;
+    expect(leaf.length).toBeLessThanOrEqual(64);
+    expect(leaf).toBe(leaf.replace(/-+\.pdf$/, ".pdf"));
+    expect(leaf.endsWith(".pdf")).toBe(true);
+  });
+
+  // Images are OUT OF SCOPE and must stay byte-for-byte as they were: they are previewed inline and
+  // never downloaded by name, and their delivery URL carries no extension for Cloudinary to key its
+  // format off. Changing their shape would buy nothing and put every avatar and photo at risk.
+  it("leaves an image public id in its existing shape", async () => {
+    await createSignature(
+      sigInput({ purpose: "damage_photo", mediaType: "image/jpeg", fileName: "Damaged Pallet.JPG", sizeBytes: 1000 }),
+      { ...ACTOR, permissions: ["inventory.adjust"] },
+    );
+    expect(sign.mock.calls.at(-1)![0].publicId).toMatch(/^damaged-pallet-[0-9a-f-]{36}$/);
+  });
+});
+
+describe("createSignature — the ledger row and the preset", () => {
   it("records the ledger row against the requesting actor", async () => {
     await createSignature(sigInput(), ACTOR);
     expect(create.mock.calls[0]![0]).toMatchObject({ actorId: "u1", purpose: "po_attachment", resourceType: "raw" });
