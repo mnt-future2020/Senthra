@@ -9,7 +9,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { Notice } from "@/components/ui/Notice";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
-import { toolbarActionsCls, toolbarBtn, toolbarInputCls, toolbarPrimaryBtn } from "@/components/ui/styles";
+import { compactListToolbarCls, toolbarActionsCls, toolbarBtn, toolbarInputCls, toolbarPrimaryBtn } from "@/components/ui/styles";
 import { StockRequestModal } from "@/components/dashboard/stock/StockRequestModal";
 import { preferenceOutcome, type PreferenceOutcome } from "@/lib/preferredWarehouse";
 import type { PagedStockRequests } from "@/services/customer.service";
@@ -346,7 +346,7 @@ export function StockRequestsView() {
       {/* Toolbar — search + status. Submissions accumulate for the life of the account and this list
           is already more than one page, so search matters MORE here than on Sites (3 rows, stable)
           which has had it all along. Filters group next to the search, as on every other portal list. */}
-      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs sm:flex-row sm:items-center">
+      <div className={compactListToolbarCls}>
         <div className="relative w-full sm:max-w-xs">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
           <input

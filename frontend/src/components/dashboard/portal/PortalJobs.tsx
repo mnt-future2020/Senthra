@@ -12,7 +12,7 @@ import { Select } from "@/components/ui/Select";
 import { FilterPopover } from "@/components/ui/FilterPopover";
 import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { SitePicker, siteOptionLabel } from "@/components/ui/SitePicker";
-import { toolbarBtn, toolbarInputCls } from "@/components/ui/styles";
+import { compactListToolbarCls, toolbarBtn, toolbarInputCls } from "@/components/ui/styles";
 import type { PagedPortalJobs } from "@/services/job.service";
 import type { JobType } from "@/types/job";
 import type { Msg } from "@/components/ui/types";
@@ -160,7 +160,7 @@ export function PortalJobs() {
       {msg && <Notice msg={msg} />}
 
       {/* Toolbar — search + status + sort */}
-      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs sm:flex-row sm:items-center">
+      <div className={compactListToolbarCls}>
         <div className="relative w-full sm:max-w-xs">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
           <input

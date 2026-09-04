@@ -15,7 +15,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { ExportButton } from "@/components/ui/ExportButton";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
-import { toolbarInputCls, toolbarPrimaryBtn } from "@/components/ui/styles";
+import { listToolbarCls, toolbarInputCls, toolbarPrimaryBtn } from "@/components/ui/styles";
 import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -145,7 +145,7 @@ function RentalRowActions({
                 <React.Fragment key={a.key}>
                   {/* Delete sits behind a divider — the destructive entry should not be the immediate
                       neighbour of the one above it in a menu people click quickly. */}
-                  {a.danger && idx > 0 && <div className="my-1 border-t border-[var(--border-2)]" />}
+                  {a.danger && idx > 0 && <div className="my-1 border-t border-[var(--border)]" />}
                   <MenuItem
                     icon={icons[a.key]}
                     danger={a.danger}
@@ -337,7 +337,7 @@ export function RentalItemsView() {
           already say what this list is, and on a 1024px laptop a title beside these five controls
           forced the toolbar onto a second line — a whole band spent restating the two words above it.
           Same shape as the IRM catalogue's toolbar, which is the list this one sits beside. */}
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
+      <div className={listToolbarCls}>
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input

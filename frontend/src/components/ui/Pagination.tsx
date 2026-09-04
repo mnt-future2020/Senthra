@@ -55,7 +55,7 @@ export function Pagination({
 }) {
   return (
     <div
-      className={`flex flex-col items-center justify-between gap-3 px-4 py-3 sm:flex-row ${
+      className={`flex flex-col items-center justify-between gap-3 px-4 py-3 sm:flex-row sm:flex-wrap ${
         embedded
           ? "shrink-0 border-t border-[var(--border)]"
           : "rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xs"

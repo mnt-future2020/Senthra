@@ -155,7 +155,7 @@ export function RolesView() {
 
   return (
     <div className="stack flex h-full flex-col">
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <div className="min-w-0">
           <h3 className="text-sm font-extrabold text-[var(--ink)]">Roles</h3>
           <p className="text-xs text-[var(--muted)]">

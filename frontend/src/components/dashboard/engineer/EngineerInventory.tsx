@@ -152,7 +152,7 @@ function CustomerStockPanel({ holdings }: { holdings: CustomerHolding[] }) {
 
   return (
     <>
-      <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
+      <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
         <PortalSearch value={t.query} onChange={t.setQuery} placeholder="Search item or customer…" />
         {(customerOptions.length > 2 || activeCustomer !== "") && (
           <Select size="sm" value={activeCustomer} onChange={setCustomer} options={customerOptions} ariaLabel="Filter by customer" />

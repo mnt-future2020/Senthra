@@ -487,7 +487,7 @@ export function CustomReportsView() {
               
               Cursor paging, the same control the Stock Movement feed uses — the server has always
               returned `nextCursor`/`hasMore`; this screen simply never asked for the next page. */}
-          <div className="flex shrink-0 flex-col items-center justify-between gap-2 border-t border-[var(--border)] px-4 py-2 sm:flex-row">
+          <div className="flex shrink-0 flex-col items-center justify-between gap-2 border-t border-[var(--border)] px-4 py-2 sm:flex-row sm:flex-wrap">
             <span className="text-[11px] text-[var(--muted)]">
               {/* "so far" while more exists — the count is what is on screen, not what matched, and a
                   bare "100 row(s)" under a partial table reads as a complete answer. */}

@@ -16,6 +16,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Select } from "@/components/ui/Select";
 import { listSupplierTypes } from "@/services/supplier-type.service";
 import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
+import { listToolbarCls } from "@/components/ui/styles";
 import type { Supplier, SupplierStatus } from "@/types/supplier";
 import type { UserStatus } from "@/types/user";
 
@@ -150,7 +151,7 @@ function SupplierRowActions({
                   </MenuItem>
                 </>
               )}
-              {canEdit && canDelete && <div className="my-1 border-t border-[var(--border-2)]" />}
+              {canEdit && canDelete && <div className="my-1 border-t border-[var(--border)]" />}
               {canDelete && (
                 <MenuItem icon={Trash2} danger onClick={() => { close(); onDelete(); }}>
                   Delete
@@ -341,7 +342,7 @@ export function SuppliersView() {
 
   return (
     <div className="stack flex h-full flex-col">
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
+      <div className={listToolbarCls}>
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input

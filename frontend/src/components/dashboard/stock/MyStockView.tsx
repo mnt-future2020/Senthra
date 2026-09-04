@@ -9,7 +9,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Notice } from "@/components/ui/Notice";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
-import { toolbarActionsCls, toolbarBtn, toolbarInputCls } from "@/components/ui/styles";
+import { compactListToolbarCls, toolbarActionsCls, toolbarBtn, toolbarInputCls } from "@/components/ui/styles";
 import type { PagedStockEntries } from "@/services/customer.service";
 import {
   clickableRowCls,
@@ -258,7 +258,7 @@ export function MyStockView() {
       {visibleExportMsg && <Notice msg={visibleExportMsg} />}
 
       {/* Toolbar — search + status. Same geometry as the Sites and Submissions toolbars. */}
-      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs sm:flex-row sm:items-center">
+      <div className={compactListToolbarCls}>
         <div className="relative w-full sm:max-w-xs">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
           <input

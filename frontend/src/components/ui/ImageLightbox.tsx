@@ -9,6 +9,8 @@ import * as React from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 
+import { useScrollLock } from "@/hooks/useScrollLock";
+
 export function ImageLightbox({
   src,
   alt = "Image",
@@ -20,6 +22,10 @@ export function ImageLightbox({
   caption?: React.ReactNode;
   onClose: () => void;
 }) {
+  // Always open when mounted, and frequently mounted ON TOP of a Modal that already holds the
+  // lock — which is exactly the case the ref count in scrollLock.ts exists for: closing the photo
+  // must not unlock the page while the modal underneath is still up.
+  useScrollLock(true);
   React.useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
     // Escape is handled in the CAPTURE phase and stopped there, because this lightbox can open on

@@ -4,6 +4,8 @@ import * as React from "react";
 import { createPortal } from "react-dom";
 import { AlertTriangle, Loader2 } from "lucide-react";
 
+import { useScrollLock } from "@/hooks/useScrollLock";
+
 // Focusable controls inside the dialog — used to seed initial focus and trap Tab. Same list as Modal.
 const FOCUSABLE_SELECTOR =
   'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
@@ -43,10 +45,11 @@ export function ConfirmDialog({
   /**
    * Form content the confirmation needs — typically a required reason.
    *
-   * Rendered at the dialog's FULL WIDTH, deliberately outside the icon column. `message` is the
-   * icon's description and is indented past it, which is right for a sentence and wrong for an input:
-   * a three-row textarea in that column leaves a tall dead strip beside it and reads as misaligned
-   * rather than as indented.
+   * Rendered below `message`, at the dialog's FULL WIDTH. So is `message` itself: only the title sits
+   * in the icon's row. Indenting the body past a 40px icon inside a ~450px panel left roughly 350px
+   * of measure, and these messages are not one-liners — the rental delete names the item, its code
+   * and four things that block deletion, so it wrapped into a tall narrow ribbon that read as a
+   * column of fragments rather than as a sentence. Full width buys ~30% more characters per line.
    */
   field?: React.ReactNode;
   confirmLabel?: string;
@@ -55,6 +58,9 @@ export function ConfirmDialog({
   onConfirm: () => void;
   onClose: () => void;
 }) {
+  // The list behind this dialog must not scroll while it is up — see scrollLock.ts. Measured: at
+  // 375x667 pressing End over this dialog moved the Warehouses list from y=250 to y=558.
+  useScrollLock(open);
   const panelRef = React.useRef<HTMLDivElement>(null);
   // Escape and backdrop dismissal go through refs so the focus effect depends only on `open`.
   // Callers pass a fresh onClose each render and re-running the effect would clobber the captured
@@ -122,7 +128,13 @@ export function ConfirmDialog({
   if (!open || typeof document === "undefined") return null;
   return createPortal(
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4"
+      // Scrolls, and starts at the TOP on a short viewport — copied from Modal rather than invented.
+      // `items-center` with no scroll is fine until the content is taller than the space: a phone in
+      // landscape, or any phone with the keyboard up over one of the four dialogs that carry a
+      // reason textarea. Then the panel is centred on a box it does not fit in, the ends are clipped
+      // beyond both edges, and Cancel and Confirm are equally unreachable — on a dialog whose whole
+      // job is asking a question you must be able to answer.
+      className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/50 p-4 sm:items-center"
       onClick={busy ? undefined : onClose}
     >
       <div
@@ -132,12 +144,12 @@ export function ConfirmDialog({
         aria-labelledby={titleId}
         aria-describedby={messageId}
         tabIndex={-1}
-        className="anim-fade-in w-full max-w-sm rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-2xl outline-none"
+        className="anim-fade-in my-8 w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-2xl outline-none"
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => e.stopPropagation()}
         onReset={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start gap-3">
+        <div className="flex items-center gap-3">
           <span
             aria-hidden="true"
             className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${
@@ -148,11 +160,13 @@ export function ConfirmDialog({
           >
             <AlertTriangle className="h-5 w-5" />
           </span>
-          <div className="min-w-0">
-            <h3 id={titleId} className="text-base font-extrabold text-[var(--ink)]">{title}</h3>
-            <div id={messageId} className="mt-1 text-sm text-[var(--muted)]">{message}</div>
-          </div>
+          <h3 id={titleId} className="min-w-0 text-base font-extrabold text-[var(--ink)]">{title}</h3>
         </div>
+        {/* `break-words`: every message here interpolates a user-entered name, and there is no global
+            overflow-wrap rule. A name typed without spaces is one long token that a block element
+            will not break — it runs straight out of the panel, and at 360px it takes the dialog's
+            right edge with it. */}
+        <div id={messageId} className="mt-3 text-sm leading-relaxed break-words text-[var(--muted)]">{message}</div>
         {field && <div className="mt-4">{field}</div>}
         <div className="mt-5 flex justify-end gap-2">
           <button

@@ -72,3 +72,7 @@ reference/
 .env
 .env.*
 !.env.example
+
+# Playwright MCP browser-session output (console logs + page snapshots from local
+# UI verification). Regenerated on every run, never worth committing.
+.playwright-mcp/

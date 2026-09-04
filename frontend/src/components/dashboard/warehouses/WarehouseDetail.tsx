@@ -19,6 +19,8 @@ import { useAttention } from "@/hooks/useAttention";
 import { useEntityAttention } from "@/hooks/useEntityAttention";
 import { CountPill } from "@/components/dashboard/shell/TabCount";
 import { followQuery, keysForPane, keysForTab } from "./warehouseAttention";
+import { warehouseDeactivateDetail } from "./warehouseDeactivate";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import type { AttentionTone } from "@/services/attention.service";
 import { NoStaffAssigned, StaffChip } from "@/components/ui/StaffChip";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -152,6 +154,7 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
   const { pushToast } = useDashboard();
   const [w, setW] = React.useState<Warehouse>(initial);
   const [busy, setBusy] = React.useState(false);
+  const [confirmDeactivate, setConfirmDeactivate] = React.useState(false);
   const canEdit = can("warehouse.edit");
 
   // This warehouse's own share of each queue. Keys the actor may not act on are already absent
@@ -171,8 +174,9 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
   const activeTab = visibleTabs.find((t) => t.key === requestedTab) ?? visibleTabs[0];
   const tab: Tab = activeTab?.key ?? "overview";
 
-  const toggleStatus = async () => {
-    const next = w.status === "active" ? "inactive" : "active";
+  // Unchanged mutation. The confirmation added below sits in front of it, so the request, the toast
+  // and the failure path are byte for byte what they were.
+  const applyStatus = async (next: "active" | "inactive") => {
     setBusy(true);
     try {
       const updated = await warehouseService.updateWarehouse(w.id, { status: next });
@@ -183,6 +187,23 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  // Deactivate asks, activate does not — the same asymmetry as the list screen, and for the same
+  // reason. The two surfaces share the dialog's copy (warehouseDeactivate.ts) so the consequence
+  // cannot be reworded on one of them and left stale on the other.
+  const toggleStatus = () => {
+    if (w.status === "active") {
+      setConfirmDeactivate(true);
+      return;
+    }
+    void applyStatus("active");
+  };
+
+  const onConfirmDeactivate = async () => {
+    if (busy) return;
+    await applyStatus("inactive");
+    setConfirmDeactivate(false);
   };
 
   return (
@@ -266,6 +287,23 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
         {tab === "transactions" && <WarehouseTransactions warehouseId={w.id} />}
         {tab === "audit" && <AuditTrail warehouseId={w.id} />}
       </div>
+
+      {/* `mine` is this warehouse's own attention row — already loaded above for the tab counts, so
+          the dialog states the same figure the tabs are showing, from one fetch. */}
+      <ConfirmDialog
+        open={confirmDeactivate}
+        title="Deactivate warehouse"
+        message={
+          <>
+            Deactivate <strong className="text-[var(--ink)]">{w.name}</strong> ({w.code})?{" "}
+            {warehouseDeactivateDetail(mine)}
+          </>
+        }
+        confirmLabel="Deactivate"
+        busy={busy}
+        onConfirm={onConfirmDeactivate}
+        onClose={() => setConfirmDeactivate(false)}
+      />
     </div>
   );
 }
@@ -729,7 +767,7 @@ function IncomingStock({
       {/* Toolbar. Rendered only once there IS data — an empty warehouse gets the empty state alone,
           not controls with nothing to control. Search covers item + customer name + code; the two
           menus narrow by customer and by how far along the receipt is. */}
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 sm:flex-row sm:items-center">
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 sm:flex-row sm:flex-wrap sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
@@ -1126,7 +1164,7 @@ function WarehouseStockEntries({
   return (
     <div className="flex h-full flex-col gap-3">
       {/* Search + status filter */}
-      <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
+      <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input

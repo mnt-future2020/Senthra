@@ -80,6 +80,35 @@ export const toolbarPrimaryBtn =
 export const toolbarActionsCls = "flex flex-wrap items-center gap-2";
 
 /**
+ * The CARD a list page's toolbar row sits in — the surface holding search, the filter Selects, the
+ * Filters trigger, Export and the page's primary action.
+ *
+ * Every list page had this string written out by hand, and half of them wrote it WITHOUT
+ * `sm:flex-wrap`. That single missing class is not cosmetic: a flex row that cannot wrap and cannot
+ * fit pushes its last children straight out of the card. Measured in Chrome against the real
+ * compiled CSS, at a 768px viewport (where `sm:flex-row` is live and the sidebar has taken 256px)
+ * the row overflowed by 78px on Customers, 199px on Warehouses, 182px on Suppliers, 142px on IRM
+ * Items, 92px on Rental Items and 190px on Portal Jobs — carrying "Add customer", "Add warehouse",
+ * "Add supplier", Export and the Filters trigger past the card's right edge, where `#app`'s
+ * `overflow-hidden` clipped them with no scrollbar and no way to reach them.
+ *
+ * So the wrap lives HERE, once, rather than being remembered thirteen times. A toolbar that fits
+ * still renders as a single row — wrapping costs nothing until it is needed.
+ *
+ * Two densities, differing only in gap and padding: the standard list page, and the compact one the
+ * portal and engineer screens use. Anything else about them must stay the same, which is the other
+ * reason to name them.
+ */
+const listToolbarBase =
+  "flex shrink-0 flex-col rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xs sm:flex-row sm:flex-wrap sm:items-center";
+
+/** Standard list-page toolbar card. */
+export const listToolbarCls = `${listToolbarBase} gap-3 p-4`;
+
+/** Denser variant for the customer portal and engineer screens. */
+export const compactListToolbarCls = `${listToolbarBase} gap-2 p-3`;
+
+/**
  * A COUNT PILL — the shape every pending-work number wears, wherever it appears.
  *
  * The height and the minimum width are stated, not inherited from padding, and that is the whole

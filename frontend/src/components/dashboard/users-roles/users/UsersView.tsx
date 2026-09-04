@@ -33,6 +33,7 @@ import { FilterPopover } from "@/components/ui/FilterPopover";
 import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
+import { usersHasFilters, usersPopoverFilterCount } from "./usersFilters";
 
 const PAGE_SIZE = 20;
 
@@ -140,7 +141,7 @@ function RowActions({
                 View
               </MenuItem>
               {(canEdit || canDelete) && (
-                <div className="my-1 border-t border-[var(--border-2)]" />
+                <div className="my-1 border-t border-[var(--border)]" />
               )}
               {canEdit && (
                 <>
@@ -159,7 +160,7 @@ function RowActions({
                 </>
               )}
               {canEdit && canDelete && (
-                <div className="my-1 border-t border-[var(--border-2)]" />
+                <div className="my-1 border-t border-[var(--border)]" />
               )}
               {canDelete && (
                 <MenuItem icon={Trash2} danger onClick={() => { close(); onDelete(); }}>
@@ -281,6 +282,11 @@ export function UsersView() {
     user: null,
   });
   const [deleting, setDeleting] = React.useState(false);
+  const [suspendConfirm, setSuspendConfirm] = React.useState<{ open: boolean; user: DirectoryUser | null }>({
+    open: false,
+    user: null,
+  });
+  const [suspending, setSuspending] = React.useState(false);
   const [tempPw, setTempPw] = React.useState<{ open: boolean; email: string; password: string; isResend: boolean }>({
     open: false,
     email: "",
@@ -363,14 +369,43 @@ export function UsersView() {
 
   const refresh = () => setRefreshKey((k) => k + 1);
 
-  const toggleStatus = async (user: DirectoryUser) => {
-    const next: UserStatus = user.status === "active" ? "suspended" : "active";
+  // The mutation, untouched: same service call, same refresh, same toast, same error wording. The
+  // confirmation is a UX layer in FRONT of this and nothing else — authorisation and validation stay
+  // where they were, on the server.
+  const applyStatus = async (user: DirectoryUser, next: UserStatus) => {
     try {
       await userService.setUserStatus(user.id, next);
       refresh();
       pushToast(`${user.firstName} ${next === "active" ? "activated" : "suspended"}.`, "success");
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Action failed.", "alert");
+    }
+  };
+
+  // Suspending asks first; activating does not.
+  //
+  // Every other status toggle in this product is a record dropping out of a picker. This one locks a
+  // COLLEAGUE out of the application on the next request they make — they are not told why, and the
+  // person who did it finds out from a toast that has already faded. It sits one row below Edit in a
+  // 44px-wide menu, and the only thing that distinguished it from a misclick was a toast.
+  const toggleStatus = (user: DirectoryUser) => {
+    if (user.status === "active") {
+      setSuspendConfirm({ open: true, user });
+      return;
+    }
+    void applyStatus(user, "active");
+  };
+
+  const doSuspend = async () => {
+    // Both halves matter: ConfirmDialog disables its buttons while `busy`, and this makes a second
+    // call a no-op regardless — one click must never become two suspend requests.
+    if (!suspendConfirm.user || suspending) return;
+    setSuspending(true);
+    try {
+      await applyStatus(suspendConfirm.user, "suspended");
+      setSuspendConfirm({ open: false, user: null });
+    } finally {
+      setSuspending(false);
     }
   };
 
@@ -401,13 +436,15 @@ export function UsersView() {
   };
 
   const showSkeleton = loading && users.length === 0;
-  const hasFilters =
-    Boolean(search) || statusFilter !== "all" || roleFilter !== "all";
+  // Search / status / role / added-range — see usersFilters for why sort is not one of them, and for
+  // why this and the Filters badge are two functions rather than one.
+  const filterState = { search, status: statusFilter, role: roleFilter, addedFrom, addedTo };
+  const hasFilters = usersHasFilters(filterState);
 
   return (
     <div className="stack flex h-full flex-col">
       {/* Toolbar */}
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:flex-wrap sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
@@ -431,16 +468,6 @@ export function UsersView() {
         />
         <Select
           size="sm"
-          value={roleFilter}
-          onChange={(v) => patch({ role: v === "all" ? null : v })}
-          ariaLabel="Role filter"
-          options={[
-            { value: "all", label: "All roles" },
-            ...roles.map((r) => ({ value: r.id, label: r.name })),
-          ]}
-        />
-        <Select
-          size="sm"
           value={sort}
           onChange={(v) => patch({ sort: v === "newest" ? null : v })}
           ariaLabel="Sort"
@@ -450,11 +477,29 @@ export function UsersView() {
             { value: "name", label: "Name (A–Z)" },
           ]}
         />
-        {/* WHEN the account was added — the "Added" column, which had no way to be filtered on. */}
+        {/* The secondary filters, folded behind one trigger the way Jobs / Purchase Orders /
+            Inventory already fold theirs. The row was seven controls wide with no wrap, so a 768px
+            screen pushed "Add user" clean off the card; folding two of them away is what actually
+            shortens it, and the wrap above is the safety net rather than the fix.
+            ROLE is the one that moved: set once and left, the widest control in the row (a role
+            name), and answering a question the table's own Role column already answers. SEARCH and
+            STATUS stay out — they are what this list is read by. SORT is not a filter at all.
+            The badge counts BOTH — see usersFilters for why a hidden filter must still show. */}
         <FilterPopover
-          activeCount={addedFrom || addedTo ? 1 : 0}
-          onClear={() => patch({ addedFrom: null, addedTo: null })}
+          activeCount={usersPopoverFilterCount(filterState)}
+          onClear={() => patch({ role: null, addedFrom: null, addedTo: null })}
         >
+          <Select
+            size="sm"
+            value={roleFilter}
+            onChange={(v) => patch({ role: v === "all" ? null : v })}
+            ariaLabel="Role filter"
+            options={[
+              { value: "all", label: "All roles" },
+              ...roles.map((r) => ({ value: r.id, label: r.name })),
+            ]}
+          />
+          {/* WHEN the account was added — the "Added" column, which had no way to be filtered on. */}
           <DateRangeFilter
             label="Added"
             showLabel
@@ -596,6 +641,27 @@ export function UsersView() {
         confirmLabel="Remove"
         onConfirm={doDelete}
         onClose={() => setConfirm({ open: false, user: null })}
+      />
+
+      {/* `danger` here and NOT on the warehouse deactivate: this one takes someone's access away
+          until a human gives it back, which is the same shape of consequence as a delete. */}
+      <ConfirmDialog
+        open={suspendConfirm.open}
+        danger
+        busy={suspending}
+        title="Suspend user"
+        message={
+          <>
+            Suspend{" "}
+            <strong className="text-[var(--ink)]">
+              {suspendConfirm.user?.firstName} {suspendConfirm.user?.lastName}
+            </strong>
+            ? They won&apos;t be able to sign in until someone reactivates them.
+          </>
+        }
+        confirmLabel="Suspend"
+        onConfirm={doSuspend}
+        onClose={() => setSuspendConfirm({ open: false, user: null })}
       />
 
       <TempPasswordModal

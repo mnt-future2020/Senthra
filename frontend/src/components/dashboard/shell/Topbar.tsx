@@ -50,8 +50,15 @@ export function Topbar({
       </div>
 
       {/* Portal target for the current page's tabs / actions. `empty:hidden` keeps it from claiming
-          a share of the header's gap on a page that has none. */}
-      <div ref={actionSlotRef} className="flex flex-wrap items-center justify-end gap-2 empty:hidden" />
+          a share of the header's gap on a page that has none.
+
+          `min-w-0` is load-bearing, not tidying. A flex item's automatic minimum size is the
+          min-content size of what's inside it, so without this the slot refused to go narrower than
+          the tab rail's widest possible layout (441px for the four Users & Roles pills) — on a 360px
+          phone it simply stuck out past the header, and `#app`'s `overflow-hidden` clipped the far
+          end with no scrollbar to say so. The rail's own horizontal scrolling can only help once its
+          container is allowed to be narrower than its contents. */}
+      <div ref={actionSlotRef} className="flex min-w-0 flex-wrap items-center justify-end gap-2 empty:hidden" />
     </header>
   );
 }
