@@ -16,6 +16,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
 import { Select } from "@/components/ui/Select";
 import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
+import { listToolbarCls } from "@/components/ui/styles";
 import { EntityCountPill } from "@/components/dashboard/shell/TabCount";
 import { useEntityAttention } from "@/hooks/useEntityAttention";
 import type { CustomerStatus, CustomerSummary } from "@/types/customer";
@@ -152,7 +153,7 @@ function CustomerRowActions({
                   </MenuItem>
                 </>
               )}
-              {canEdit && canDelete && <div className="my-1 border-t border-[var(--border-2)]" />}
+              {canEdit && canDelete && <div className="my-1 border-t border-[var(--border)]" />}
               {canDelete && (
                 <MenuItem icon={Trash2} danger onClick={() => { close(); onDelete(); }}>
                   Delete
@@ -348,7 +349,7 @@ export function CustomersView() {
       {/* No page header here — CustomersPanel owns it, so it stays put while you switch tabs
           (same split as WarehousesView / SuppliersView). */}
       {/* Toolbar: search + filter + sort + add */}
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
+      <div className={listToolbarCls}>
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input

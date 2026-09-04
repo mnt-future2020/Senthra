@@ -16,8 +16,10 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Select } from "@/components/ui/Select";
 import { listWarehouseTypes } from "@/services/warehouse-type.service";
 import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
+import { listToolbarCls } from "@/components/ui/styles";
 import { EntityCountPill } from "@/components/dashboard/shell/TabCount";
 import { useEntityAttention } from "@/hooks/useEntityAttention";
+import { warehouseDeactivateDetail } from "./warehouseDeactivate";
 import type { Warehouse, WarehouseStatus } from "@/types/warehouse";
 import type { UserStatus } from "@/types/user";
 
@@ -168,7 +170,7 @@ function WarehouseRowActions({
                   </MenuItem>
                 </>
               )}
-              {canEdit && canDelete && <div className="my-1 border-t border-[var(--border-2)]" />}
+              {canEdit && canDelete && <div className="my-1 border-t border-[var(--border)]" />}
               {canDelete && (
                 <MenuItem icon={Trash2} danger onClick={() => { close(); onDelete(); }}>
                   Delete
@@ -248,6 +250,11 @@ export function WarehousesView() {
     warehouse: null,
   });
   const [deleting, setDeleting] = React.useState(false);
+  const [statusConfirm, setStatusConfirm] = React.useState<{ open: boolean; warehouse: Warehouse | null }>({
+    open: false,
+    warehouse: null,
+  });
+  const [deactivating, setDeactivating] = React.useState(false);
 
   const canEdit = can("warehouse.edit");
   const canDelete = can("warehouse.delete");
@@ -331,14 +338,39 @@ export function WarehousesView() {
   const showSkeleton = loading && warehouses.length === 0;
   const isFiltered = statusFilter !== "all" || Boolean(search);
 
-  const toggleStatus = async (w: Warehouse) => {
-    const next = w.status === "active" ? "inactive" : "active";
+  // The status patch itself — unchanged, and still the ONLY thing that mutates. Everything the
+  // confirmation adds sits in front of this, so an activate is exactly as immediate as it was.
+  const applyStatus = async (w: Warehouse, next: "active" | "inactive") => {
     try {
       await warehouseService.updateWarehouse(w.id, { status: next });
       pushToast(next === "inactive" ? "Warehouse deactivated." : "Warehouse activated.", "success");
       setRefreshKey((k) => k + 1);
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Could not update the warehouse.", "alert");
+    }
+  };
+
+  // Deactivating asks first; ACTIVATING never does. Re-enabling a warehouse blocks nothing and
+  // undoes nothing, and a dialog on the recovery path is how a reversible action starts to feel as
+  // dangerous as a delete. See warehouseDeactivate.ts for why the deactivate direction earns one.
+  const toggleStatus = (w: Warehouse) => {
+    if (w.status === "active") {
+      setStatusConfirm({ open: true, warehouse: w });
+      return;
+    }
+    void applyStatus(w, "active");
+  };
+
+  const onConfirmDeactivate = async () => {
+    // Guards the double-click: ConfirmDialog already disables both buttons while `busy`, and this
+    // makes a second call a no-op even if one gets through (a stray Enter on a focused button).
+    if (!statusConfirm.warehouse || deactivating) return;
+    setDeactivating(true);
+    try {
+      await applyStatus(statusConfirm.warehouse, "inactive");
+      setStatusConfirm({ open: false, warehouse: null });
+    } finally {
+      setDeactivating(false);
     }
   };
 
@@ -365,7 +397,7 @@ export function WarehousesView() {
           is done inside a warehouse and no cross-warehouse screen exists — so clicking one reloaded
           the page the user was already standing on. The counts now live on the rows below, where the
           number names the warehouse you have to open and clicking it takes you there. */}
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
+      <div className={listToolbarCls}>
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
@@ -569,6 +601,29 @@ export function WarehousesView() {
         busy={deleting}
         onConfirm={onDelete}
         onClose={() => setConfirm({ open: false, warehouse: null })}
+      />
+
+      {/* Informative, not merely interrogative: a bare "are you sure?" would cost a click and tell
+          the user nothing they did not already know. The count comes from the same attention row the
+          "Needs attention here" column renders, so the dialog can never contradict the table behind
+          it. NOT `danger` — deactivating is reversible from the same menu, and painting it in the
+          delete colour would say otherwise. */}
+      <ConfirmDialog
+        open={statusConfirm.open}
+        title="Deactivate warehouse"
+        message={
+          <>
+            Deactivate <strong className="text-[var(--ink)]">{statusConfirm.warehouse?.name}</strong>{" "}
+            ({statusConfirm.warehouse?.code})?{" "}
+            {warehouseDeactivateDetail(
+              statusConfirm.warehouse ? attention[statusConfirm.warehouse.id] : undefined,
+            )}
+          </>
+        }
+        confirmLabel="Deactivate"
+        busy={deactivating}
+        onConfirm={onConfirmDeactivate}
+        onClose={() => setStatusConfirm({ open: false, warehouse: null })}
       />
     </div>
   );

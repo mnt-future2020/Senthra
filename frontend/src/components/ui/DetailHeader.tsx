@@ -40,7 +40,7 @@ export function DetailHeader({ title, badges, meta, actions, avatar, storageKey 
 
   return (
     <div
-      className={`flex shrink-0 flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] shadow-xs sm:flex-row sm:items-start sm:justify-between ${isCollapsed ? "px-4 py-2.5" : "p-5"}`}
+      className={`flex shrink-0 flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] shadow-xs sm:flex-row sm:flex-wrap sm:items-start sm:justify-between ${isCollapsed ? "px-4 py-2.5" : "p-5"}`}
       style={{ borderRadius: "var(--radius)" }}
     >
       <div className="flex min-w-0 items-center gap-2">

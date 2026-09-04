@@ -721,8 +721,20 @@ export function DamagedStockView({
           the server, so a filter that matches nothing emptied `rows` and took the entire toolbar —
           pills, search box and all — off screen with it. A filter must never be able to remove the
           controls that clear it. */}
+      {/* `sm:flex-wrap` for the same reason listToolbarCls carries it — but NOT listToolbarCls itself.
+          This is an inner filter ROW, not a toolbar card: it has no surface, no border, no shadow and
+          no padding of its own, because it sits directly on the page above the table's card. Adopting
+          the shared constant would draw a card here that has never been here.
+
+          Without the wrap the row cannot reflow, and its first child is a `shrink-0` pill group, so
+          the squeeze lands entirely on the search box and Export. Measured in Chrome against the
+          running app at a 768px viewport, on a warehouse where the pool pills were not even rendered:
+          the row's content already needed 474px inside a 448px box — 26px over, with `flex-wrap:
+          nowrap`. With all four pool pills present there is another ~350px of rigid content to place.
+          One `sm:flex-wrap` lets the row drop to a second line instead; a row that fits still renders
+          as one line, so nothing changes on the widths where it was already fine. */}
       {rows && (hasAnyDamage || anyFilterActive) && (
-        <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
+        <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
           {/* WHOSE damaged stock. Shown only when the tab actually holds more than one pool — a control
               that cannot change the list is a control the reader has to test to learn that. Ordered
               company → customer → rental, the same order as the Inventory pills above it, so the two

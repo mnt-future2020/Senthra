@@ -4,6 +4,8 @@ import * as React from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 
+import { useScrollLock } from "@/hooks/useScrollLock";
+
 // Focusable controls inside the dialog — used to seed initial focus and trap Tab.
 const FOCUSABLE_SELECTOR =
   'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
@@ -35,6 +37,9 @@ export function Modal({
   // menus (the shared Select) or use inline lists, never ones containing e.g. StockItemPicker.
   scrollBody?: boolean;
 }) {
+  // The page behind a dialog must not scroll — see scrollLock.ts. Above `sm` the document is not
+  // scrollable at all, so this is a no-op there.
+  useScrollLock(open);
   const panelRef = React.useRef<HTMLDivElement>(null);
   // Route onClose through a ref so the focus effect depends only on `open` — callers
   // pass a changing onClose (e.g. `busy ? noop : onClose`), and re-running the effect

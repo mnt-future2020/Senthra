@@ -4,6 +4,7 @@ import * as React from "react";
 import { X } from "lucide-react";
 
 import type { AuditEntry } from "@/types/audit";
+import { useScrollLock } from "@/hooks/useScrollLock";
 import { actionLabel, absoluteTime } from "./auditDisplay";
 
 // Right-side slide-over showing the full audit entry incl. pretty-printed metadata.
@@ -15,6 +16,8 @@ export function AuditEntryDrawer({
   entry: AuditEntry | null;
   onClose: () => void;
 }) {
+  // Open exactly when there is an entry — see scrollLock.ts.
+  useScrollLock(entry !== null);
   React.useEffect(() => {
     if (!entry) return;
     const onKey = (e: KeyboardEvent) => {
