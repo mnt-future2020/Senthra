@@ -1,6 +1,6 @@
 import React from "react";
 import { Redirect, Tabs } from "expo-router";
-import type { BottomTabBarButtonProps } from "@react-navigation/bottom-tabs";
+import type { BottomTabBarButtonProps } from "expo-router/js-tabs";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { Animated, Pressable, StyleSheet, Text, View } from "react-native";
 import { Image } from "expo-image";

@@ -18,12 +18,12 @@ import {
 import Ionicons from "@expo/vector-icons/Ionicons";
 import type { StyleProp, TextInputProps, ViewStyle } from "react-native";
 import { BlurView } from "expo-blur";
-// Expo Router is built on react-navigation. Import these contexts from the
-// react-navigation packages directly (both pinned in package.json to the exact
-// versions Expo Router resolves, so npm dedupes to a single copy — two copies
-// would give us a context instance the navigator never populates).
-import { HeaderHeightContext } from "@react-navigation/elements";
-import { BottomTabBarHeightContext } from "@react-navigation/bottom-tabs";
+// As of SDK 56 Expo Router vendors react-navigation rather than depending on it,
+// so these contexts come from Expo Router's own subpaths. Importing the standalone
+// @react-navigation packages here would give us a second context instance that the
+// navigator never populates.
+import { HeaderHeightContext } from "expo-router/react-navigation";
+import { BottomTabBarHeightContext } from "expo-router/js-tabs";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors, statusTone, toneColors } from "../lib/theme";
 import { titleCase } from "../lib/format";
