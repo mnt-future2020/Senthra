@@ -9,10 +9,12 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import type { Customer } from "@/types/customer";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { COUNTRY_OPTIONS } from "@/lib/countryOptions";
 import { Select } from "@/components/ui/Select";
 import { Avatar } from "@/components/ui/Avatar";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { SuggestInput } from "@/components/ui/SuggestInput";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
 import { PostcodeField } from "@/components/ui/PostcodeField";
 import { EMAIL_RE, UK_POSTCODE_RE, WEBSITE_RE, isPhone } from "@/lib/validation";
@@ -22,8 +24,9 @@ import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 const CUSTOMERS_LIST = "/dashboard/customers";
 
-// Suggestions for the (free-text) industry + country pickers — rendered as a
-// <datalist>, so a user gets select-like options but can still type anything.
+// Suggestions for the (free-text) industry + country pickers. Offered through `SuggestInput`
+// rather than a native <datalist> — same "pick one or type your own" behaviour, but the popup is
+// the app's, so it follows the theme, accent and corner radius like every other dropdown.
 const INDUSTRY_OPTIONS = [
   "Telecoms",
   "Construction",
@@ -36,8 +39,6 @@ const INDUSTRY_OPTIONS = [
   "Logistics",
   "Manufacturing",
 ];
-const COUNTRY_OPTIONS = ["United Kingdom", "Ireland", "France", "Germany", "Netherlands", "Spain"];
-
 function validate(v: {
   name: string;
   email: string;
@@ -332,19 +333,14 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
               </div>
               <div>
                 <label className={labelCls}>Industry / sector</label>
-                <input
-                  className={inputCls}
+                <SuggestInput
+                  ariaLabel="Industry / sector"
                   value={industry}
-                  onChange={(e) => setIndustry(e.target.value)}
+                  onChange={setIndustry}
+                  suggestions={INDUSTRY_OPTIONS}
                   placeholder="e.g. Telecoms"
-                  list="industry-options"
                   maxLength={80}
                 />
-                <datalist id="industry-options">
-                  {INDUSTRY_OPTIONS.map((opt) => (
-                    <option key={opt} value={opt} />
-                  ))}
-                </datalist>
               </div>
               <div>
                 <label className={labelCls}>Website</label>
@@ -495,19 +491,14 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
               />
               <div>
                 <label className={labelCls}>Country</label>
-                <input
-                  className={inputCls}
+                <SuggestInput
+                  ariaLabel="Country"
                   value={country}
-                  onChange={(e) => setCountry(e.target.value)}
+                  onChange={setCountry}
+                  suggestions={COUNTRY_OPTIONS}
                   placeholder="United Kingdom"
-                  list="country-options"
                   maxLength={80}
                 />
-                <datalist id="country-options">
-                  {COUNTRY_OPTIONS.map((opt) => (
-                    <option key={opt} value={opt} />
-                  ))}
-                </datalist>
               </div>
             </div>
           </FormSection>

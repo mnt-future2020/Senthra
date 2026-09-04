@@ -344,7 +344,7 @@ export function ScheduleForm({
       ) : null}
 
       <label className="flex items-center gap-2 text-xs font-semibold text-[var(--ink)]">
-        <input type="checkbox" checked={draft.enabled} onChange={(e) => set({ enabled: e.target.checked })} />
+        <input type="checkbox" checked={draft.enabled} onChange={(e) => set({ enabled: e.target.checked })} className="h-4 w-4 accent-[var(--accent)]" />
         Active
       </label>
 

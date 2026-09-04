@@ -5,6 +5,7 @@ import { Loader2 } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
 import { Modal } from "@/components/ui/Modal";
+import { SuggestInput } from "@/components/ui/SuggestInput";
 import { Select } from "@/components/ui/Select";
 import { RequiredMark } from "@/components/ui/FormScaffold";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
@@ -117,19 +118,14 @@ export function ProjectModal({
           </div>
           <div>
             <label className={labelCls}>Project type</label>
-            <input
-              className={inputCls}
+            <SuggestInput
               value={type}
-              onChange={(e) => setType(e.target.value)}
+              onChange={setType}
+              suggestions={TYPE_SUGGESTIONS}
+              ariaLabel="Project type"
               placeholder="e.g. Migration"
-              list="project-type-options"
               maxLength={80}
             />
-            <datalist id="project-type-options">
-              {TYPE_SUGGESTIONS.map((t) => (
-                <option key={t} value={t} />
-              ))}
-            </datalist>
           </div>
           <div>
             <label className={labelCls}>Status</label>

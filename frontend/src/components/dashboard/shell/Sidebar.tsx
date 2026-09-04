@@ -31,6 +31,7 @@ import { useBranding } from "@/hooks/useBranding";
 import { useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { BrandMark } from "@/components/branding/BrandMark";
 import { optimizeCloudinaryUrl } from "@/lib/utils";
+import { dropdownRadius, dropdownSurfaceCls } from "@/components/ui/styles";
 import { isAdminNavItemVisible } from "@/lib/nav";
 import { NavBadge } from "./NavBadge";
 
@@ -391,7 +392,7 @@ export function Sidebar({
           />
 
           {showProfileDropdown && (
-            <div className="absolute bottom-12 left-0 w-full bg-[var(--surface)] text-[var(--ink)] rounded-xl shadow-2xl border border-[var(--border)] py-1.5 z-50 text-xs anim-fade-in block">
+            <div className={`absolute bottom-12 left-0 w-full text-[var(--ink)] py-1.5 z-50 text-xs anim-fade-in block ${dropdownSurfaceCls}`} style={dropdownRadius}>
               <div className="px-3 py-2 border-b border-[var(--border-2)]">
                 <p className="font-semibold text-[var(--ink)]">Signed in as</p>
                 <p className="text-[10px] text-[var(--faint)] font-mono truncate">

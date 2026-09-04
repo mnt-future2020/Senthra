@@ -4,6 +4,7 @@ import * as React from "react";
 import { Check, ChevronDown, X } from "lucide-react";
 
 import { multiSelectKey } from "./multiSelectKeys";
+import { dropdownRadius, dropdownSurfaceCls } from "./styles";
 
 export interface MultiSelectOption {
   value: string;
@@ -187,8 +188,8 @@ export function MultiSelect({
           id={listId}
           role="listbox"
           aria-multiselectable="true"
-          className="absolute z-50 mt-1.5 max-h-64 w-full overflow-y-auto border border-[var(--border)] bg-[var(--surface)] p-1 shadow-2xl outline-none [scrollbar-width:thin]"
-          style={{ borderRadius: "var(--radius)" }}
+          className={`absolute z-50 mt-1.5 max-h-64 w-full overflow-y-auto p-1 outline-none [scrollbar-width:thin] ${dropdownSurfaceCls}`}
+          style={dropdownRadius}
         >
           {filtered.length === 0 ? (
             <p className="px-3 py-2 text-xs text-[var(--faint)]">{query ? "No matches." : emptyText}</p>

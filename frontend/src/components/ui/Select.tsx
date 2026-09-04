@@ -4,7 +4,7 @@ import * as React from "react";
 import { Check, ChevronDown, ChevronUp } from "lucide-react";
 import { Select as BaseSelect } from "@base-ui/react/select";
 
-import { inputCls } from "./styles";
+import { dropdownRadius, dropdownSurfaceCls, inputCls } from "./styles";
 
 export interface SelectOption {
   value: string;
@@ -91,8 +91,8 @@ export function Select({
           <BaseSelect.Popup
             // Native scrollbar hidden; Base UI shows themed up/down chevrons at the
             // edges when there's more to scroll (it positions + auto-shows them).
-            className="relative max-h-72 min-w-[var(--anchor-width)] overflow-y-auto border border-[var(--border)] bg-[var(--surface)] p-1 shadow-2xl outline-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-            style={{ borderRadius: "var(--radius)" }}
+            className={`relative max-h-72 min-w-[var(--anchor-width)] overflow-y-auto p-1 outline-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${dropdownSurfaceCls}`}
+            style={dropdownRadius}
           >
             <BaseSelect.ScrollUpArrow className="inset-x-0 z-10 flex h-6 items-center justify-center bg-[var(--surface)] text-[var(--muted)]">
               <ChevronUp className="h-4 w-4" />

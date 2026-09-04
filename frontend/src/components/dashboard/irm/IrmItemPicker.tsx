@@ -4,7 +4,7 @@ import * as React from "react";
 import { AlertTriangle, Check, ChevronDown, Loader2, PackagePlus, Search } from "lucide-react";
 
 import { listIrmItems } from "@/services/irm.service";
-import { inputCls, toolbarInputCls } from "@/components/ui/styles";
+import { dropdownRadius, dropdownSurfaceCls, inputCls, toolbarInputCls } from "@/components/ui/styles";
 import type { IrmItem } from "@/types/irm";
 import { IrmItemCreateOverlay } from "./IrmItemCreateOverlay";
 import {
@@ -214,7 +214,7 @@ export function IrmItemPicker({
         </button>
 
         {open && !disabled && (
-          <div className="absolute z-30 mt-1 w-full overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl">
+          <div className={`absolute z-30 mt-1 w-full overflow-hidden ${dropdownSurfaceCls}`} style={dropdownRadius}>
             <div className="border-b border-[var(--border-2)] p-2">
               <div className="relative">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--faint)]" />

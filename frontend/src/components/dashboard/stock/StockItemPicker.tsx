@@ -3,7 +3,7 @@
 import * as React from "react";
 import { Check, ChevronDown, PackagePlus, Plus } from "lucide-react";
 
-import { inputCls } from "@/components/ui/styles";
+import { dropdownRadius, dropdownSurfaceCls, inputCls } from "@/components/ui/styles";
 import type { CustomerStockEntry, PortalStockEntry } from "@/types/customer";
 
 // Only the five fields the grouping reads, so this serves BOTH callers: the admin modal passes the
@@ -169,7 +169,7 @@ export function StockItemPicker({
       {open && !disabled && (
         <div
           id={listboxId}
-          className="absolute z-30 mt-1 w-full overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl"
+          className={`absolute z-30 mt-1 w-full overflow-hidden ${dropdownSurfaceCls}`} style={dropdownRadius}
         >
           <div className="border-b border-[var(--border-2)] p-2">
             <input

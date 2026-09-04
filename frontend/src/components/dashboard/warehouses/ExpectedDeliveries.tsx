@@ -13,6 +13,7 @@ import { listSuppliers } from "@/services/supplier.service";
 import { Select } from "@/components/ui/Select";
 import { FilterPopover } from "@/components/ui/FilterPopover";
 import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
+import { dropdownRadius, dropdownSurfaceCls } from "@/components/ui/styles";
 import { useAuth } from "@/hooks/useAuth";
 import { PO_PRIORITY_LABELS, PoStatusBadge, formatDate } from "@/components/dashboard/purchase-orders/poStatus";
 import type { PurchaseOrder } from "@/types/purchase-order";
@@ -268,8 +269,8 @@ function FilterMenu({
           tabIndex={-1}
           aria-label="Filter deliveries"
           onKeyDown={onKeyDown}
-          className="absolute right-0 z-50 mt-1.5 min-w-[13rem] border border-[var(--border)] bg-[var(--surface)] p-1 shadow-2xl outline-none"
-          style={{ borderRadius: "var(--radius)" }}
+          className={`absolute right-0 z-50 mt-1.5 min-w-[13rem] p-1 outline-none ${dropdownSurfaceCls}`}
+          style={dropdownRadius}
         >
           {options.map((c, i) => {
             const isSelected = c.key === value;

@@ -29,6 +29,8 @@ import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardP
 import { ProjectModal } from "@/components/dashboard/customers/ProjectModal";
 import { optionalFor } from "@/lib/formPayload";
 import { inputCls, labelCls } from "@/components/ui/styles";
+import { SuggestInput } from "@/components/ui/SuggestInput";
+import { COUNTRY_OPTIONS } from "@/lib/countryOptions";
 import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark, SummaryRow } from "@/components/ui/FormScaffold";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
@@ -1028,10 +1030,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
               />
               <div>
                 <label className={labelCls}>Country</label>
-                <input className={inputCls} value={country} onChange={(e) => { setCountry(e.target.value); touch(); }} maxLength={120} placeholder="United Kingdom" list="job-country-options" />
-                <datalist id="job-country-options">
-                  <option value="United Kingdom" />
-                </datalist>
+                <SuggestInput ariaLabel="Country" value={country} onChange={(v) => { setCountry(v); touch(); }} suggestions={COUNTRY_OPTIONS} maxLength={120} placeholder="United Kingdom" />
               </div>
               <div className="grid grid-cols-2 gap-4 sm:col-span-2 sm:grid-cols-4">
                 <div>
