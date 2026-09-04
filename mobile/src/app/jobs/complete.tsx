@@ -35,6 +35,19 @@ export default function CompleteJobScreen() {
     [job],
   );
 
+  // Hired kit whose deadline has ALREADY passed and which is still out.
+  //
+  // Only the overdue ones. A hire that is simply still with the engineer is normal, and its return
+  // date is already on its kit row on the job screen — repeating the whole list here would restate
+  // what they just scrolled past. What survives is the case the date alone cannot cover: the deadline
+  // has passed and the kit has not gone back. That is not a reminder, it is a hire billing us for
+  // days nobody agreed to, and it is worth one line on the way out. Never blocks the button.
+  const hiresOverdue = useMemo(
+    () => (job?.kitLines ?? []).filter((l) => l.lineType === "rental" && l.remaining > 0 && l.hireOverdue),
+    [job],
+  );
+  const hiresOverdueUnits = hiresOverdue.reduce((n, l) => n + l.remaining, 0);
+
   const qtyFor = (lineId: string) => used[lineId] ?? 0;
 
   const submit = async () => {
@@ -81,6 +94,18 @@ export default function CompleteJobScreen() {
         <Text style={s.jobNumber}>{job.jobNumber}</Text>
         <Text style={s.jobName}>{job.name}</Text>
       </Card>
+
+      {hiresOverdue.length > 0 ? (
+        // Amber, not red: the job can still be completed and nothing here is blocked. It is money
+        // leaking, which earns a line on the way out — not a wall.
+        <View style={s.hireWarn}>
+          <Text style={s.hireWarnText}>
+            {`${hiresOverdue.map((l) => `${l.remaining} × ${l.itemName}`).join(", ")} `}
+            {`${hiresOverdueUnits === 1 ? "is" : "are"} past the hire return date. `}
+            {`Get ${hiresOverdueUnits === 1 ? "it" : "them"} back to the warehouse — or ask the warehouse to extend the hire if you still need ${hiresOverdueUnits === 1 ? "it" : "them"}.`}
+          </Text>
+        </View>
+      ) : null}
 
       <SectionTitle>Stock used</SectionTitle>
       <Text style={s.hint}>
@@ -133,6 +158,13 @@ const s = StyleSheet.create({
   jobNumber: { fontSize: 13, fontWeight: "700", color: colors.accent },
   jobName: { fontSize: 16, fontWeight: "800", color: colors.text },
   hint: { fontSize: 13, color: colors.muted },
+  hireWarn: {
+    backgroundColor: colors.warnSoft,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  hireWarnText: { fontSize: 12, fontWeight: "600", color: colors.warn, lineHeight: 17 },
   lineRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
   lineMain: { flex: 1, gap: 2 },
   lineName: { fontSize: 14, fontWeight: "700", color: colors.text },

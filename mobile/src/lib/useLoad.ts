@@ -18,6 +18,10 @@ export function useLoad<T>(fn: () => Promise<T>) {
   const [fetching, setFetching] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // When the shown data last landed. Stamped only on SUCCESS, so a failed refetch leaves the caption
+  // reading the age of what is actually on screen rather than the age of the attempt — on a handset
+  // that regularly loses signal, "how old is this?" is the question the number answers.
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
 
   const fnRef = useRef(fn);
   // Declared before the focus effect so the ref is current by the time it loads.
@@ -34,6 +38,7 @@ export function useLoad<T>(fn: () => Promise<T>) {
       const result = await fnRef.current();
       if (seq !== seqRef.current) return;
       setData(result);
+      setUpdatedAt(new Date().toISOString());
     } catch (err) {
       if (seq !== seqRef.current) return;
       setError(err instanceof Error ? err.message : "Something went wrong.");
@@ -68,5 +73,5 @@ export function useLoad<T>(fn: () => Promise<T>) {
     setRefreshing(false);
   }, [load]);
 
-  return { data, setData, loading, fetching, refreshing, error, reload, refresh };
+  return { data, setData, loading, fetching, refreshing, error, updatedAt, reload, refresh };
 }

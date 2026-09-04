@@ -12,40 +12,58 @@ import type { RequestableItemOption, WarehouseAvailability } from "@/services/va
 import { useLoad } from "@/lib/useLoad";
 import { useDebouncedCallback } from "@/lib/useDebounced";
 import { useToast } from "@/lib/toast";
+import { openLineAdvisory } from "@/lib/openLineAdvisory";
+import { splitItemKeys, toLinePayload, vanStockItemKey } from "@/lib/vanStockLine";
+import { formatHireDate } from "@/lib/format";
 import { AttachmentPicker } from "@/components/AttachmentPicker";
 import {
   Button,
   Card,
   EmptyState,
   ErrorText,
+  InfoRow,
   Input,
+  RentalBadge,
   Screen,
+  SearchInput,
   SectionTitle,
   Segmented,
   Select,
   Stepper,
 } from "@/components/ui";
 import { colors } from "@/lib/theme";
-import type { VanStockItemOption, VanStockPriority } from "@/types";
+import type { VanStockLineSource, VanStockPriority } from "@/types";
 
 // Field Stock runs a two-level scale: Normal or Urgent. The web composer, the counter walk-in and
 // this screen must offer the same rungs — the backend enum rejects anything else outright.
-const PRIORITY_OPTIONS: Array<{ key: VanStockPriority; label: string }> = [
+const PRIORITY_OPTIONS: { key: VanStockPriority; label: string }[] = [
   { key: "normal", label: "Normal" },
   { key: "urgent", label: "Urgent" },
 ];
 
 interface DraftLine {
-  irmItemId: string;
+  /** Composite `irm:<id>` / `rental:<id>` — see lib/vanStockLine.ts. The row's identity everywhere:
+   *  React key, warehouse pick, availability lookup, dedupe. NEVER a bare item id. */
+  key: string;
+  source: VanStockLineSource;
+  irmItemId: string | null;
+  rentalItemId: string | null;
   itemName: string;
   code: string;
   qty: number;
+  /** Rental only — carried onto the row so the deadline stays visible while the cart is built. */
+  hireEndDate: string | null;
 }
 
-// Restock composer — request IRM items from a warehouse onto your van (non-job).
-// Mirrors the web RestockComposerPage: live per-warehouse shelf counts (a
-// snapshot, not a reservation), a non-blocking duplicate warning for items
-// already on an open request, and image attachments.
+// Restock composer — request company stock OR hired kit from a warehouse onto your van (non-job).
+// Mirrors the web VanStockComposer: live per-warehouse counts (a snapshot, not a reservation), a
+// non-blocking duplicate warning for items already on an open request, and image attachments.
+//
+// TWO POOLS, one cart. `irm` is company stock. `rental` is HIRED equipment — the same pool a job kit
+// request can draw on, reached from the non-job door. They travel together but are never merged: the
+// id spaces are independent (hence the composite key on every row), a hire has no shelf balance (its
+// figure is free-on-hire at a depot), and a hire can only be collected from — and returned to — the
+// depot that took delivery, where company stock can come from any warehouse holding it.
 export default function NewVanStockScreen() {
   const router = useRouter();
   const toast = useToast();
@@ -54,8 +72,8 @@ export default function NewVanStockScreen() {
   const [searching, setSearching] = useState(false);
   const [searchFailed, setSearchFailed] = useState(false);
   const [lines, setLines] = useState<DraftLine[]>([]);
-  // irmItemId → the warehouse this line is collected from. Replaces the single request-level
-  // "collect from": the engineer picks per item, seeing that warehouse's free stock.
+  // item KEY → the warehouse this line is collected from. Replaces the single request-level
+  // "collect from": the engineer picks per item, seeing that warehouse's free count.
   const [lineWarehouses, setLineWarehouses] = useState<Record<string, string>>({});
   const [priority, setPriority] = useState<VanStockPriority>("normal");
   const [reason, setReason] = useState("");
@@ -77,7 +95,9 @@ export default function NewVanStockScreen() {
   const [availTick, setAvailTick] = useState(0);
 
   const runSearch = useCallback(async (q: string) => {
-    if (q.trim().length < 2) {
+    // One character, like the web's VanStockItemSearch. Item codes are short, and a two-character
+    // floor silently refused the shortest of them.
+    if (!q.trim()) {
       setResults([]);
       setSearchFailed(false);
       return;
@@ -102,11 +122,12 @@ export default function NewVanStockScreen() {
 
   const debouncedSearch = useDebouncedCallback(runSearch);
 
-  // Live shelf counts, refetched when the item SET changes (not quantities).
+  // Live counts, refetched when the item SET changes (not quantities). Keyed the same way the cart
+  // is, so a hire and a company item can never collapse onto one lookup.
   const itemIdsKey = useMemo(
     () =>
       lines
-        .map((l) => l.irmItemId)
+        .map((l) => l.key)
         .sort()
         .join(","),
     [lines],
@@ -115,7 +136,8 @@ export default function NewVanStockScreen() {
     // Empty cart renders no warehouse options, so stale availability is harmless.
     if (!itemIdsKey) return;
     const seq = ++availSeq.current;
-    getVanStockAvailability(itemIdsKey.split(","))
+    const { irmItemIds, rentalItemIds } = splitItemKeys(itemIdsKey.split(","));
+    getVanStockAvailability(irmItemIds, rentalItemIds)
       .then((warehouses) => {
         if (seq === availSeq.current) {
           setAvailability(warehouses);
@@ -127,35 +149,63 @@ export default function NewVanStockScreen() {
       });
   }, [itemIdsKey, availTick]);
 
-  const addItem = (item: VanStockItemOption) => {
-    if (!lines.some((l) => l.irmItemId === item.irmItemId)) {
-      setLines((prev) => [...prev, { irmItemId: item.irmItemId, itemName: item.name, code: item.code, qty: 1 }]);
+  const addItem = (item: RequestableItemOption) => {
+    const key = vanStockItemKey(item);
+    if (!lines.some((l) => l.key === key)) {
+      // The item's own source travels with the row from here all the way to the payload, so what the
+      // engineer tapped and what the warehouse is asked for cannot come apart in between.
+      setLines((prev) => [
+        ...prev,
+        {
+          key,
+          source: item.source,
+          irmItemId: item.irmItemId,
+          rentalItemId: item.rentalItemId,
+          itemName: item.name,
+          code: item.code,
+          qty: 1,
+          hireEndDate: item.hireEndDate,
+        },
+      ]);
     }
-    setQuery("");
-    setResults([]);
-    setSearchFailed(false);
-    searchSeq.current++; // drop any in-flight search so it can't repopulate results
-    debouncedSearch(""); // supersede any pending debounce tick
+    // The results STAY. A restock is usually several items off one search, and clearing the list
+    // after each tap made the engineer retype the term per item. Added rows mark themselves below
+    // instead — the same thing the web does with its `excludeIds` check.
   };
 
-  const duplicates = lines.filter((l) => (openLines ?? []).some((o) => o.irmItemId === l.irmItemId));
+  // Rows already in the cart: marked and inert, rather than a tap that silently does nothing.
+  const addedKeys = useMemo(() => new Set(lines.map((l) => l.key)), [lines]);
 
-  // Per ITEM: the warehouses that actually hold it, most stock first, each labelled with its free
-  // count — the engineer's whole basis for choosing. Warehouses with none of that item are left OUT
-  // rather than shown disabled: the row is about this one item, so a warehouse with none of it is
-  // simply not an answer.
+  // Matched on the COMPOSITE key, not a bare id — the open-lines feed carries hires as well now, and
+  // the two catalogues have independent id spaces.
+  const openKeys = useMemo(() => new Map((openLines ?? []).map((o) => [vanStockItemKey(o), o.code])), [openLines]);
+  const advisory = openLineAdvisory(
+    lines.filter((l) => openKeys.has(l.key)).map((l) => ({ name: l.itemName, code: openKeys.get(l.key) })),
+    "restock",
+  );
+
+  // Per ITEM: the warehouses that actually hold it, most first, each labelled with its free count —
+  // the engineer's whole basis for choosing. Warehouses with none of that item are left OUT rather
+  // than shown disabled: the row is about this one item, so a warehouse with none of it is simply
+  // not an answer.
   const warehouseOptionsByItem = useMemo(() => {
     const map = new Map<string, { key: string; label: string; free: number }[]>();
     for (const l of lines) {
       const opts = availability
         .map((w) => {
-          const free = w.items.find((i) => i.irmItemId === l.irmItemId)?.quantityOnHand ?? 0;
+          // Two pools, read from the list that matches THIS line's catalogue. Hired kit has no stock
+          // balance at all — its figure is free-on-hire at that depot — so reading `items` for a
+          // rental line would silently report zero and hide every depot that actually holds it.
+          const free =
+            l.source === "rental"
+              ? (w.rentalItems.find((i) => i.rentalItemId === l.rentalItemId)?.quantityOnHand ?? 0)
+              : (w.items.find((i) => i.irmItemId === l.irmItemId)?.quantityOnHand ?? 0);
           const name = w.warehouseCode ? `${w.warehouseName} (${w.warehouseCode})` : w.warehouseName;
           return { key: w.warehouseId, label: `${name} — ${free} free`, free };
         })
         .filter((o) => o.free > 0)
         .sort((a, b) => b.free - a.free || a.label.localeCompare(b.label));
-      map.set(l.irmItemId, opts);
+      map.set(l.key, opts);
     }
     return map;
   }, [availability, lines]);
@@ -168,29 +218,35 @@ export default function NewVanStockScreen() {
   const effectiveWarehouses = useMemo(() => {
     const out: Record<string, string> = {};
     for (const l of lines) {
-      const opts = warehouseOptionsByItem.get(l.irmItemId) ?? [];
-      const picked = lineWarehouses[l.irmItemId];
+      const opts = warehouseOptionsByItem.get(l.key) ?? [];
+      const picked = lineWarehouses[l.key];
       const valid = picked && opts.some((o) => o.key === picked);
       const chosen = valid ? picked : opts[0]?.key;
-      if (chosen) out[l.irmItemId] = chosen;
+      if (chosen) out[l.key] = chosen;
     }
     return out;
   }, [lines, warehouseOptionsByItem, lineWarehouses]);
 
   // How many separate places this request sends the engineer to. Shown while it can still be changed.
   const stops = useMemo(() => new Set(Object.values(effectiveWarehouses)).size, [effectiveWarehouses]);
-  const unplaced = lines.filter((l) => !effectiveWarehouses[l.irmItemId]);
+  const unplaced = lines.filter((l) => !effectiveWarehouses[l.key]);
+  // The Stepper can only emit clamped integers, so no Number.isFinite guard is needed here as there
+  // is on the web's free-text qty input.
+  const totalQty = lines.reduce((n, l) => n + l.qty, 0);
 
-  // Free stock at the warehouse THIS line is collected from — the cap the qty stepper is judged against.
+  // Free count at the warehouse THIS line is collected from — the cap the qty stepper is judged
+  // against. Same two-pool split as the options above.
   const shelfByItem = useMemo(() => {
     const m = new Map<string, number>();
     for (const l of lines) {
-      const whId = effectiveWarehouses[l.irmItemId];
+      const whId = effectiveWarehouses[l.key];
       if (!whId) continue;
-      const free = availability
-        .find((a) => a.warehouseId === whId)
-        ?.items.find((i) => i.irmItemId === l.irmItemId)?.quantityOnHand;
-      if (typeof free === "number") m.set(l.irmItemId, free);
+      const w = availability.find((a) => a.warehouseId === whId);
+      const free =
+        l.source === "rental"
+          ? w?.rentalItems.find((i) => i.rentalItemId === l.rentalItemId)?.quantityOnHand
+          : w?.items.find((i) => i.irmItemId === l.irmItemId)?.quantityOnHand;
+      if (typeof free === "number") m.set(l.key, free);
     }
     return m;
   }, [availability, lines, effectiveWarehouses]);
@@ -198,7 +254,7 @@ export default function NewVanStockScreen() {
   // Switching a line to a warehouse with less stock leaves an already-set qty above the new cap
   // (clamping it silently would rewrite a number the engineer chose), so it's caught here instead.
   const overCap = lines.find((l) => {
-    const free = shelfByItem.get(l.irmItemId);
+    const free = shelfByItem.get(l.key);
     return typeof free === "number" && l.qty > free;
   });
 
@@ -208,15 +264,23 @@ export default function NewVanStockScreen() {
       return;
     }
     if (overCap) {
-      const free = shelfByItem.get(overCap.irmItemId) ?? 0;
+      const free = shelfByItem.get(overCap.key) ?? 0;
+      const where = overCap.source === "rental" ? "free on hire at the depot" : "free at the warehouse";
       setError(
-        `Only ${free} of "${overCap.itemName}" are free at the warehouse you picked — lower the quantity or collect it from somewhere else.`,
+        `Only ${free} of "${overCap.itemName}" are ${where} you picked — lower the quantity or collect it from somewhere else.`,
       );
       return;
     }
     if (unplaced.length > 0) {
-      // Only reachable when an item is stocked NOWHERE (auto-select fills every other case).
-      setError(`No warehouse has "${unplaced[0]!.itemName}" in stock — remove it or ask the office to order it.`);
+      // Only reachable when an item is held NOWHERE (auto-select fills every other case). The two
+      // pools fail for different reasons and have different remedies: company stock gets ORDERED,
+      // a hire gets ARRANGED — telling an engineer to order a hire sends them to the wrong desk.
+      const u = unplaced[0]!;
+      setError(
+        u.source === "rental"
+          ? `No warehouse has "${u.itemName}" free on hire — remove it or ask the office to arrange a hire.`
+          : `No warehouse has "${u.itemName}" in stock — remove it or ask the office to order it.`,
+      );
       return;
     }
     if (!reason.trim()) {
@@ -232,12 +296,11 @@ export default function NewVanStockScreen() {
         priority,
         // No request-level warehouse: the collection point is derived server-side from the lines.
         attachments: attachments.length ? attachments : undefined,
-        lines: lines.map((l) => ({
-          irmItemId: l.irmItemId,
-          itemName: l.itemName,
-          qty: l.qty,
-          warehouseId: effectiveWarehouses[l.irmItemId]!,
-        })),
+        // Built through toLinePayload so exactly one id travels with the discriminator — the server
+        // refuses a line carrying both outright, and the wrong one would move company stock for a hire.
+        lines: lines.map((l) =>
+          toLinePayload({ ...l, name: l.itemName }, effectiveWarehouses[l.key]!),
+        ),
       });
       toast.success("Restock request sent to the warehouse.");
       router.back();
@@ -262,44 +325,65 @@ export default function NewVanStockScreen() {
 
       <SectionTitle>Add items</SectionTitle>
       <Text style={s.hint}>Search the catalogue for the stock you need.</Text>
-      <Input
+      <SearchInput
         placeholder="Search the item you need…"
         value={query}
         onChangeText={(v) => {
           setQuery(v);
           debouncedSearch(v);
         }}
-        autoCapitalize="none"
       />
       {searching ? <Text style={s.hint}>Searching…</Text> : null}
       {searchFailed ? (
         <Text style={s.searchError}>Couldn&rsquo;t run the search just now. Check your connection and try again.</Text>
       ) : null}
-      {query.trim().length >= 2 && !searching && !searchFailed && results.length === 0 ? (
+      {query.trim().length > 0 && !searching && !searchFailed && results.length === 0 ? (
         <Text style={s.hint}>No matching item in the catalogue.</Text>
       ) : null}
       {results.map((item) => {
-        // Out of stock at EVERY warehouse — no warehouse can fulfil it, so show it (the engineer sees
-        // the item exists) but don't let it be added. Mirrors the web restock composer.
+        // Held at NO warehouse — nobody can fulfil it, so show it (the engineer sees the item exists)
+        // but don't let it be added. Mirrors the web composer.
+        const isRental = item.source === "rental";
         const outOfStock = item.quantityOnHand <= 0;
+        const added = addedKeys.has(vanStockItemKey(item));
         return (
           <Card
-            key={item.irmItemId}
-            onPress={outOfStock ? undefined : () => addItem(item)}
-            style={outOfStock ? s.oosCard : undefined}
+            key={vanStockItemKey(item)}
+            onPress={outOfStock || added ? undefined : () => addItem(item)}
+            style={outOfStock || added ? s.oosCard : undefined}
           >
             <View style={s.lineRow}>
               <View style={s.lineMain}>
-                <Text style={s.lineName}>{item.name}</Text>
+                <View style={s.nameRow}>
+                  <Text style={s.lineName}>{item.name}</Text>
+                  {isRental ? <RentalBadge /> : null}
+                </View>
                 <Text style={s.meta}>
                   {item.code}
                   {item.sku ? ` · ${item.sku}` : ""}
                   {item.uom ? ` · ${item.uom}` : ""}
+                  {isRental && item.poCodes.length > 0 ? ` · ${item.poCodes.join(", ")}` : ""}
                 </Text>
+                {/* UTC-pinned: a hire deadline is a calendar day, and formatDate would show the day
+                    before on any device behind UTC. See lib/format.ts#formatHireDate. */}
+                {isRental && item.hireEndDate ? (
+                  <Text style={s.meta}>Hire ends {formatHireDate(item.hireEndDate)}</Text>
+                ) : null}
               </View>
-              <Text style={[s.meta, { fontWeight: "700", color: outOfStock ? colors.danger : colors.success }]}>
-                {outOfStock ? "Out of stock" : `${item.quantityOnHand} in stock`}
-              </Text>
+              <View style={s.resultRight}>
+                <Text style={[s.meta, { fontWeight: "700", color: outOfStock ? colors.danger : colors.success }]}>
+                  {/* "In stock" is untrue of a rental — it is not our stock, and the figure is bounded
+                      by a hire period rather than by what we own. Same split the web draws. */}
+                  {outOfStock
+                    ? isRental
+                      ? "None free on hire"
+                      : "Out of stock"
+                    : isRental
+                      ? `${item.quantityOnHand} free on hire`
+                      : `${item.quantityOnHand} in stock`}
+                </Text>
+                {added ? <Text style={s.addedText}>✓ Added</Text> : null}
+              </View>
             </View>
           </Card>
         );
@@ -307,29 +391,36 @@ export default function NewVanStockScreen() {
 
       <SectionTitle>{lines.length ? `Selected items (${lines.length})` : "Selected items"}</SectionTitle>
       <Text style={s.hint}>Set the quantity, and where you&rsquo;ll collect each item from.</Text>
-      {duplicates.length > 0 ? (
+      {advisory ? (
+        // Fixed-length sentence up top, the names demoted to a second line — so a third clashing item
+        // costs no height. See lib/openLineAdvisory.ts for why the old one-string version was wrong.
         <Card style={s.warnCard}>
-          <Text style={s.warnText}>
-            Heads up — you already have an open request for:{" "}
-            {duplicates.map((d) => `${d.itemName} (${d.code})`).join(", ")}. You can still send this one.
-          </Text>
+          <Text style={s.warnText}>{advisory.text}</Text>
+          {advisory.detail ? <Text style={s.warnDetail}>{advisory.detail}</Text> : null}
         </Card>
       ) : null}
       {lines.length === 0 ? (
         <EmptyState title="Nothing added yet" subtitle="Search above to add items." />
       ) : (
         lines.map((line) => {
-          const opts = warehouseOptionsByItem.get(line.irmItemId) ?? [];
-          const shelf = shelfByItem.get(line.irmItemId);
+          const opts = warehouseOptionsByItem.get(line.key) ?? [];
+          const shelf = shelfByItem.get(line.key);
           const over = typeof shelf === "number" && line.qty > shelf;
+          const isRental = line.source === "rental";
           return (
-            <Card key={line.irmItemId}>
+            <Card key={line.key}>
               <View style={s.lineRow}>
                 <View style={s.lineMain}>
-                  <Text style={s.lineName} numberOfLines={2}>
-                    {line.itemName}
-                  </Text>
+                  <View style={s.nameRow}>
+                    <Text style={s.lineName} numberOfLines={2}>
+                      {line.itemName}
+                    </Text>
+                    {isRental ? <RentalBadge /> : null}
+                  </View>
                   <Text style={s.meta}>{line.code}</Text>
+                  {isRental && line.hireEndDate ? (
+                    <Text style={s.meta}>Hire ends {formatHireDate(line.hireEndDate)}</Text>
+                  ) : null}
                   {typeof shelf === "number" ? (
                     <Text
                       style={[
@@ -338,7 +429,13 @@ export default function NewVanStockScreen() {
                       ]}
                     >
                       Free there: {shelf}
-                      {shelf === 0 ? " — out of stock" : over ? " — less than you're asking" : ""}
+                      {shelf === 0
+                        ? isRental
+                          ? " — none free on hire"
+                          : " — out of stock"
+                        : over
+                          ? " — less than you're asking"
+                          : ""}
                     </Text>
                   ) : null}
                 </View>
@@ -347,32 +444,44 @@ export default function NewVanStockScreen() {
                   min={1}
                   max={shelf}
                   onChange={(next) =>
-                    setLines((prev) => prev.map((l) => (l.irmItemId === line.irmItemId ? { ...l, qty: next } : l)))
+                    setLines((prev) => prev.map((l) => (l.key === line.key ? { ...l, qty: next } : l)))
                   }
                 />
               </View>
               {opts.length === 0 ? (
                 <Text style={[s.meta, { color: colors.danger, fontWeight: "700" }]}>
-                  No warehouse has this in stock
+                  {isRental ? "No warehouse has this free on hire" : "No warehouse has this in stock"}
                 </Text>
               ) : (
                 <Select
-                  label="Collect from"
+                  // A hire is collected from the DEPOT that took delivery — it can never be sourced
+                  // from wherever happens to hold the most, the way company stock can — so the label
+                  // names what the engineer is actually choosing between.
+                  label={isRental ? "Collect from depot" : "Collect from"}
                   options={opts.map(({ key, label }) => ({ key, label }))}
-                  value={effectiveWarehouses[line.irmItemId] ?? null}
-                  onChange={(key) => setLineWarehouses((prev) => ({ ...prev, [line.irmItemId]: key }))}
+                  value={effectiveWarehouses[line.key] ?? null}
+                  onChange={(key) => setLineWarehouses((prev) => ({ ...prev, [line.key]: key }))}
                 />
               )}
               <Button
                 title="Remove"
                 variant="ghost"
                 small
-                onPress={() => setLines((prev) => prev.filter((l) => l.irmItemId !== line.irmItemId))}
+                onPress={() => setLines((prev) => prev.filter((l) => l.key !== line.key))}
               />
             </Card>
           );
         })
       )}
+
+      {/* Shown ONLY when the cart actually holds hired kit. The per-row depot picker above is already
+          accurate; what is missing from it is that a hire is not free to go BACK anywhere — which is
+          the part that costs the engineer a second trip if they learn it later. */}
+      {lines.some((l) => l.source === "rental") ? (
+        <Text style={s.hint}>
+          Hired kit goes back to the depot it was collected from — shown on each hired item above.
+        </Text>
+      ) : null}
 
       {stops > 1 ? (
         // The engineer is the one who drives, so the cost of their own split is stated while they can
@@ -411,6 +520,15 @@ export default function NewVanStockScreen() {
       />
       <Text style={s.inputLabel}>Attachments (optional)</Text>
       <AttachmentPicker attachments={attachments} onChange={setAttachments} upload={uploadVanStockAttachment} max={10} />
+      <SectionTitle>Summary</SectionTitle>
+      <Card>
+        {/* Empty string, not 0 — InfoRow renders it as the em dash the web summary shows before any
+            line has a collection point. */}
+        <InfoRow label="Collection stops" value={stops || ""} />
+        <InfoRow label="Items" value={lines.length} />
+        <InfoRow label="Total quantity" value={totalQty} />
+        <InfoRow label="Priority" value={PRIORITY_OPTIONS.find((o) => o.key === priority)?.label ?? priority} />
+      </Card>
       <ErrorText message={error} />
       <Button title="Send request" onPress={() => void submit()} loading={busy} />
     </Screen>
@@ -420,12 +538,16 @@ export default function NewVanStockScreen() {
 const s = StyleSheet.create({
   hint: { fontSize: 13, color: colors.muted },
   searchError: { fontSize: 13, color: colors.danger },
-  lineName: { fontSize: 14, fontWeight: "700", color: colors.text },
+  lineName: { fontSize: 14, fontWeight: "700", color: colors.text, flexShrink: 1 },
+  nameRow: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" },
   meta: { fontSize: 12, color: colors.muted },
   lineRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
   lineMain: { flex: 1, gap: 2 },
   oosCard: { opacity: 0.55 },
+  resultRight: { alignItems: "flex-end", gap: 2 },
+  addedText: { fontSize: 12, fontWeight: "700", color: colors.success },
   warnCard: { borderColor: colors.warn, backgroundColor: colors.warnSoft },
   warnText: { fontSize: 13, color: colors.warn },
+  warnDetail: { fontSize: 12, color: colors.warn, opacity: 0.85 },
   inputLabel: { fontSize: 13, fontWeight: "600", color: colors.muted },
 });

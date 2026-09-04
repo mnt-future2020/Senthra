@@ -88,6 +88,13 @@ export default function LoginScreen() {
             <Text style={s.forgotLink}>Forgot password?</Text>
           </Pressable>
         </View>
+
+        {/* Reachable WITHOUT signing in — that is the whole point of it being here rather than only
+            in Account. Someone whose data we hold may have no working account at all (a leaver, a
+            locked-out engineer), and they are exactly the person most likely to be asking. */}
+        <Pressable onPress={() => router.push("/privacy")} hitSlop={12} style={s.footer}>
+          <Text style={s.footerLink}>Privacy notice</Text>
+        </Pressable>
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -112,4 +119,6 @@ const s = StyleSheet.create({
   subtitle: { fontSize: 14, color: colors.muted },
   form: { gap: 14 },
   forgotLink: { fontSize: 13, fontWeight: "600", color: colors.accent, textAlign: "center", marginTop: 6 },
+  footer: { alignItems: "center" },
+  footerLink: { fontSize: 12, fontWeight: "600", color: colors.faint },
 });

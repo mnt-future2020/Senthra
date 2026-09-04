@@ -83,6 +83,10 @@ function RootStack() {
       <Stack.Screen name="login" options={{ headerShown: false }} />
       <Stack.Screen name="forgot-password" options={{ headerShown: false }} />
       <Stack.Screen name="set-password" options={{ headerShown: false }} />
+      {/* PUBLIC, and deliberately OUTSIDE the guard below. A data subject must be able to read how
+          their personal data is handled without holding an account — the sign-in screen links
+          straight here, and gating it would break the one path a signed-out reader has. */}
+      <Stack.Screen name="privacy" options={{ title: "Privacy Notice" }} />
       {/* Tab screens sit under the purple header, so their status icons go light. The tab layout
           stays registered for everyone — it renders its own "No engineer access" explanation
           rather than leaving a signed-in user with nowhere to land. */}

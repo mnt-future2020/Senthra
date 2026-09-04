@@ -233,6 +233,17 @@ export interface JobKitLine {
   used: number;
   returned: number;
   remaining: number;
+  // When this HIRED kit has to be back at its warehouse, so the warehouse can return it to the
+  // provider. RENTAL lines only, and only while units are still out — null on every other line type
+  // and once the line is fully returned. ISO date.
+  //
+  // The one thing that makes a rental line unlike the rest of this list: an IRM item sitting in a van
+  // costs nothing, a hire bills every day and belongs to somebody else.
+  hireEndDate: string | null;
+  // Resolved by the SERVER against the company timezone. Never recompute this from `hireEndDate` on
+  // the device — a phone in another zone (or with a wrong clock) would disagree with the warehouse
+  // about which day it is, on the one field whose whole job is naming a day.
+  hireOverdue: boolean;
   vanSources: KitLineVanSource[];
 }
 
@@ -264,6 +275,17 @@ export interface Job {
   rack: string | null;
   shelf: string | null;
   completionDate: string | null;
+  /**
+   * Past its due date and still active — SERVER-DERIVED, never recomputed here.
+   *
+   * "Today" is the start of today in the COMPANY's timezone (a Settings value), which this device
+   * does not know. Deriving it from `new Date()` would mark a different set of rows than the "Jobs
+   * overdue" card counted, for any engineer not sitting in that timezone — and a handset is far more
+   * likely to be in the wrong one than an office browser. Populated on list reads; false on detail.
+   */
+  overdue: boolean;
+  /** Whole days past due when `overdue`, else null. Server-derived for the same reason. */
+  daysLate: number | null;
   priority: string;
   assignedEngineerId: string | null;
   assignedEngineerName: string | null;
@@ -429,9 +451,26 @@ export type VanStockRequestStatus =
 // so a phone never receives a third value. Options list lives beside the composer that renders it.
 export type VanStockPriority = "normal" | "urgent";
 
+/**
+ * Which catalogue a van-stock line names.
+ *
+ * `irm` is company stock — ours, fungible, consumed or returned at leisure. `rental` is HIRED kit:
+ * somebody else's equipment, billing by the day, owed back to the depot it was collected from. The
+ * two have INDEPENDENT id spaces, which is why every line carries the discriminator rather than
+ * being inferred from whichever id happens to be set.
+ *
+ * The job-kit pools (`customer_stock`, `misc`) are deliberately absent: consignment belongs to a
+ * customer's job, and free-text misc names nothing a warehouse could scan out.
+ */
+export type VanStockLineSource = "irm" | "rental";
+
 export interface VanStockLine {
   id: string;
-  irmItemId: string;
+  source: VanStockLineSource;
+  irmItemId: string | null;
+  /** The CATALOGUE item on a rental line — never a hire. Which hire the units come off is the
+   *  warehouse's scan to resolve, and the server never accepts a hire id from a client. */
+  rentalItemId: string | null;
   itemName: string;
   code: string | null;
   sku: string | null;
@@ -524,7 +563,12 @@ export interface PagedVanStockRequests {
 }
 
 export interface VanStockLinePayload {
-  irmItemId: string;
+  /** Omit it and the server defaults to "irm", so an older build keeps working untouched. */
+  source?: VanStockLineSource;
+  // EXACTLY ONE of these. The server rejects a line carrying both outright rather than dropping one
+  // silently, so build these through `lib/vanStockLine.ts#toLinePayload` instead of by hand.
+  irmItemId?: string;
+  rentalItemId?: string;
   itemName: string;
   qty: number;
   // RESTOCK only: the warehouse this line is collected from. The engineer picks it per item against
@@ -545,7 +589,9 @@ export interface CreateVanStockRequestPayload {
 }
 
 export interface VanStockItemOption {
-  irmItemId: string;
+  source: VanStockLineSource;
+  irmItemId: string | null;
+  rentalItemId: string | null;
   code: string;
   name: string;
   sku: string | null;
@@ -553,11 +599,31 @@ export interface VanStockItemOption {
 }
 
 export interface HoldingOption {
-  irmItemId: string;
+  source: VanStockLineSource;
+  irmItemId: string | null;
+  rentalItemId: string | null;
   code: string;
   name: string;
   uom: string | null;
   quantityOnHand: number;
+  /**
+   * Rental only: the soonest deadline among the hires these units sit on, and whether it has passed.
+   *
+   * The one fact that makes hired kit different from a cable in the van — it keeps billing and is
+   * owed to a third party — so the return list leads with it. `overdue` is resolved SERVER-side
+   * against the company timezone; render `hireEndDate` through `formatHireDate`, never `formatDate`.
+   */
+  hireEndDate: string | null;
+  overdue: boolean;
+  poCodes: string[];
+  /**
+   * The depot(s) these hired units were collected from — the hire's own order warehouse (rental only;
+   * empty for company stock). The ID travels with the name because for hired kit the return warehouse
+   * is not a choice: the composer SETS the destination from this rather than asking the engineer to
+   * match a name. `qty` is how many of this row's units sit at that depot — the row's own
+   * `quantityOnHand` is a ROLL-UP across them, and one return carries one warehouse.
+   */
+  depots: { warehouseId: string; warehouseName: string; qty: number }[];
 }
 
 export interface WarehouseLite {

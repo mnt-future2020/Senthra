@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import Ionicons from "@expo/vector-icons/Ionicons";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import {
   acceptOwnJob,
   getOwnJob,
@@ -37,7 +38,7 @@ import {
   SectionTitle,
 } from "@/components/ui";
 import { colors } from "@/lib/theme";
-import { formatDate, formatDateTime, joinAddress, titleCase } from "@/lib/format";
+import { formatDate, formatDateTime, formatHireDate, joinAddress, titleCase } from "@/lib/format";
 import type { JobKitLine, JobKitWarehouse, KitRequest, KitRequestLine } from "@/types";
 
 function KitLineCard({
@@ -72,8 +73,33 @@ function KitLineCard({
       {line.description ? <Text style={s.lineMeta}>{line.description}</Text> : null}
       <Text style={s.lineMeta}>
         {LINE_TYPE_LABEL[line.lineType] ?? titleCase(line.lineType)}
-        {line.seCode ? ` · ${line.seCode}` : ""}
+        {/* A rental line has no customer SE code, but it does have the RNT-#### printed on the case —
+            which is what the engineer matches against the sticker and the warehouse types into the
+            scan box. Same slot as seCode, exactly as the web renders it. */}
+        {line.seCode
+          ? ` · ${line.seCode}`
+          : line.lineType === "rental" && line.rentalItemCode
+            ? ` · ${line.rentalItemCode}`
+            : ""}
       </Text>
+      {/* The hire's return deadline. RENTAL lines only, and only while units are still out — the
+          server nulls it otherwise. `hireOverdue` is resolved server-side against the COMPANY
+          timezone; never recompute it here from the date (see the note on JobKitLine). */}
+      {line.hireEndDate ? (
+        <View style={s.hireRow}>
+          <MaterialCommunityIcons
+            name="calendar-clock"
+            size={14}
+            color={line.hireOverdue ? colors.danger : colors.muted}
+          />
+          <Text style={[s.hireText, line.hireOverdue && s.hireTextOverdue]}>
+            {/* formatHireDate, NOT formatDate — see lib/format.ts. The deadline is a calendar day. */}
+            {line.hireOverdue
+              ? `Was due back ${formatHireDate(line.hireEndDate)} — overdue`
+              : `Return by ${formatHireDate(line.hireEndDate)}`}
+          </Text>
+        </View>
+      ) : null}
       {showWarehouse && line.warehouse ? (
         <Pressable style={s.warehouseRow} onPress={() => onWarehousePress(line.warehouse!)}>
           <Ionicons name="location" size={14} color={colors.accent} />
@@ -436,6 +462,10 @@ export default function JobDetailScreen() {
 
       <SectionTitle>Schedule</SectionTitle>
       <Card>
+        {/* When the office raised the job. The web keeps this in its own "Record" card; this screen
+            folded that card away and lost the row with it. It leads the section because it is the
+            earliest event — the rest of these read as a timeline from here. */}
+        <InfoRow label="Created" value={formatDate(job.createdAt)} />
         <InfoRow label="Completion date" value={formatDate(job.completionDate)} />
         <InfoRow label="Assigned" value={formatDate(job.assignedAt)} />
         <InfoRow label="Accepted" value={formatDate(job.acceptedAt)} />
@@ -592,6 +622,9 @@ const s = StyleSheet.create({
   vanSource: { fontSize: 12, color: colors.warn },
   vanSourcePhone: { fontSize: 12, color: colors.accent, fontWeight: "600" },
   warehouseRow: { flexDirection: "row", alignItems: "center", gap: 4 },
+  hireRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 2 },
+  hireText: { fontSize: 12, fontWeight: "600", color: colors.muted },
+  hireTextOverdue: { color: colors.danger, fontWeight: "700" },
   warehouseLink: { fontSize: 13, fontWeight: "600", color: colors.accent },
   warnCard: { borderColor: colors.warn, backgroundColor: colors.warnSoft },
   warnText: { fontSize: 13, color: colors.warn },
