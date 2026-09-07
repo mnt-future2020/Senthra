@@ -2309,9 +2309,12 @@ export async function extendHire(
   // them survives the opposite: the register stores `addedDays` as a plain difference and renders it
   // as `+{addedDays}d` (a shortening reads "+-27d"), extensionChargePence clamps the difference to
   // zero so the move is silently free, and the reminder is re-armed for a deadline that may already
-  // have passed. The Extend dialog sets `min={hireEndDate}` on the date input, but that is a hint to
-  // the picker rather than a rule — a stale tab, devtools or any direct API call ignores it — so the
-  // rule has to live here. Correcting an end date backwards is a different operation from extending,
+  // have passed. The Extend dialog floors its date input at the day AFTER this one and refuses the
+  // rest before it posts, but a `min` is a hint to the picker rather than a rule — a typed date, a
+  // stale tab, devtools or any direct API call all ignore it — so the rule has to live here too.
+  // (That dialog USED to floor the input at `hireEndDate` itself, which let the browser offer the
+  // single value this line is guaranteed to reject; the note is kept because the shape of the bug is
+  // the argument for the check.) Correcting an end date backwards is a different operation from extending,
   // and this codebase does not model it (see extensionChargePence: "shortening is not a credit note").
   if (hireEndDate.getTime() <= line.hireEndDate.getTime()) {
     throw badRequest("The new hire end date must be after the current end date.");

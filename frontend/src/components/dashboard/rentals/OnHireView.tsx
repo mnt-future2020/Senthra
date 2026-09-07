@@ -23,7 +23,9 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { PoCodeLink } from "@/components/dashboard/purchase-orders/PoCodeLink";
 import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
 import { inputCls } from "@/components/ui/styles";
+import { FieldError, RequiredMark } from "@/components/ui/FormScaffold";
 import { CloseHireShortModal, type CloseHireShortTarget } from "./CloseHireShortModal";
+import { earliestExtensionDay, extensionDateProblem } from "./hireExtension";
 import { canManageHires, canMoveHires, canSettleHires, hireTakesDelivery } from "./hireActions";
 import { daysRemainingLabel } from "./hireWindow";
 import { HireDeadline } from "./rentalHireStatus";
@@ -203,6 +205,9 @@ export function OnHireView() {
     setDraft({ newEndDate: "", extraCharge: "" });
   };
   const [busy, setBusy] = React.useState(false);
+  // One id for the date field's hint, whether it is currently the floor or the refusal — the input
+  // describes the same slot either way, so aria-describedby does not have to switch targets.
+  const extendDateHintId = React.useId();
 
   React.useEffect(() => {
     const t = setTimeout(() => {
@@ -246,6 +251,11 @@ export function OnHireView() {
   // row keeps offering "Receive" for equipment that is already here.
   useRentalHireStream(React.useCallback(() => setReloadKey((k) => k + 1), []));
 
+  // The picker's floor and the rule behind it, mirrored from the server. Both are plain derivations
+  // of the open hire and the typed date, so they cost nothing to recompute and cannot go stale.
+  const minEndDate = extending ? earliestExtensionDay(extending.hireEndDate) : "";
+  const dateProblem = extending ? extensionDateProblem(extending.hireEndDate, newEndDate) : null;
+
   // Mirrors the server's extensionChargePence: reprice the whole hire, subtract the old price.
   const calculatedExtra = React.useMemo(() => {
     if (!extending || !newEndDate || extending.ratePeriod === "total" || extending.ratePence == null) return null;
@@ -268,8 +278,12 @@ export function OnHireView() {
 
   const doExtend = async () => {
     if (!extending || busy) return;
-    if (!newEndDate) {
-      pushToast("Select a new hire end date.", "alert");
+    // The same check the button is disabled by, run again here: `min` is a hint to the picker rather
+    // than a rule, and this is the last place the refusal can be phrased before the round trip. The
+    // server checks a third time, and remains the one that counts.
+    const problem = extensionDateProblem(extending.hireEndDate, newEndDate);
+    if (problem) {
+      pushToast(problem, "alert");
       return;
     }
     setBusy(true);
@@ -643,14 +657,38 @@ export function OnHireView() {
             recalculated from the new date.
           </p>
           <label className="block">
-            <span className="mb-1.5 block text-xs font-semibold text-[var(--muted)]">New hire end date</span>
+            {/* Marked required, because the button below is disabled until it is filled and nothing
+                else on the dialog said so. The old form let the click through and answered it with a
+                toast; disabling without the mark swapped that for a dead control and no reason —
+                which is the one state a form must never be in. Same mark, and the same silence from
+                the field itself, as every other required box in the dashboard. */}
+            <span className="mb-1.5 block text-xs font-semibold text-[var(--muted)]">
+              New hire end date
+              <RequiredMark />
+            </span>
             <input
               type="date"
               value={newEndDate}
-              min={extending?.hireEndDate.slice(0, 10)}
+              // The day AFTER the current end, not the current end itself — see earliestExtensionDay.
+              // Dropped entirely when there is no usable date, rather than pinning it to "".
+              min={minEndDate || undefined}
               onChange={(e) => setNewEndDate(e.target.value)}
+              aria-required
+              aria-invalid={Boolean(newEndDate && dateProblem)}
+              aria-describedby={extendDateHintId}
               className={inputCls}
             />
+            {/* Stated as well as enforced: `min` greys out the earlier days without saying why, and
+                a date typed straight into the box ignores it. Quiet until something IS typed: an
+                empty box is not a mistake somebody has made yet, and a red line under a field nobody
+                has touched reads as one. */}
+            {newEndDate && dateProblem ? (
+              <FieldError id={extendDateHintId} message={dateProblem} />
+            ) : minEndDate ? (
+              <span id={extendDateHintId} className="mt-1 block text-[11px] text-[var(--faint)]">
+                {shortDate(minEndDate)} or later.
+              </span>
+            ) : null}
           </label>
 
           {/* What the extension COSTS, before anyone commits to it.
@@ -658,7 +696,7 @@ export function OnHireView() {
               inside the week it already paid for adds nothing — pricing the added days on their own
               would invent a block. On the `total` basis there is no rate to calculate from, so the
               figure is typed rather than guessed. */}
-          {extending && newEndDate && (
+          {extending && newEndDate && !dateProblem && (
             <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 px-3 py-2.5 text-[11px] text-[var(--muted)]">
               {extending.ratePeriod === "total" ? (
                 <p>
@@ -716,7 +754,7 @@ export function OnHireView() {
             </button>
             <button
               onClick={doExtend}
-              disabled={busy}
+              disabled={busy || Boolean(dateProblem)}
               className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-bold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
             >
               {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
