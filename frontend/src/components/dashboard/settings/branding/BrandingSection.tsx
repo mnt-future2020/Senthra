@@ -509,7 +509,7 @@ export function BrandingSection() {
         <div className="grid gap-5 grid-cols-[repeat(auto-fit,minmax(min(280px,100%),1fr))]">
           <ImageUploader
             title="Logo"
-            hint="PNG or SVG, up to 2 MB. Used in the sidebar, login, emails and PDFs."
+            hint="PNG or SVG, up to 2 MB. Sidebar mark, login screen, emails and PDFs."
             url={logoUrl}
             uploading={uploading === "logo"}
             onPick={(f) => handleUpload("logo", f)}
