@@ -392,7 +392,12 @@ export function Sidebar({
           />
 
           {showProfileDropdown && (
-            <div className={`absolute bottom-12 left-0 w-full text-[var(--ink)] py-1.5 z-50 text-xs anim-fade-in block ${dropdownSurfaceCls}`} style={dropdownRadius}>
+            <div
+              className={`absolute text-[var(--ink)] py-1.5 z-50 text-xs anim-fade-in block ${dropdownSurfaceCls} ${
+                collapsed ? "bottom-0 left-full ml-2 w-56" : "bottom-12 left-0 w-full"
+              }`}
+              style={dropdownRadius}
+            >
               <div className="px-3 py-2 border-b border-[var(--border-2)]">
                 <p className="font-semibold text-[var(--ink)]">Signed in as</p>
                 <p className="text-[10px] text-[var(--faint)] font-mono truncate">
