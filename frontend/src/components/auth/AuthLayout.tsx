@@ -4,24 +4,24 @@ import * as React from "react";
 import Link from "next/link";
 
 import { useBranding } from "@/hooks/useBranding";
-import { BrandMark } from "@/components/branding/BrandMark";
+import { BrandWordmark } from "@/components/branding/BrandWordmark";
 
 // Shared split-screen shell for the auth pages (login / forgot / reset):
 // a branded gradient panel on the left and the form content on the right.
 export function AuthLayout({ children }: { children: React.ReactNode }) {
-  const { brandName, footerText, loginHeadline, loginSubtext } = useBranding();
+  const { footerText, loginHeadline, loginSubtext } = useBranding();
 
   return (
     <div className="flex min-h-screen">
       {/* Left brand panel (desktop only) */}
       <div className="relative hidden w-1/2 flex-col justify-between bg-gradient-to-br from-[var(--accent)] to-indigo-700 p-12 text-white lg:flex">
-        <div className="flex items-center gap-4">
-          <BrandMark
-            className="h-16 w-16 rounded-2xl text-3xl shadow-lg ring-1 ring-white/20"
-            variant="translucent"
-          />
-          <span className="text-2xl font-extrabold tracking-tight">{brandName}</span>
-        </div>
+        {/* The logo is a horizontal lockup that already reads as the brand name, so it
+            stands alone here — pairing it with a `brandName` label printed the word
+            "Senthra" twice side by side. */}
+        <BrandWordmark
+          className="h-12"
+          textClassName="text-2xl font-extrabold tracking-tight"
+        />
 
         <div>
           <h1 className="max-w-md text-4xl font-extrabold leading-[1.15] tracking-tight">
@@ -65,11 +65,11 @@ export function AuthLayout({ children }: { children: React.ReactNode }) {
       <div className="flex w-full items-center justify-center bg-[var(--surface)] px-6 py-12 lg:w-1/2">
         <div className="w-full max-w-sm">
           {/* Mobile brand */}
-          <div className="mb-8 flex items-center justify-center gap-2.5 lg:hidden">
-            <BrandMark className="h-12 w-12 rounded-2xl text-xl shadow-sm" />
-            <span className="text-xl font-extrabold text-[var(--ink)]">
-              {brandName}
-            </span>
+          <div className="mb-8 flex items-center justify-center lg:hidden">
+            <BrandWordmark
+              className="h-10"
+              textClassName="text-xl font-extrabold text-[var(--ink)]"
+            />
           </div>
 
           {children}
