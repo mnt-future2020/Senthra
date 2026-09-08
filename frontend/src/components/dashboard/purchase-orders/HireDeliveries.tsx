@@ -10,7 +10,7 @@ import { useRentalHireStream } from "@/hooks/useRentalHireStream";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { AttachmentList } from "@/components/dashboard/goods-in/DeliveryDocuments";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { inputCls } from "@/components/ui/styles";
+import { countPillCls, inputCls } from "@/components/ui/styles";
 import { Modal } from "@/components/ui/Modal";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { formatMoney } from "./poStatus";
@@ -259,8 +259,11 @@ export function HireDeliveries({
     return (
       <>
         {staleBanner}
-        <div className="flex flex-col items-center gap-2 p-10 text-center">
-          <PackageCheck className="h-8 w-8 text-[var(--faint)]" />
+        {/* `py-8`, not `p-10`. The panel is its own section now rather than a band inside the rental
+            card, so an order with no movements yet renders this and nothing else — and 80px of
+            padding around two lines was most of what the reader saw. */}
+        <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
+          <PackageCheck className="h-8 w-8 text-[var(--faint)]" aria-hidden />
           <p className="max-w-sm text-xs text-[var(--muted)]">
             Nothing recorded yet. Recording a delivery is what starts a hire — its return deadline
             only applies once the kit is here.
@@ -277,29 +280,47 @@ export function HireDeliveries({
         {receipts.map((r) => {
           const leg = legOf(r.direction);
           return (
-          <div key={r.id} className={`px-4 py-3 ${r.reversedAt ? "opacity-70" : ""}`}>
-            <div className="flex flex-wrap items-start justify-between gap-2">
+          // ONE GRID FOR THE WHOLE ROW — the record's own column boundary, not two different ones.
+          // The header line used to be its own `justify-between` flex, so the Reverse control was
+          // pinned to the card's right edge (x=1385) while the evidence beneath it started at the
+          // 24rem column (x=1010): two right-hand zones on one record, neither aligned to the other,
+          // and a different horizontal rhythm on every row depending on which parts it carried.
+          // Now both live in column two. LEFT is what moved and what was said about it; RIGHT is the
+          // action, the money and the evidence. Below `lg` the two columns stack in reading order.
+          <div key={r.id} className={`grid gap-x-6 gap-y-3 px-4 py-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,24rem)] ${r.reversedAt ? "opacity-70" : ""}`}>
+            <div className="min-w-0 space-y-3">
               <div className="min-w-0">
-                <p className="flex flex-wrap items-center gap-2 text-sm font-semibold text-[var(--ink)]">
+                <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-semibold text-[var(--ink)]">
                   {/* WHICH leg, before the code. Three sequences share this list, and "HRN-0004" only
                       reads as a return to somebody who already knows the prefixes. */}
                   <span className={`rounded-full px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider ${leg.tone}`}>
                     {leg.label}
                   </span>
                   <span className={`font-mono ${r.reversedAt ? "line-through opacity-60" : ""}`}>{r.code}</span>
-                  <span className="font-normal text-[var(--muted)]">{dateOnly(r.deliveryDate)}</span>
+                  {/* The DATE is the second thing scanned on a chronological list and it was drawn in
+                      the same weight as the "recorded by" line beneath it. Tabular figures so the
+                      column of dates lines up down the list instead of jittering per glyph width. */}
+                  <span className="font-medium tabular-nums text-[var(--muted)]">{dateOnly(r.deliveryDate)}</span>
                   {r.reversedAt && (
                     <span className="rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[var(--muted)]">
                       Reversed
                     </span>
                   )}
+                  {/* `/10` + `font-bold`, matching the leg badge beside it. At `/12` + `extrabold`
+                      this one chip out-shouted the DELIVERED/RETURNED badge that classifies the whole
+                      record, which inverted the reading order of the line. */}
                   {r.direction !== "damage" && r.condition === "damaged" && (
-                    <span className="rounded-full bg-[var(--neg)]/12 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[var(--neg)]">
+                    <span className="rounded-full bg-[var(--neg)]/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-[var(--neg)]">
                       Damaged
                     </span>
                   )}
                 </p>
-                <p className="mt-0.5 text-[11px] text-[var(--faint)]">
+                {/* `--muted`, not `--faint`. This is the WHO of the record — the line an argument with
+                    the provider turns on — and at #a1a1aa on white it sat around 2.3:1, under half of
+                    the 4.5:1 body-text floor. `--muted` clears it at ~4.8:1 and still reads as
+                    secondary against the `--ink` line above. Same change on every metadata line in
+                    this panel; none of them is decoration. */}
+                <p className="mt-1 text-[11px] text-[var(--muted)]">
                   {[
                     r.receivedBy && `${r.direction === "out" ? "handed over by" : "recorded by"} ${r.receivedBy}`,
                     r.carrier && `${r.direction === "out" ? "collected by" : "carrier"} ${r.carrier}`,
@@ -309,6 +330,81 @@ export function HireDeliveries({
                     .join(" · ")}
                 </p>
               </div>
+
+              <ul className="space-y-1.5">
+                {r.lines.map((l) => (
+                  <li key={l.id} className="flex flex-wrap items-baseline gap-x-1.5 text-xs text-[var(--muted)]">
+                    {/* The QUANTITY is the value on this line somebody came to read, and it was set in
+                        the same weight as the words around it — "new testig rental fiber — 100 of 100"
+                        with nothing to fix the eye on. Name and figure now carry different weights, and
+                        the figure is tabular so a column of them aligns. */}
+                    <span className="font-semibold wrap-break-word text-[var(--ink)]">{l.itemName}</span>
+                    <span className="text-[var(--faint)]">—</span>
+                    <span className="font-bold tabular-nums text-[var(--ink)]">
+                      {l.receivedQuantity}
+                      {/* A damage report is not "n of the order" — the ordered figure means nothing to it.
+                          The others count against what the hire will EVER hold, taken LIVE from the order
+                          rather than from this line's `orderedQuantity` snapshot: a short close after the
+                          note was written makes that snapshot include units nobody is waiting for. */}
+                      {r.direction !== "damage" && (
+                        <span className="font-normal text-[var(--muted)]">
+                          {` of ${netOrderedByHireLine.get(l.purchaseOrderRentalLineId) ?? l.orderedQuantity}`}
+                        </span>
+                      )}
+                    </span>
+                    {r.direction !== "damage" && l.previouslyReceived > 0 && (
+                      <span className="text-[var(--muted)]">({l.previouslyReceived} before this)</span>
+                    )}
+                    {/* COLOURED TEXT, not a pill. A line already carrying a name, a quantity and
+                        a denominator does not need two more filled shapes on it — the pills read
+                        as badges of state when they are simply more of the sentence. The `--neg`
+                        stays, because damaged units are the one fact here that changes what is
+                        owed. */}
+                    {r.direction !== "damage" && l.damagedQuantity > 0 && (
+                      <span className="font-semibold text-[var(--neg)]">
+                        · {l.damagedQuantity} {leg.quantityLabel}
+                      </span>
+                    )}
+                    {/* WHAT THEY ARE CHARGING for it. Beside the units rather than under the note,
+                        because a charge is only ever argued at item level: "£450 on this note" is not
+                        a claim, "£450 for the tester" is.
+                        NEUTRAL, and that is the point: a charge already agreed is settled money, not
+                        an outstanding warning. Amber belongs on the note-level box below, which is
+                        the one that says a figure is still MISSING. */}
+                    {l.damageCharge != null && (
+                      <span className="text-[var(--muted)]">
+                        · <span className="font-semibold tabular-nums text-[var(--ink)]">{formatMoney(l.damageCharge)}</span> charged
+                      </span>
+                    )}
+                    {/* The supplier's own tags. At collection the only question is whether these are the
+                        units they handed over, so they are shown, not buried. */}
+                    {l.assetTags.length > 0 && (
+                      <span className="font-mono text-[10px] text-[var(--muted)]">{l.assetTags.join(", ")}</span>
+                    )}
+                    {l.notes && <span className="text-[var(--muted)]">· {l.notes}</span>}
+                  </li>
+                ))}
+              </ul>
+
+                {r.reversedAt && (
+                  <p className="rounded-lg border border-dashed border-[var(--border)] px-2.5 py-2 text-[11px] leading-relaxed text-[var(--muted)]">
+                    Reversed{r.reversedBy ? ` by ${r.reversedBy}` : ""} — {r.reversalReason || "no reason recorded"}. Its quantities
+                    were given back; the record is kept so the change is readable.
+                  </p>
+                )}
+
+                {/* A quoted line, NOT a bordered box on a filled background: that treatment is what an
+                    input looks like on every other screen here, and somebody reading a record they cannot
+                    edit should not be invited to type into it. */}
+                {r.conditionNotes && (
+                  <p className="border-l-2 border-[var(--border)] pl-2.5 text-[11px] leading-relaxed text-[var(--muted)]">
+                    <span className="font-bold uppercase tracking-wider text-[var(--muted)]">Condition</span>{" "}
+                    {r.conditionNotes}
+                  </p>
+                )}
+              </div>
+
+              <div className="min-w-0 space-y-3">
               {/* THE BUTTON, OR WHY THERE ISN'T ONE. A control that silently vanishes reads as a
                   missing feature and sends somebody looking for a step that does not exist — and the
                   reasons here are all things they can act on ("reverse the return first"), so the
@@ -323,127 +419,95 @@ export function HireDeliveries({
                       setReversing(r);
                       setReason("");
                     }}
-                    className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-bold text-[var(--muted)] transition-colors hover:border-[var(--neg)] hover:text-[var(--neg)]"
+                    className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-bold text-[var(--muted)] transition-colors hover:border-[var(--neg)] hover:text-[var(--neg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--neg)]/40"
                   >
-                    <Undo2 className="h-3.5 w-3.5" /> Reverse
+                    <Undo2 className="h-3.5 w-3.5" aria-hidden /> Reverse
                   </button>
                 ) : (
-                  <p className="max-w-[16rem] shrink-0 text-right text-[11px] text-[var(--faint)]">
+                  // A STATE, drawn like one. It occupies the button's slot, so as loose right-aligned
+                  // grey text at 2.3:1 it read as a stray caption floating a screen-width from the
+                  // record it describes. The chip says it belongs where the control would have been,
+                  // and `--muted` makes it legible enough to act on.
+                  <p className="max-w-[18rem] shrink-0 rounded-lg border border-dashed border-[var(--border)] px-2.5 py-1.5 text-[11px] leading-snug text-[var(--muted)]">
                     Can&apos;t be reversed — {blockedReason(r)}.
                   </p>
                 ))}
-            </div>
-
-            <ul className="mt-2 space-y-1">
-              {r.lines.map((l) => (
-                <li key={l.id} className="text-xs text-[var(--muted)]">
-                  <span className="font-semibold text-[var(--ink)]">{l.itemName}</span> — {l.receivedQuantity}
-                  {/* A damage report is not "n of the order" — the ordered figure means nothing to it.
-                      The others count against what the hire will EVER hold, taken LIVE from the order
-                      rather than from this line's `orderedQuantity` snapshot: a short close after the
-                      note was written makes that snapshot include units nobody is waiting for. */}
-                  {r.direction !== "damage" &&
-                    ` of ${netOrderedByHireLine.get(l.purchaseOrderRentalLineId) ?? l.orderedQuantity}`}
-                  {r.direction !== "damage" && l.previouslyReceived > 0 && ` (${l.previouslyReceived} before this)`}
-                  {r.direction !== "damage" && l.damagedQuantity > 0 && (
-                    <span className="text-[var(--neg)]"> · {l.damagedQuantity} {leg.quantityLabel}</span>
-                  )}
-                  {/* WHAT THEY ARE CHARGING for it. Beside the units rather than under the note,
-                      because a charge is only ever argued at item level: "£450 on this note" is not
-                      a claim, "£450 for the tester" is. */}
-                  {l.damageCharge != null && (
-                    <span className="font-semibold text-[var(--warn,#d97706)]"> · {formatMoney(l.damageCharge)} charged</span>
-                  )}
-                  {/* The supplier's own tags. At collection the only question is whether these are the
-                      units they handed over, so they are shown, not buried. */}
-                  {l.assetTags.length > 0 && (
-                    <span className="ml-1 font-mono text-[10px] text-[var(--faint)]">{l.assetTags.join(", ")}</span>
-                  )}
-                  {l.notes && <span className="text-[var(--faint)]"> · {l.notes}</span>}
-                </li>
-              ))}
-            </ul>
-
-            {/* THE MONEY LINE, and the one action that can still be taken on a written note.
-                A damage charge is the only value here that does not need a reversal to change: every
-                quantity feeds a running total on the hire line, so editing one would leave a stored
-                figure disagreeing with the records it summarises — a charge feeds nothing. It works
-                that way because of WHEN money arrives: the damage is written down the day it is
-                found, the supplier's quote comes the following week.
-                Shown on the legs where the damage is OURS. An arrival's damage is the supplier's own
-                fault, evidenced on their own note, and the service refuses a charge against it. */}
-            {r.direction !== "in" && !r.reversedAt && damagedUnits(r) > 0 && (
-              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed border-[var(--border)] px-2.5 py-2">
-                <p className="text-[11px] text-[var(--muted)]">
-                  {r.damageChargeTotal == null ? (
-                    // Not "£0.00". A note awaiting a quote and one the supplier settled for nothing
-                    // are different facts, and only one of them is somebody's job to chase.
-                    <span className="font-semibold text-[var(--warn,#d97706)]">No damage charge recorded yet</span>
-                  ) : (
-                    <>
-                      Damage charge{" "}
-                      <span className="font-extrabold text-[var(--ink)]">{formatMoney(r.damageChargeTotal)}</span>
-                      {r.damageChargeRef && <span className="text-[var(--faint)]"> · their ref {r.damageChargeRef}</span>}
-                    </>
-                  )}
-                </p>
-                {canReverse && (
-                  <button
-                    type="button"
-                    onClick={() => openCharge(r)}
-                    className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-bold text-[var(--muted)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
-                  >
-                    <Receipt className="h-3.5 w-3.5" /> {r.damageChargeTotal == null ? "Record charge" : "Update charge"}
-                  </button>
+                {/* THE MONEY LINE, and the one action that can still be taken on a written note.
+                    A damage charge is the only value here that does not need a reversal to change: every
+                    quantity feeds a running total on the hire line, so editing one would leave a stored
+                    figure disagreeing with the records it summarises — a charge feeds nothing. It works
+                    that way because of WHEN money arrives: the damage is written down the day it is
+                    found, the supplier's quote comes the following week.
+                    Shown on the legs where the damage is OURS. An arrival's damage is the supplier's own
+                    fault, evidenced on their own note, and the service refuses a charge against it. */}
+                {r.direction !== "in" && !r.reversedAt && damagedUnits(r) > 0 && (
+                  // The dashed outline stays — it is a slot awaiting a figure, not a record — but the
+                  // wrapper is now a two-line block rather than a flat `justify-between` row. Squeezed
+                  // into the right column the label and its button were being pushed apart to opposite
+                  // edges of a 24rem box; stacked, the action sits directly under the sentence that
+                  // explains it, which is what "row actions belong beside their row" means here.
+                  <div className="rounded-lg border border-dashed border-[var(--border)] px-2.5 py-2">
+                    <p className="text-[11px] leading-relaxed text-[var(--muted)]">
+                      {r.damageChargeTotal == null ? (
+                        // Not "£0.00". A note awaiting a quote and one the supplier settled for nothing
+                        // are different facts, and only one of them is somebody's job to chase.
+                        <span className="font-semibold text-[var(--warn,#d97706)]">No damage charge recorded yet</span>
+                      ) : (
+                        <>
+                          Damage charge{" "}
+                          <span className="font-extrabold tabular-nums text-[var(--ink)]">{formatMoney(r.damageChargeTotal)}</span>
+                          {r.damageChargeRef && <span className="text-[var(--muted)]"> · their ref {r.damageChargeRef}</span>}
+                        </>
+                      )}
+                    </p>
+                    {canReverse && (
+                      <button
+                        type="button"
+                        onClick={() => openCharge(r)}
+                        className="mt-2 flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-bold text-[var(--muted)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/40"
+                      >
+                        <Receipt className="h-3.5 w-3.5" aria-hidden /> {r.damageChargeTotal == null ? "Record charge" : "Update charge"}
+                      </button>
+                    )}
+                  </div>
                 )}
+
+                {/* The SAME list the movement form stages photos in and the goods receipt files its
+                    documents in: a row per file, name as the link, trash on the right.
+                    It began as filename chips with a crossed-out-image glyph for "remove" — a control
+                    nobody could guess at — then became a 4:3 thumbnail grid, which at a quarter of a wide
+                    container gave ONE photo a ~380x285 tile and made six of them unreadable. The row
+                    keeps the small preview from that second attempt, because condition evidence is the
+                    thing here somebody actually needs to LOOK at and a filename is not a photograph. */}
+                <div>
+                  <AttachmentList
+                    // INLINE when there is nothing to show. The block empty state is a full-width dashed
+                    // box with `py-6` padding, and this panel is full-bleed — so on a 1440px order it
+                    // drew a ~1300x60px empty rectangle saying "No condition photos on this record."
+                    // That single element is the largest piece of blank canvas on the page. The sentence
+                    // is worth keeping (nobody can photograph an arrival after the van has gone), the
+                    // rectangle is not.
+                    emptyVariant="inline"
+                    items={r.attachments.map((a) => ({
+                      id: a.id,
+                      fileName: a.fileName,
+                      fileType: a.fileType,
+                      fileSizeBytes: a.fileSizeBytes,
+                      src: a.url,
+                    }))}
+                    // Said out loud when there are none, because it cannot be fixed later: nobody can
+                    // photograph an arrival after the van has gone.
+                    emptyLabel="No condition photos on this record."
+                    onRemove={canCurate && !r.reversedAt ? (attachmentId) => removePhoto(r.id, attachmentId) : undefined}
+                    // Evidence for a claim against the supplier, and unrepeatable — nobody can
+                    // photograph an arrival after the van has gone. It used to delete on the click.
+                    removePrompt={{
+                      title: "Remove condition photo",
+                      message: "Remove this photo from the record? Condition evidence can't be recaptured once the delivery has gone.",
+                    }}
+                  />
+                </div>
               </div>
-            )}
-
-            {r.reversedAt && (
-              <p className="mt-2 rounded-lg border border-dashed border-[var(--border)] px-2.5 py-2 text-[11px] text-[var(--muted)]">
-                Reversed{r.reversedBy ? ` by ${r.reversedBy}` : ""} — {r.reversalReason || "no reason recorded"}. Its quantities
-                were given back; the record is kept so the change is readable.
-              </p>
-            )}
-
-            {/* A quoted line, NOT a bordered box on a filled background: that treatment is what an
-                input looks like on every other screen here, and somebody reading a record they cannot
-                edit should not be invited to type into it. */}
-            {r.conditionNotes && (
-              <p className="mt-2 border-l-2 border-[var(--border)] pl-2.5 text-[11px] text-[var(--muted)]">
-                <span className="font-bold uppercase tracking-wider text-[var(--faint)]">Condition</span>{" "}
-                {r.conditionNotes}
-              </p>
-            )}
-
-            {/* The SAME list the movement form stages photos in and the goods receipt files its
-                documents in: a row per file, name as the link, trash on the right.
-                It began as filename chips with a crossed-out-image glyph for "remove" — a control
-                nobody could guess at — then became a 4:3 thumbnail grid, which at a quarter of a wide
-                container gave ONE photo a ~380x285 tile and made six of them unreadable. The row
-                keeps the small preview from that second attempt, because condition evidence is the
-                thing here somebody actually needs to LOOK at and a filename is not a photograph. */}
-            <div className="mt-2">
-              <AttachmentList
-                items={r.attachments.map((a) => ({
-                  id: a.id,
-                  fileName: a.fileName,
-                  fileType: a.fileType,
-                  fileSizeBytes: a.fileSizeBytes,
-                  src: a.url,
-                }))}
-                // Said out loud when there are none, because it cannot be fixed later: nobody can
-                // photograph an arrival after the van has gone.
-                emptyLabel="No condition photos on this record."
-                onRemove={canCurate && !r.reversedAt ? (attachmentId) => removePhoto(r.id, attachmentId) : undefined}
-                // Evidence for a claim against the supplier, and unrepeatable — nobody can
-                // photograph an arrival after the van has gone. It used to delete on the click.
-                removePrompt={{
-                  title: "Remove condition photo",
-                  message: "Remove this photo from the record? Condition evidence can't be recaptured once the delivery has gone.",
-                }}
-              />
-            </div>
           </div>
           );
         })}
@@ -566,13 +630,23 @@ function damagedUnits(r: RentalReceipt): number {
   return r.lines.reduce((sum, l) => sum + l.damagedQuantity, 0);
 }
 
-/** Header for the panel, so the section reads as one thing on the order. */
+/**
+ * Header for the panel, so the section reads as one thing on the order.
+ *
+ * Title, count, subtitle — the same three parts every section header on this tab now carries. The
+ * icon went for the reason the Damage & loss one did: it decorated a heading that already named
+ * itself, and the two sections have to read as siblings.
+ */
 export function HireDeliveriesHeading({ count }: { count: number }) {
   return (
     <div className="flex items-center gap-2">
-      <PackageCheck className="h-4 w-4 text-[var(--muted)]" />
       <h3 className="text-sm font-extrabold text-[var(--ink)]">Hire movements</h3>
-      {count > 0 && <span className="text-[11px] text-[var(--muted)]">{count}</span>}
+      {/* The house COUNT PILL, not a loose number. It read as a stray digit trailing the heading —
+          indistinguishable from a footnote marker — where every other count in the app wears this
+          shape. Geometry comes from the shared constant; the quiet tone is this surface's own. */}
+      {count > 0 && (
+        <span className={`${countPillCls} bg-[var(--surface-2)] text-[var(--muted)]`}>{count}</span>
+      )}
     </div>
   );
 }

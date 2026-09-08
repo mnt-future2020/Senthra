@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { FileText, Loader2, Trash2, Upload } from "lucide-react";
+import { FileText, ImageOff, Loader2, Trash2, Upload } from "lucide-react";
 
 import { useDashboard } from "@/hooks/useDashboard";
 import { shrinkImage } from "@/lib/image";
@@ -213,6 +213,7 @@ export function AttachmentList({
   items,
   onRemove,
   emptyLabel = "No delivery documents attached yet.",
+  emptyVariant = "block",
   confirmRemove = true,
   removePrompt,
 }: {
@@ -220,6 +221,19 @@ export function AttachmentList({
   onRemove?: (id: string) => void | Promise<void>;
   /** What this surface calls its files — a hire delivery attaches photographs, not documents. */
   emptyLabel?: string;
+  /**
+   * How loudly to say there is nothing here.
+   *
+   * `block` (the default, and every existing caller's behaviour unchanged) is a dashed drop-zone-shaped
+   * box — right where the list is the POINT of the panel it sits in, and where a file is expected to be
+   * added next to it.
+   *
+   * `inline` is one quiet line. For a list that is a supporting DETAIL of a record rather than the
+   * record itself — a hire movement's condition photos sit under the items that moved, and on a
+   * full-bleed panel the block variant renders a ~1300px-wide empty rectangle to state an absence.
+   * The words are identical; only the box goes.
+   */
+  emptyVariant?: "block" | "inline";
   /**
    * Ask before removing. DEFAULT TRUE, and the default is the point: a stored file is gone for good
    * the moment the trash icon is hit, and the surfaces sharing this component disagreed about
@@ -251,7 +265,14 @@ export function AttachmentList({
   };
 
   if (items.length === 0) {
-    return <p className="rounded-xl border border-dashed border-[var(--border)] px-3 py-6 text-center text-xs text-[var(--muted)]">{emptyLabel}</p>;
+    return emptyVariant === "inline" ? (
+      <p className="flex items-center gap-1.5 text-[11px] text-[var(--muted)]">
+        <ImageOff className="h-3.5 w-3.5 shrink-0 text-[var(--faint)]" aria-hidden />
+        {emptyLabel}
+      </p>
+    ) : (
+      <p className="rounded-xl border border-dashed border-[var(--border)] px-3 py-6 text-center text-xs text-[var(--muted)]">{emptyLabel}</p>
+    );
   }
 
   return (

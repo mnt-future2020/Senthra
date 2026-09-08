@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { AlertTriangle, Ban, PackageX, Receipt, RotateCcw, Undo2 } from "lucide-react";
+import { AlertTriangle, Ban, ChevronDown, PackageX, Receipt, RotateCcw, Undo2 } from "lucide-react";
 
 import * as rentalService from "@/services/rental.service";
 import { useDashboard } from "@/hooks/useDashboard";
@@ -11,6 +11,7 @@ import { formatCalendarDay, formatDate } from "@/lib/formatDate";
 import { formatMoney } from "./poStatus";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Modal } from "@/components/ui/Modal";
+import { countPillCls } from "@/components/ui/styles";
 import { AttachmentList } from "@/components/dashboard/goods-in/DeliveryDocuments";
 import { UNTYPED_IMAGE } from "@/components/dashboard/goods-in/docPicker";
 import type { HireCustodyExit } from "@/types/rental";
@@ -236,8 +237,23 @@ const pillCls = (active: boolean) =>
     active ? "bg-[var(--surface)] text-[var(--ink)] shadow-sm" : "text-[var(--muted)] hover:text-[var(--ink)]"
   }`;
 
-const openTagCls = "shrink-0 rounded-full bg-[var(--neg)]/12 px-2 py-0.5 text-[10px] font-bold text-[var(--neg)]";
-const quietTagCls = "shrink-0 rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-[10px] font-bold text-[var(--faint)]";
+/**
+ * A SETTLEMENT TAG — state, and it must not read as a button.
+ *
+ * Both are pills: `rounded-full`, tinted fill, no border. Every ACTION on this panel is a
+ * `rounded-lg` bordered box (see `rowBtnCls`). Shape carries the distinction, not colour, so it
+ * survives for a reader who cannot separate the two hues — which matters here because "Not yet
+ * charged" sits directly beside "Record charge" on the same row.
+ *
+ * `open` keeps `--neg`, because an unanswered record is the one thing in this panel somebody still
+ * owes work on. `/10` and `font-semibold` rather than `/12` and `font-bold`: with several rows open
+ * at once the column was reading as a stack of alerts.
+ *
+ * `quiet` moved off `--faint` (~2.3:1 on white, under half the 4.5:1 floor) onto `--muted`. A settled
+ * record is not an unimportant one — "Nothing owed" is an answer somebody may need to defend.
+ */
+const openTagCls = "shrink-0 rounded-full bg-[var(--neg)]/10 px-2 py-0.5 text-[10px] font-semibold text-[var(--neg)]";
+const quietTagCls = "shrink-0 rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-[10px] font-semibold text-[var(--muted)]";
 
 // `neg` is for taking a record BACK, and it is deliberately the quietest of the three: withdrawing a
 // report or a charge is a correction, not a step forward, and it should not compete with the action
@@ -571,157 +587,262 @@ export function HireCustodyTimeline({
     if (needsCredit(e)) toCredit += 1;
   }
   const visible = expanded ? shown : shown.slice(0, COLLAPSED);
+  /**
+   * Does ANY record IN THE SECTION carry an action — and therefore should every row reserve its slot?
+   *
+   * Browser QA measured the problem this fixes. The action sits last in the right-hand cluster, so a
+   * row that has one pushed its settlement tag and date 129px further left than a row that does not:
+   * on PO-0090 three rows ended at x=1256 and the fourth at x=1385, and the settlement column
+   * visibly zig-zagged down a list whose entire job is to be read as a column.
+   *
+   * READ OFF `exits`, NOT `visible` OR `shown`, and that is the whole subtlety. Both of those are
+   * subsets that the READER changes at will — `visible` by pressing Show all, `shown` by pressing a
+   * filter pill — so deriving the slot from either makes the reserved column a property of the
+   * current view rather than of the section. Measured on PO-0073: the All group (whose collapsed
+   * four rows include a "Found it") held the column at x=1253, and switching to "From a job" (three
+   * rows, none actionable) released it to x=1385. Every settlement tag and date slid 132px sideways
+   * for a filter press, which is the same misalignment this slot exists to prevent, re-staged as a
+   * jump. `exits` is the one list nobody can change from the keyboard, so the column stays put.
+   *
+   * The cost is a strip of reserved space in a filtered group that happens to hold no action. That is
+   * the right trade: a stable column across every view beats a tight one that moves.
+   *
+   * Still gated on `canSettle` and still empty on a section with nothing to act on, so a fully
+   * settled panel (or a reader without `settle`) is not given dead space to explain. The disjunction
+   * mirrors the three buttons below exactly — `isOpen` renders Record charge, `awaitingQuote` renders
+   * it a step later, and a still-lost loss renders Found it — so the slot cannot appear on a section
+   * where no button will.
+   */
+  const anyRowAction =
+    canSettle &&
+    exits.some((e) => isOpen(e) || awaitingQuote(e) || (e.kind === "loss" && e.custodyState === "lost"));
 
   return (
-    <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
-      <div className="mb-1 flex flex-wrap items-center gap-2">
-        <AlertTriangle className="h-4 w-4 text-[var(--neg)]" />
-        <h3 className="text-sm font-extrabold text-[var(--ink)]">Damage &amp; loss</h3>
-        <span className="text-[11px] text-[var(--muted)]">{exits.length}</span>
-        {/* The two numbers this panel exists to answer, kept in the header so collapsing the list
-            cannot hide them: what is still owed an answer, and what has been agreed so far. */}
-        {toCharge > 0 && (
-          <span className="rounded-full bg-[var(--neg)]/12 px-2 py-0.5 text-[10px] font-bold text-[var(--neg)]">
-            {toCharge} to charge
-          </span>
-        )}
-        {/* Its own count, not folded into "to charge". They are opposite errands — one owes the
-            provider money, the other is owed it — and a single number would send somebody to raise a
-            charge on a record that already has one. */}
-        {toCredit > 0 && (
-          <span className="rounded-full bg-[var(--neg)]/12 px-2 py-0.5 text-[10px] font-bold text-[var(--neg)]">
-            {toCredit} to credit
-          </span>
-        )}
-        {charged > 0 && (
-          <span className="rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-[10px] font-bold text-[var(--muted)]">
-            {formatMoney(charged)} charged
-          </span>
-        )}
-      </div>
-      <p className="mb-3 text-[11px] text-[var(--muted)]">
-        What happened to this equipment while we held it. Nothing here is written off as our stock — a
-        hire stays theirs, and what we owe is agreed on their own note.
-      </p>
-
-      {/* Offered only when there is more than one kind to tell apart. A control that cannot change the
-          list is one the reader has to press to learn that. */}
-      {(["job", "here", "loss"] as const).filter((k) => counts[k] > 0).length > 1 && (
-        <div className="mb-3 flex flex-wrap items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-1">
-          {(["all", "job", "here", "loss"] as const).map((k) =>
-            k !== "all" && counts[k] === 0 ? null : (
-              <button
-                key={k}
-                type="button"
-                onClick={() => {
-                  setFilter(k);
-                  setExpanded(false);
-                }}
-                aria-pressed={filter === k}
-                className={pillCls(filter === k)}
-              >
-                {k === "all" ? "All" : SOURCE_LABEL[k]}
-                <span className="ml-1 text-[var(--faint)]">{counts[k]}</span>
-              </button>
-            ),
+    // A SECTION with a header band, like Rental lines and Hire movements above it — not a padded box.
+    // This used to be a bordered card rendered INSIDE the rental-lines card, so the page ended in a
+    // box within a box and the panel's own title had no boundary separating it from the movement list
+    // it followed. Header, body and footer are now three visible bands, which is what makes the count
+    // in the header and the "Show all" in the footer read as belonging to the rows between them.
+    <section className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <div className="border-b border-[var(--border)] px-4 py-3">
+        {/* NO ICON. A red AlertTriangle beside the words "Damage & loss" says nothing the words do
+            not, and it made this section's header heavier than Rental lines and Hire movements —
+            which are the same KIND of thing and should read as siblings. All five headers on this
+            tab are now: title, optional count, subtitle. */}
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="text-sm font-extrabold text-[var(--ink)]">Damage &amp; loss</h3>
+          <span className={`${countPillCls} bg-[var(--surface-2)] text-[var(--muted)]`}>{exits.length}</span>
+          {/* The two numbers this panel exists to answer, kept in the header so collapsing the list
+              cannot hide them: what is still owed an answer, and what has been agreed so far. */}
+          {toCharge > 0 && (
+            <span className="rounded-full bg-[var(--neg)]/12 px-2 py-0.5 text-[10px] font-bold text-[var(--neg)]">
+              {toCharge} to charge
+            </span>
+          )}
+          {/* Its own count, not folded into "to charge". They are opposite errands — one owes the
+              provider money, the other is owed it — and a single number would send somebody to raise a
+              charge on a record that already has one. */}
+          {toCredit > 0 && (
+            <span className="rounded-full bg-[var(--neg)]/12 px-2 py-0.5 text-[10px] font-bold text-[var(--neg)]">
+              {toCredit} to credit
+            </span>
+          )}
+          {charged > 0 && (
+            <span className="rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-[10px] font-bold text-[var(--muted)]">
+              {formatMoney(charged)} charged
+            </span>
           )}
         </div>
-      )}
+        {/* ONE LINE, and both halves of that are deliberate.
+            Two clauses, not four: this sits between the section title and the first record, so every
+            line of it pushes the rows down — and the reader came for those rows. What survives is the
+            only thing they could get wrong (the units are the provider's, so none of this is a
+            write-off against our own stock); where the money was agreed is on each row already.
+            And the measure is `105ch`, not the `70ch` a paragraph wants, because at 70ch this
+            sentence broke after "write" and left "off." alone on a second line. A subtitle is a
+            LABEL, not prose — it should occupy one line at desktop width and wrap only when the
+            viewport genuinely forces it. */}
+        <p className="mt-1 max-w-[105ch] text-xs text-[var(--muted)]">
+          What happened while we held this equipment — a hire stays the provider&rsquo;s, not our stock
+          to write off.
+        </p>
 
+        {/* Offered only when there is more than one kind to tell apart. A control that cannot change the
+            list is one the reader has to press to learn that. */}
+        {(["job", "here", "loss"] as const).filter((k) => counts[k] > 0).length > 1 && (
+          <div className="mt-3 inline-flex max-w-full flex-wrap items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-1">
+            {(["all", "job", "here", "loss"] as const).map((k) =>
+              k !== "all" && counts[k] === 0 ? null : (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => {
+                    setFilter(k);
+                    setExpanded(false);
+                  }}
+                  aria-pressed={filter === k}
+                  className={pillCls(filter === k)}
+                >
+                  {k === "all" ? "All" : SOURCE_LABEL[k]}
+                  <span className="ml-1 tabular-nums text-[var(--muted)]">{counts[k]}</span>
+                </button>
+              ),
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* TWO BLOCKS PER ROW, not one thin line spanning the panel — this is the change the panel
+          existed to need. Every value was on a single 20px baseline: the quantity at the far left, the
+          settlement tag, the date and the action pinned to the far right, and on a 1440px order about
+          900px of nothing between them. Nothing paired "3 × damaged" with "£1.00 · HDM-0011" except
+          being on the same row, which is exactly the association the eye cannot make across that gap.
+
+          Now each side is a two-line block of its own — WHAT HAPPENED and WHO/WHERE on the left, WHAT
+          IT COST and WHEN on the right — so a row is a shape with height rather than a hairline, and
+          the two halves read as one record. The action stays last, immediately after the money it acts
+          on. Nothing about which values are shown, or when, has changed. */}
       <ul className="divide-y divide-[var(--border)]">
         {visible.map((e) => {
           const isLoss = e.kind === "loss";
           const open = isOpen(e);
           const recoverable = isLoss && e.custodyState === "lost" && canSettle;
+          /**
+           * Does THIS record still want something from somebody — and so earn the red tile?
+           *
+           * Every row used to get `bg-[var(--neg)]/10` with a red glyph, which made the colour mean
+           * "this is a damage/loss panel" rather than "this needs you". A section of ten settled,
+           * withdrawn and recovered records rendered as ten alerts, and the section shouted louder
+           * than Hire movements beside it for no reason a reader could act on.
+           *
+           * Red now marks the same three states the header already counts — unanswered, awaiting a
+           * price, or owed a credit — so the tiles and the "N to charge" pill above them agree.
+           * Everything else takes the neutral tile. Damage and loss stay told apart by the GLYPH
+           * (triangle vs package), never by colour, so nothing is lost when the tile goes quiet.
+           */
+          const wantsAttention = open || awaitingQuote(e) || needsCredit(e);
           return (
-            <li key={e.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-sm">
-              {isLoss ? (
-                <PackageX className="h-3.5 w-3.5 shrink-0 text-[var(--neg)]" />
-              ) : (
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-[var(--neg)]" />
-              )}
+            <li key={e.id} className="flex flex-wrap items-start gap-x-3 gap-y-2 px-4 py-3 text-sm transition-colors hover:bg-[var(--surface-2)]">
+              {/* The glyph in a tinted tile — an anchor the eye can run down the left edge of the
+                  list, where a bare 14px icon on white was invisible at a glance. Tone follows
+                  `wantsAttention`, not the panel's subject; shape tells damage from loss. */}
+              <span
+                aria-hidden
+                className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${
+                  wantsAttention ? "bg-[var(--neg)]/10 text-[var(--neg)]" : "bg-[var(--surface-2)] text-[var(--muted)]"
+                }`}
+              >
+                {isLoss ? <PackageX className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
+              </span>
               <button
                 type="button"
                 onClick={() => setDetail(e)}
-                className="min-w-0 flex-1 truncate text-left hover:underline"
+                className="min-w-0 flex-1 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/40"
                 title="Open the full record"
               >
-                <span className="font-bold text-[var(--ink)]">
+                <span className="block font-bold text-[var(--ink)] hover:underline">
                   {e.qty} × {isLoss ? "declared lost" : "damaged"}
                 </span>
-                <span className="ml-2 text-[11px] text-[var(--muted)]">
+                {/* `--muted`, not the old `--muted` at 11px trailing the title on the same line: the
+                    job and the engineer are the context that makes the quantity mean something, so
+                    they get their own line directly beneath it rather than a gap-separated suffix. */}
+                <span className="mt-0.5 block truncate text-[11px] text-[var(--muted)]">
                   {[e.jobNumber, e.engineerName].filter(Boolean).join(" · ") || CUSTODY_LABEL[e.custodyState] || ""}
                 </span>
               </button>
 
-              {/* A settled record says what it was settled ON — the note is the document the money
-                  lives on, and a bare figure with nothing to look it up by is not an answer to an
-                  accountant. */}
-              {e.settledByCode ? (
-                // NOT struck through. A strike would say the charge had been cancelled, and it has
-                // not — it is standing, on equipment we have, which is precisely the problem. The
-                // figure stays legible and the colour and the suffix say what is wrong with it.
-                <span
-                  className={`shrink-0 text-[11px] font-semibold ${
-                    needsCredit(e)
-                      ? "text-[var(--neg)]"
-                      : awaitingQuote(e)
-                        ? "text-[var(--warn,#d97706)]"
-                        : "text-[var(--pos)]"
-                  }`}
-                >
-                  {/* "no charge" READ AS "they are not charging us", which is a different fact and the
-                      one nobody has to chase. A note awaiting a quote and one the provider settled for
-                      nothing are not the same thing — the note-level UI was careful about exactly this
-                      and the row had lost it. */}
-                  {e.settledCharge != null ? `${formatMoney(e.settledCharge)} · ` : "awaiting a quote · "}
-                  <span className="font-mono">{e.settledByCode}</span>
-                  {needsCredit(e) && " · to credit"}
-                </span>
-              ) : (
-                <span className={open ? openTagCls : quietTagCls}>
-                  {settlementTag(e)}
-                </span>
-              )}
+              <div className="flex shrink-0 items-start gap-2 sm:gap-3">
+                <div className="text-right">
+                  {/* A settled record says what it was settled ON — the note is the document the money
+                      lives on, and a bare figure with nothing to look it up by is not an answer to an
+                      accountant. */}
+                  {e.settledByCode ? (
+                    // NOT struck through. A strike would say the charge had been cancelled, and it has
+                    // not — it is standing, on equipment we have, which is precisely the problem. The
+                    // figure stays legible and the colour and the suffix say what is wrong with it.
+                    <span
+                      className={`block text-[11px] font-semibold ${
+                        needsCredit(e)
+                          ? "text-[var(--neg)]"
+                          : awaitingQuote(e)
+                            ? "text-[var(--warn,#d97706)]"
+                            : "text-[var(--pos)]"
+                      }`}
+                    >
+                      {/* "no charge" READ AS "they are not charging us", which is a different fact and the
+                          one nobody has to chase. A note awaiting a quote and one the provider settled for
+                          nothing are not the same thing — the note-level UI was careful about exactly this
+                          and the row had lost it. */}
+                      {e.settledCharge != null ? `${formatMoney(e.settledCharge)} · ` : "awaiting a quote · "}
+                      <span className="font-mono">{e.settledByCode}</span>
+                      {needsCredit(e) && " · to credit"}
+                    </span>
+                  ) : (
+                    <span className={`${open ? openTagCls : quietTagCls} inline-block`}>
+                      {settlementTag(e)}
+                    </span>
+                  )}
 
-              <span className="shrink-0 text-[11px] text-[var(--faint)]">{formatDate(e.declaredAt)}</span>
+                  {/* Under the money it dates, not floating beside it. `--muted` for the same contrast
+                      reason as everywhere else here, and tabular so the column of dates aligns. */}
+                  <span className="mt-1 block text-[11px] tabular-nums text-[var(--muted)]">{formatDate(e.declaredAt)}</span>
+                </div>
 
-              {/* The one action that IS the work stays on the row; everything else lives behind the
-                  record, because a row carrying four buttons is no shorter than the card it replaced. */}
-              {open && canSettle && (
-                <button type="button" onClick={() => openCharge(e)} className={rowBtnCls("accent")}>
-                  <Receipt className="h-3.5 w-3.5" />
-                  Record charge
-                </button>
-              )}
-              {/* The same errand one step later: the claim is already on their document and their price
-                  has now arrived. SAME LABEL, deliberately — "record what they are charging" is one job
-                  to the person doing it, and whether that writes a new note or fills in one already
-                  raised is plumbing. The two states are mutually exclusive, so one label is never
-                  ambiguous; two made the reader stop and work out which they wanted. */}
-              {!open && awaitingQuote(e) && canSettle && (
-                <button type="button" onClick={() => openCharge(e, "quote")} className={rowBtnCls("accent")}>
-                  <Receipt className="h-3.5 w-3.5" />
-                  Record charge
-                </button>
-              )}
-              {!open && recoverable && (
-                <button type="button" onClick={() => openRecover(e)} disabled={recovering === e.id} className={rowBtnCls("pos")}>
-                  <RotateCcw className="h-3.5 w-3.5" />
-                  {recovering === e.id ? "Booking in…" : "Found it"}
-                </button>
-              )}
+                {/* The one action that IS the work stays on the row; everything else lives behind the
+                    record, because a row carrying four buttons is no shorter than the card it replaced.
+
+                    THE SLOT IS FIXED-WIDTH from `sm` so the settlement column above stops zig-zagging
+                    — see `anyRowAction`. 7.5rem is the widest button this slot ever holds ("Record
+                    charge" measures 117px in the browser); `justify-end` keeps it against the card
+                    edge, and a row with no action leaves the slot empty rather than collapsing it.
+                    Below `sm` the slot shrinks to its content: on a 360px row the reserved strip
+                    would cost more than the alignment is worth, and the rows stack there anyway. */}
+                {anyRowAction && (
+                <div className="flex shrink-0 justify-end sm:w-[7.5rem]">
+                {open && canSettle && (
+                  <button type="button" onClick={() => openCharge(e)} className={rowBtnCls("accent")}>
+                    <Receipt className="h-3.5 w-3.5" aria-hidden />
+                    Record charge
+                  </button>
+                )}
+                {/* The same errand one step later: the claim is already on their document and their price
+                    has now arrived. SAME LABEL, deliberately — "record what they are charging" is one job
+                    to the person doing it, and whether that writes a new note or fills in one already
+                    raised is plumbing. The two states are mutually exclusive, so one label is never
+                    ambiguous; two made the reader stop and work out which they wanted. */}
+                {!open && awaitingQuote(e) && canSettle && (
+                  <button type="button" onClick={() => openCharge(e, "quote")} className={rowBtnCls("accent")}>
+                    <Receipt className="h-3.5 w-3.5" aria-hidden />
+                    Record charge
+                  </button>
+                )}
+                {!open && recoverable && (
+                  <button type="button" onClick={() => openRecover(e)} disabled={recovering === e.id} className={rowBtnCls("pos")}>
+                    <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+                    {recovering === e.id ? "Booking in…" : "Found it"}
+                  </button>
+                )}
+                </div>
+                )}
+              </div>
             </li>
           );
         })}
       </ul>
 
+      {/* THE SECTION'S OWN FOOTER, spanning it. As a bare 11px link tucked under the last row it read
+          as a stray sentence belonging to that row rather than a control over the whole list — the
+          panel's count says 10, the rows show 4, and the thing that reconciles them was the quietest
+          text on the page. `aria-expanded` because it is a disclosure, and the label already names the
+          number so the count and the control say the same thing. */}
       {shown.length > COLLAPSED && (
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className="mt-2 text-[11px] font-semibold text-[var(--accent)] underline-offset-2 hover:underline"
+          aria-expanded={expanded}
+          className="flex w-full items-center justify-center gap-1.5 border-t border-[var(--border)] px-4 py-2.5 text-xs font-bold text-[var(--accent)] transition-colors hover:bg-[var(--surface-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent)]/40"
         >
+          <ChevronDown className={`h-3.5 w-3.5 transition-transform ${expanded ? "rotate-180" : ""}`} aria-hidden />
           {expanded ? "Show fewer" : `Show all ${shown.length}`}
         </button>
       )}
@@ -1182,6 +1303,6 @@ export function HireCustodyTimeline({
           </>
         }
       />
-    </div>
+    </section>
   );
 }
