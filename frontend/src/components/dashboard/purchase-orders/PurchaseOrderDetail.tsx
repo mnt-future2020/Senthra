@@ -240,18 +240,22 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   // Workflow buttons available for the current status × permissions. The PDF download is always
   // available to a viewer (it's the same document emailed to the supplier).
   const s = po.status;
-  const actions: React.ReactNode[] = [
-    <ActionBtn key="pdf" icon={Download} onClick={downloadPdf} disabled={busy || downloading}>
+  // UTILITIES first, and kept apart from the workflow below — see ActionBtn's tone table. These two
+  // are true of the order at every status and are never the answer to "what happens next", so they
+  // are drawn quietly and separated by a hairline rather than queued in with the steps.
+  const utilityActions: React.ReactNode[] = [
+    <ActionBtn key="pdf" icon={Download} tone="quiet" onClick={downloadPdf} disabled={busy || downloading}>
       {downloading ? "Preparing…" : "Download PDF"}
     </ActionBtn>,
   ];
+  const actions: React.ReactNode[] = [];
   // A PO locks once approved (edits are draft-only, and there's no way back to draft), so an order
   // with no expected delivery date must be stopped while Edit is still on screen — otherwise it can
   // neither be sent nor fixed. The backend enforces this on approve/submit/send; this mirrors it.
   const noDate = !po.expectedDeliveryDate;
   const noDateReason = "Set an expected delivery date first — use Edit.";
   if (s === "draft" && can("purchase_orders.edit"))
-    actions.push(<ActionBtn key="edit" icon={Pencil} onClick={() => router.push(`/dashboard/purchase-orders/${po.code}/edit`)} disabled={busy}>Edit</ActionBtn>);
+    utilityActions.push(<ActionBtn key="edit" icon={Pencil} tone="quiet" onClick={() => router.push(`/dashboard/purchase-orders/${po.code}/edit`)} disabled={busy}>Edit</ActionBtn>);
   // A PRF-born draft takes the FAST PATH: Finance already reviewed these numbers on the PRF, so it
   // goes draft → approved directly (no re-submission). A standalone draft uses the normal
   // draft → pending_approval → approved path via Submit. The backend enforces the same split (and
@@ -262,7 +266,7 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
     actions.push(<ActionBtn key="submit" icon={Send} primary onClick={() => run(() => poService.submitPurchaseOrder(po.id), "Submitted for approval.")} disabled={busy || noDate} title={noDate ? noDateReason : undefined}>Submit</ActionBtn>);
   if (s === "pending_approval" && can("purchase_orders.approve")) {
     actions.push(<ActionBtn key="approve" icon={CheckCircle2} primary onClick={onApprove} disabled={busy || noDate} title={noDate ? noDateReason : undefined}>Approve</ActionBtn>);
-    actions.push(<ActionBtn key="reject" icon={XCircle} onClick={() => { setReason(""); setReasonFor("reject"); }} disabled={busy}>Reject</ActionBtn>);
+    actions.push(<ActionBtn key="reject" icon={XCircle} tone="danger" onClick={() => { setReason(""); setReasonFor("reject"); }} disabled={busy}>Reject</ActionBtn>);
   }
   // Route an approved PO to a Project Manager for review + send (or re-assign while in
   // pm_review). Sending stays available in BOTH states for anyone with the send permission —
@@ -353,16 +357,36 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   // Where kit can still be in our hands: the receiving window plus the order that has taken all of it.
   // `closed` is absent because closing is refused while any hire is still out.
   const HOLDING_STATUSES: string[] = [...RECEIVABLE_STATUSES, "fully_received"];
-  if (RECEIVABLE_STATUSES.includes(s) && hasGoods && can("goods_in.create"))
+  /**
+   * WAS A RECEIVE OFFERED — and therefore has Close already lost the primary slot?
+   *
+   * `partially_received` is the ONE status in both `RECEIVABLE_STATUSES` and Close's own
+   * (`partially_received || fully_received`), so it was the only screen that pushed two accent-filled
+   * buttons: something is still outstanding AND the order may be finished early. Two primaries is no
+   * primary — the eye is given two defaults and picks neither.
+   *
+   * Receiving wins, because it is the operational next step: the goods are still coming. Closing is
+   * the finishing move and reads perfectly well as an ordinary outlined action beside it.
+   *
+   * Set from the push sites rather than re-deriving the conditions here, so the flag cannot drift
+   * from the buttons it describes. It can only ever be true on a receivable status, which makes
+   * `fully_received` — the other Close state — untouched by construction, not by intent.
+   */
+  let receiveOffered = false;
+  if (RECEIVABLE_STATUSES.includes(s) && hasGoods && can("goods_in.create")) {
+    receiveOffered = true;
     actions.push(<ActionBtn key="receive" icon={Package} primary onClick={() => router.push(`/dashboard/goods-in/new?po=${po.id}`)} disabled={busy}>{hiresOutstanding ? "Receive goods" : "Receive"}</ActionBtn>);
+  }
   // The SAME window goods use — `RECEIVABLE_STATUSES`, the constant the button above reads.
   //
   // A hire follows the IRM flow, so an order that has not been issued cannot be received against. It
   // used to allow anything but closed/cancelled, which put a Receive button on a draft order (two
   // Receive buttons with two different rules on one screen) and, worse, on `pending_approval` and
   // `approved` — statuses the service refuses, so the form was filled in and then rejected on save.
-  if (RECEIVABLE_STATUSES.includes(s) && hiresOutstanding && canMoveHire)
+  if (RECEIVABLE_STATUSES.includes(s) && hiresOutstanding && canMoveHire) {
+    receiveOffered = true;
     actions.push(<ActionBtn key="receive-hire" icon={PackageCheck} primary onClick={() => router.push(`/dashboard/rentals/receive/${po.code}`)} disabled={busy}>{hasGoods ? "Receive hire" : "Receive"}</ActionBtn>);
+  }
   // Wider than receiving, and it has to be: a fully-received order is the ordinary state for a hire
   // that is out. Not primary — on an order still being delivered the arrival is the job, and the
   // return is what happens weeks later.
@@ -381,9 +405,13 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   // that can never happen — while the server would have closed it.
   const hiresOpen = po.rentalItems.some(hireKeepsOrderOpen);
   if ((s === "partially_received" || s === "fully_received") && can("purchase_orders.close"))
-    actions.push(<ActionBtn key="close" icon={CheckCircle2} primary onClick={() => run(() => poService.closePurchaseOrder(po.id), "Purchase order closed.")} disabled={busy || hiresOpen} title={hiresOpen ? "Equipment is still on hire — record its return before closing." : undefined}>Close</ActionBtn>);
+    // `primary` only when nothing is still being received — see `receiveOffered`. On
+    // `fully_received`, the other status that reaches here, no Receive can exist, so Close keeps the
+    // accent exactly as before. STYLING ONLY: the button, its label, its position in the row, its
+    // handler, its permission and its disabled rule are all untouched.
+    actions.push(<ActionBtn key="close" icon={CheckCircle2} primary={!receiveOffered} onClick={() => run(() => poService.closePurchaseOrder(po.id), "Purchase order closed.")} disabled={busy || hiresOpen} title={hiresOpen ? "Equipment is still on hire — record its return before closing." : undefined}>Close</ActionBtn>);
   if (["draft", "pending_approval", "approved", "pm_review", "sent", "supplier_accepted"].includes(s) && can("purchase_orders.cancel"))
-    actions.push(<ActionBtn key="cancel" icon={XCircle} onClick={() => { setReason(""); setReasonFor("cancel"); }} disabled={busy}>Cancel</ActionBtn>);
+    actions.push(<ActionBtn key="cancel" icon={XCircle} tone="danger" onClick={() => { setReason(""); setReasonFor("cancel"); }} disabled={busy}>Cancel</ActionBtn>);
 
   return (
     <div className="stack flex h-full flex-col">
@@ -403,7 +431,13 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
                 delivery is not a plan any more and the receipts carry its real dates. */}
             {po.confirmedDeliveryDate &&
               !["cancelled", "closed", "partially_received", "fully_received"].includes(po.status) && (
-              <span className="inline-block whitespace-nowrap rounded-full bg-teal-500/12 px-2.5 py-0.5 text-[11px] font-bold text-teal-600">
+              // NEUTRAL. A scheduled delivery date is a plain fact, not a state — nothing is right
+              // or wrong about it — and rendering it teal added a SEVENTH hue to a header that
+              // already carries the status badge and the hire chip. Teal meant nothing anywhere
+              // else in Senthra, so it was a colour a reader had to learn and then ignore. The
+              // words carry the meaning; the date stays a date. A real deadline still colours:
+              // that is `HireDeadline`, on the hire's own Returns-by cell.
+              <span className="inline-block whitespace-nowrap rounded-full bg-[var(--surface-2)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--muted)]">
                 Delivery scheduled · {formatDate(po.confirmedDeliveryDate)}
               </span>
             )}
@@ -419,7 +453,17 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
             <span>{PO_PRIORITY_LABELS[po.priority]} priority</span>
           </>
         }
-        actions={actions.length > 0 ? actions : undefined}
+        actions={
+          <>
+            {utilityActions}
+            {actions.length > 0 && (
+              <>
+                <ActionDivider />
+                {actions}
+              </>
+            )}
+          </>
+        }
       />
 
       <ProcurementChain po={po} />
@@ -543,27 +587,115 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   );
 }
 
-function ActionBtn({ icon: Icon, primary, disabled, title, onClick, children }: { icon: React.ElementType; primary?: boolean; disabled?: boolean; title?: string; onClick: () => void; children: React.ReactNode }) {
+/**
+ * THREE WEIGHTS, not one. The toolbar carries up to six buttons on a live hire order and every one
+ * of them used to be drawn identically apart from the single accent fill — so "Download PDF" (a
+ * utility available to any viewer, on any order, forever) competed for attention with "Record
+ * supplier acceptance" (the step the order is actually waiting for), and "Cancel" sat in the same
+ * neutral outline as "Return hire" despite being the one action here that cannot be undone.
+ *
+ *   primary  — a step the order is waiting for. Accent fill.
+ *              AT MOST ONE PER SEQUENCE, enforced where the two sequences used to collide: a
+ *              `partially_received` order is the only status reachable by both Receive and Close,
+ *              and it used to push both as primary. `receiveOffered` now settles it — Close takes
+ *              the accent only when no Receive was offered, so an order with goods still coming
+ *              leads with Receive, and one with nothing left to receive (a hire already returned,
+ *              or `fully_received`) leads with Close. See the flag at its push site.
+ *
+ *              TWO PRIMARIES REMAIN POSSIBLE, AND ARE CORRECT: a MIXED goods + hire order at a
+ *              receivable status shows "Receive goods" and "Receive hire" together, both accent.
+ *              They are not competing answers to one question — the goods and the hired equipment
+ *              arrive on separate vans on separate days, and each button books in a different
+ *              inbound flow through a different service. Collapsing them to one primary would
+ *              force a false choice about which arrival matters more. This is intentional.
+ *   default  — an ordinary workflow action. Outline, accent on hover, same as `secondaryBtn`.
+ *   quiet    — a utility that is always there and is never the answer to "what do I do now?".
+ *              No border, so the outlined group beside it reads as the actual choices.
+ *   danger   — terminates or rejects the order. Neutral at rest (it must not shout on a page
+ *              somebody is only reading), red on hover and focus, so the consequence is stated
+ *              before the click rather than only in the confirm dialog.
+ *
+ * Tone is presentation ONLY: which buttons exist, when, and for whom is unchanged.
+ */
+type ActionTone = "default" | "quiet" | "danger";
+
+const ACTION_TONES: Record<ActionTone, string> = {
+  default:
+    "border border-[var(--border)] bg-[var(--surface)] text-[var(--ink)] hover:border-[var(--accent)] hover:text-[var(--accent)]",
+  quiet: "text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--ink)]",
+  danger:
+    "border border-[var(--border)] text-[var(--muted)] hover:border-[var(--neg)] hover:bg-[var(--neg)]/8 hover:text-[var(--neg)]",
+};
+
+function ActionBtn({ icon: Icon, primary, tone = "default", disabled, title, onClick, children }: { icon: React.ElementType; primary?: boolean; tone?: ActionTone; disabled?: boolean; title?: string; onClick: () => void; children: React.ReactNode }) {
   return (
-    <button type="button" onClick={onClick} disabled={disabled} title={title} className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold transition-all disabled:opacity-60 ${primary ? "bg-[var(--accent)] text-white hover:opacity-90" : "border border-[var(--border)] text-[var(--ink)] hover:bg-[var(--surface-2)]"}`}>
-      <Icon className="h-3.5 w-3.5" /> {children}
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/40 disabled:opacity-60 ${
+        primary ? "bg-[var(--accent)] text-white shadow-xs hover:opacity-90" : ACTION_TONES[tone]
+      }`}
+    >
+      <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden /> {children}
     </button>
+  );
+}
+
+/** Hairline between the utility group and the workflow group. Decorative — hidden from readers. */
+function ActionDivider() {
+  return <span aria-hidden className="mx-0.5 hidden h-5 w-px self-center bg-[var(--border)] sm:block" />;
+}
+
+/**
+ * SUBTOTAL / VAT / GRAND TOTAL — the footer band that closes whichever card holds the order's lines.
+ *
+ * One implementation, two homes, and that is the whole reason it is a component: it sits under the
+ * goods table on an order carrying goods, and under the Rental lines table on a hire-only one. Two
+ * copies of this markup would eventually disagree about the rule below the numbers.
+ *
+ * These are ALWAYS the whole order's money — the server computes them over
+ * `[...lineRows, ...rentalLines]` — never one line type's subtotal, whichever table they close.
+ *
+ * `ruled` draws the top border. It is a prop rather than a constant because the band is only a
+ * divider when something sits above it; as a card's sole content the rule would underline nothing.
+ */
+function OrderTotals({ po, ruled }: { po: PurchaseOrder; ruled: boolean }) {
+  return (
+    <div className={`flex justify-end p-4 ${ruled ? "border-t border-[var(--border)]" : ""}`}>
+      <div className="w-56 space-y-1.5 text-sm">
+        <div className="flex justify-between"><span className="text-[var(--muted)]">Subtotal</span><span className="font-semibold text-[var(--ink)]">{formatMoney(po.subtotal, po.currency)}</span></div>
+        <div className="flex justify-between"><span className="text-[var(--muted)]">VAT</span><span className="font-semibold text-[var(--ink)]">{formatMoney(po.vatTotal, po.currency)}</span></div>
+        <div className="flex justify-between border-t border-[var(--border-2)] pt-1.5"><span className="font-bold text-[var(--ink)]">Grand total</span><span className="font-extrabold text-[var(--ink)]">{formatMoney(po.grandTotal, po.currency)}</span></div>
+      </div>
+    </div>
   );
 }
 
 // `action` is an optional control rendered against the title — for edits that belong WITH the data
 // rather than in the page toolbar (which stays reserved for workflow actions).
+// THE SAME HEADER BAND the table sections use — a ruled `px-4 py-3` strip over a `p-4` body, not a
+// `p-5` box with a floating title and a `mb-4` gap. Supplier, Order, Delivery, Approval and the rest
+// were the only cards on this tab whose heading had no divider under it and whose padding differed
+// from the sections above them, so a page that reads top-to-bottom changed its rules halfway down.
+// Title weight, padding, divider and gap now match Rental lines / Hire movements / Damage & loss.
 function Card({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
-      <div className="mb-4 flex items-center justify-between gap-3">
+    <section className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-[var(--border)] px-4 py-3">
         <h2 className="text-sm font-extrabold text-[var(--ink)]">{title}</h2>
         {action}
       </div>
-      {children}
+      <div className="p-4">{children}</div>
     </section>
   );
 }
+// The Supplier/Order/Delivery/Approval cards lay their fields out two-up, and that stays true from
+// 420px. BELOW it they stack: with the sidebar collapsed a 360px viewport leaves each card about
+// 300px of content, so two columns gave every value ~140px — "Not set — required before sending"
+// wrapping to four lines beside a "Reference" of one. The `col-span-2` overrides move with the same
+// breakpoint; in the single-column state a full-width field is already full width.
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     // min-w-0 lets this grid cell shrink below its content (grid items default to min-width:auto,
@@ -944,8 +1076,31 @@ function Overview({
   );
   const router = useRouter();
   return (
-    <div className="space-y-4">
+    // `.stack` rather than a hardcoded `space-y-4`, for the reason globals.css gives where it is
+    // defined: Appearance → Density promises a tighter layout and every gap written as a Tailwind
+    // constant silently opts out of it. With six sections stacked here that was ~96px of fixed gap on
+    // a page whose whole complaint is unused vertical space.
+    <div className="stack flex flex-col">
+      {/* THE ORDER'S MONEY GOES UNDER THE LINES THAT MAKE IT UP, wherever those lines are.
+          On an order carrying goods that is this card, exactly as it always was. On a HIRE-ONLY
+          order there is no goods table, and the two earlier attempts at what to do with the leftover
+          totals were both wrong: a full-width card holding a 224px column at its right edge was
+          ~1100px of blank white, and shrinking that card to fit only moved the emptiness outside it —
+          a small box stranded at the top right with a gap beside it and the tall Rental lines card
+          below, which is what it looked like on PO-0090.
+          So on a hire-only order the totals move INTO the Rental lines card as its footer band, which
+          is the same shape they take under the goods table and puts the figure against the lines it
+          sums. This card then has nothing left to render and is dropped entirely.
+          The fallback matters: an order with neither goods nor hires still renders it, or the only
+          statement of the order's value on this tab would disappear with the table. */}
+      {(po.items.length > 0 || po.rentalItems.length === 0) && (
       <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        {/* THE TABLE ONLY WHEN THERE ARE GOODS. A hire-only order has no `items`, and this rendered a
+            full-width header row — Item / Qty / Unit Price / VAT / Line Total — over an empty tbody,
+            which is a labelled void: five column headings that will never have anything under them.
+            The TOTALS are not the goods' totals: the server computes them over
+            `[...lineRows, ...rentalLines]`, so they are always the whole order's money. */}
+        {po.items.length > 0 && (
         <div className="overflow-x-auto">
           <table className="w-full min-w-[680px] text-left text-sm">
             <thead>
@@ -962,7 +1117,14 @@ function Overview({
                 <tr key={i.id} className="border-b border-[var(--border)] last:border-0">
                   <td className="cell-y px-4">
                     <div className="font-semibold text-[var(--ink)]">{i.itemName}</div>
-                    {i.sku && <div className="text-[11px] text-[var(--faint)]">{i.sku}</div>}
+                    {/* `--muted`, not `--faint`, and the same on every VALUE subline in both tables
+                        below (the item code, the received/returned stamps, the rate, the short-close
+                        reason). #a1a1aa on white is about 2.3:1 — under half the 4.5:1 floor — and
+                        these are figures somebody reconciles against a supplier's invoice, not
+                        decoration. The uppercase COLUMN HEADERS keep `--faint`: that is the table
+                        convention on every list in the app, and changing it on one page would make
+                        this table the odd one out to fix a label nobody reads twice. */}
+                    {i.sku && <div className="text-[11px] text-[var(--muted)]">{i.sku}</div>}
                   </td>
                   <td className="cell-y px-4 text-[var(--muted)]">{i.quantity}{i.baseUnit ? ` ${i.baseUnit}` : ""}</td>
                   <td className="cell-y px-4 text-[var(--muted)]">{formatMoney(i.unitPrice, po.currency)}</td>
@@ -973,24 +1135,27 @@ function Overview({
             </tbody>
           </table>
         </div>
-        <div className="flex justify-end border-t border-[var(--border)] p-4">
-          <div className="w-56 space-y-1.5 text-sm">
-            <div className="flex justify-between"><span className="text-[var(--muted)]">Subtotal</span><span className="font-semibold text-[var(--ink)]">{formatMoney(po.subtotal, po.currency)}</span></div>
-            <div className="flex justify-between"><span className="text-[var(--muted)]">VAT</span><span className="font-semibold text-[var(--ink)]">{formatMoney(po.vatTotal, po.currency)}</span></div>
-            <div className="flex justify-between border-t border-[var(--border-2)] pt-1.5"><span className="font-bold text-[var(--ink)]">Grand total</span><span className="font-extrabold text-[var(--ink)]">{formatMoney(po.grandTotal, po.currency)}</span></div>
-          </div>
-        </div>
+        )}
+        {/* The rule only when something sits above it. On an order with neither goods nor hires the
+            totals are the card's only content, and a top border there draws a line under nothing. */}
+        <OrderTotals po={po} ruled={po.items.length > 0} />
       </div>
+      )}
 
       {po.rentalItems.length > 0 && (
         <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-          <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+          {/* SUBTITLE UNDER THE TITLE, not opposite it. The hint used to sit at the far right of the
+              header row, which made this section the one header on the tab with a two-ended layout —
+              and at 1024px the two halves fought for the same line. Hire movements and Damage & loss
+              both put their explanatory line beneath the title, so this now does too, and the five
+              headers share one shape: title · optional count · subtitle. */}
+          <div className="border-b border-[var(--border)] px-4 py-3">
             <h3 className="text-sm font-extrabold text-[var(--ink)]">Rental lines</h3>
             {/* Returns and damage are done from THIS page now — the header carries both, and the
                 movements they write are listed below. Only the EXTENSION still lives elsewhere, so
                 that is all this line still points at. It used to send people away for work the page
                 in front of them already does. */}
-            <p className="text-[11px] text-[var(--muted)]">
+            <p className="mt-1 max-w-[105ch] text-xs text-[var(--muted)]">
               Extend a hire on the{" "}
               <Link href="/dashboard/inventory?tab=rental&rental=on-hire" className="font-semibold text-[var(--accent)] hover:underline">
                 On hire
@@ -1016,7 +1181,7 @@ function Overview({
                   <tr key={r.id} className="border-b border-[var(--border)] last:border-0">
                     <td className="cell-y px-4">
                       <div className="font-semibold text-[var(--ink)]">{r.itemName}</div>
-                      {r.rentalItem && <div className="text-[11px] text-[var(--faint)]">{r.rentalItem.code}</div>}
+                      {r.rentalItem && <div className="text-[11px] text-[var(--muted)]">{r.rentalItem.code}</div>}
                     </td>
                     <td className="cell-y px-4 text-[var(--muted)]">
                       {r.quantity}
@@ -1027,14 +1192,14 @@ function Overview({
                           page, which is the one reached from the invoice, did not. */}
                       {r.cancelledQuantity > 0 && (
                         <div
-                          className="mt-0.5 text-[11px] font-semibold text-[var(--faint)]"
+                          className="mt-0.5 text-[11px] font-semibold text-[var(--muted)]"
                           title={r.shortCloseReason ? `Closed short: ${r.shortCloseReason}` : undefined}
                         >
                           {r.receivedQuantity} received · {r.cancelledQuantity} cancelled
                         </div>
                       )}
                       {r.shortCloseReason && (
-                        <div className="mt-0.5 max-w-[12rem] text-[11px] text-[var(--faint)]">{r.shortCloseReason}</div>
+                        <div className="mt-0.5 max-w-[12rem] text-[11px] text-[var(--muted)]">{r.shortCloseReason}</div>
                       )}
                       {/* What happened to the units while we had them. Same reasoning as the cancelled
                           line above, and the same reader: this page is the one reached from the
@@ -1055,7 +1220,7 @@ function Overview({
                     </td>
                     <td className="cell-y px-4 text-[var(--muted)]">
                       {formatDate(r.hireStartDate)} → {formatDate(r.hireEndDate)}
-                      <span className="ml-1 text-[11px] text-[var(--faint)]">({r.hireDays}d)</span>
+                      <span className="ml-1 text-[11px] text-[var(--muted)]">({r.hireDays}d)</span>
                     </td>
                     <td className="cell-y px-4">
                       {/* Only a LIVE hire carries a deadline colour — a returned one is done, and
@@ -1083,13 +1248,13 @@ function Overview({
                           never name a different place from the order document the supplier reads —
                           shortened here only when the place is one this cell or the header has
                           already named, so a third address is the one that prints in full. */}
-                      <div className="mt-1 text-[11px] text-[var(--faint)]">
+                      <div className="mt-1 text-[11px] text-[var(--muted)]">
                         Back to: {returnLegSummary(r.returnMode, r.returnLocation, r.deliveryAddress)}
                       </div>
                       {/* How the price was struck. Without it a reader sees £2,475 and cannot tell
                           whether that was quoted as a lump or as £55 a day. */}
                       {r.ratePeriod !== "total" && r.ratePence != null && (
-                        <div className="mt-0.5 text-[11px] text-[var(--faint)]">
+                        <div className="mt-0.5 text-[11px] text-[var(--muted)]">
                           {formatMoney(r.ratePence / 100, po.currency)}/{r.ratePeriod}
                           {r.priceOverridden ? " · price manually adjusted" : ""}
                         </div>
@@ -1100,7 +1265,14 @@ function Overview({
                           order total covers them. */}
                       {r.extensionChargePence > 0 && (
                         <div className="mt-0.5 text-[11px] font-semibold text-[var(--warn,#d97706)]">
-                          + {formatMoney(r.extensionCharge, po.currency)} extensions — not in this order&apos;s total
+                          {/* `{" "}` is load-bearing. The JSX text node that follows the money
+                              expression ends in a newline before the comment below, and the
+                              compiler trims that node's surrounding whitespace — including the
+                              single leading space — so this rendered "+ £300.00extensions" in the
+                              browser. Verified in the DOM: three text nodes, "+ ", "£300.00",
+                              "extensions — …", with no separator between the last two. */}
+                          + {formatMoney(r.extensionCharge, po.currency)}{" "}
+                          extensions — not in this order&apos;s total
                           {/* The BREAKDOWN, because the total alone cannot be checked against
                               anything: "+£725" on a hire extended three times says nothing about
                               when any of it was agreed or how much each time was, and that is
@@ -1136,13 +1308,13 @@ function Overview({
                       {/* WHO said the kit arrived, and when. The same stamp the return leg carries —
                           "on hire" is a claim somebody made, and this is the record of it. */}
                       {r.receivedAt && r.hireStatus !== "returned" && (
-                        <div className="mt-1 text-[11px] text-[var(--faint)]">
+                        <div className="mt-1 text-[11px] text-[var(--muted)]">
                           received {formatDate(r.receivedAt)}
                           {r.receivedBy ? ` · ${r.receivedBy}` : ""}
                         </div>
                       )}
                       {r.returnedAt && (
-                        <div className="mt-1 text-[11px] text-[var(--faint)]">
+                        <div className="mt-1 text-[11px] text-[var(--muted)]">
                           {formatDate(r.returnedAt)}
                           {r.returnedBy ? ` · ${r.returnedBy}` : ""}
                         </div>
@@ -1154,31 +1326,50 @@ function Overview({
               </tbody>
             </table>
           </div>
-
-          {/* WHAT ACTUALLY HAPPENED to the equipment — arrivals, returns and damage in one timeline.
-              The quantities above are the sum of these records, so this is also where a mistake is
-              undone: a record is voided, which gives its units back. */}
-          <div className="border-t border-[var(--border)]">
-            <div className="border-b border-[var(--border)] px-4 py-3">
-              <HireDeliveriesHeading count={movementCount} />
-              <p className="mt-0.5 text-[11px] text-[var(--muted)]">
-                Hired kit stays the supplier&apos;s — a delivery here starts the hire, a return ends it,
-                and neither adds anything to stock.
-              </p>
-            </div>
-            <HireDeliveries purchaseOrderId={po.id} poStatus={po.status} hireReversalFacts={hireReversalFacts} netOrderedByHireLine={netOrderedByHireLine} onChanged={() => onOrderChanged?.()} onCount={setMovementCount} />
-            {/* Beside the notes, not inside them. A note is a document exchanged with the provider; this
-                is a record of what happened to their equipment — settled by different acts, reversed by
-                different ones, and merging them would put "1 declared lost" in a list whose Reverse
-                button means something else. Renders nothing when there is nothing to say. */}
-            <HireCustodyTimeline purchaseOrderId={po.id} onChanged={() => onOrderChanged?.()} />
-          </div>
+          {/* The order's money, closing the table that earns it — but ONLY when there is no goods
+              table above to carry it instead. On a mixed order the totals stay with the goods card
+              and repeating them here would put the same grand total on the page twice. */}
+          {po.items.length === 0 && <OrderTotals po={po} ruled />}
         </div>
       )}
 
+      {/* WHAT ACTUALLY HAPPENED to the equipment — arrivals and returns, newest first. The quantities
+          in the Rental lines table above are the SUM of these records, so this is also where a mistake
+          is undone: a record is voided, which gives its units back.
+
+          ITS OWN SECTION, not a band appended to that table. It used to hang off the bottom of the
+          rental-lines card, with Damage & loss then drawn as a second bordered card INSIDE that same
+          card — three unrelated readings ("what did we order", "what moved", "what broke") stacked in
+          one container, with a box-in-a-box at the end of it. The nesting was the visual problem: two
+          sibling questions carried different weights for no reason a reader could name, and neither
+          had a section boundary the eye could use. They are siblings now, and they look like it. */}
+      {po.rentalItems.length > 0 && (
+        <section className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+          <div className="border-b border-[var(--border)] px-4 py-3">
+            <HireDeliveriesHeading count={movementCount} />
+            {/* Trimmed to the two facts a reader needs before the first row, for the same reason the
+                Damage &amp; loss blurb below it was: this line sits between the title and the records,
+                so its third clause costs a row of the list to say what the rows already show. */}
+            <p className="mt-1 max-w-[105ch] text-xs text-[var(--muted)]">
+              A delivery starts the hire, a return ends it. Hired kit stays the supplier&apos;s and
+              never enters stock.
+            </p>
+          </div>
+          <HireDeliveries purchaseOrderId={po.id} poStatus={po.status} hireReversalFacts={hireReversalFacts} netOrderedByHireLine={netOrderedByHireLine} onChanged={() => onOrderChanged?.()} onCount={setMovementCount} />
+        </section>
+      )}
+
+      {/* Beside the notes, not inside them. A note is a document exchanged with the provider; this is a
+          record of what happened to their equipment — settled by different acts, reversed by different
+          ones, and merging them would put "1 declared lost" in a list whose Reverse button means
+          something else. Renders nothing when there is nothing to say, so the gap collapses with it.
+          Still gated on there being hires at all: on a goods-only order it can never hold a row, and
+          the guard saves the fetch that would prove it. */}
+      {po.rentalItems.length > 0 && <HireCustodyTimeline purchaseOrderId={po.id} onChanged={() => onOrderChanged?.()} />}
+
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Supplier">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2">
             <Field label="Supplier">{po.supplier?.name ?? po.supplierName}</Field>
             <Field label="Payment terms">{po.supplier?.paymentTerms}</Field>
             <Field label="Contact">{po.supplier?.contactPerson}</Field>
@@ -1188,7 +1379,7 @@ function Overview({
           </div>
         </Card>
         <Card title="Order">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2">
             <Field label="Order date">{formatDate(po.orderDate)}</Field>
             <Field label="Expected delivery">
               {po.expectedDeliveryDate ? (
@@ -1202,7 +1393,7 @@ function Overview({
                 one of the hires has already started. Never blocks the send — some hire companies
                 bill from dispatch. Same wording as the request screen and the request form. */}
             {po.lateHireDelivery && (
-              <div className="col-span-2">
+              <div className="min-[420px]:col-span-2">
                 <Notice
                   msg={{
                     type: "warn",
@@ -1216,7 +1407,7 @@ function Overview({
             <Field label="Priority">{PO_PRIORITY_LABELS[po.priority]}</Field>
             <Field label="Project reference">{po.projectRef}</Field>
             {po.purchaseRequest && (
-              <div className="col-span-2">
+              <div className="min-[420px]:col-span-2">
                 <Field label="Source purchase request">
                   <button type="button" onClick={() => router.push(`/dashboard/purchase-requests/${po.purchaseRequest!.code}`)} className="font-mono text-sm font-bold text-[var(--accent)] hover:underline">
                     {po.purchaseRequest.code}
@@ -1224,15 +1415,15 @@ function Overview({
                 </Field>
               </div>
             )}
-            {po.description && <div className="col-span-2"><Field label="Description">{po.description}</Field></div>}
+            {po.description && <div className="min-[420px]:col-span-2"><Field label="Description">{po.description}</Field></div>}
           </div>
         </Card>
         {po.pmUserId && (
           <Card title="Project manager">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2">
               <Field label="Assigned PM">{po.pmName}</Field>
               <Field label="Assigned">{formatDate(po.pmAssignedAt)}</Field>
-              <div className="col-span-2">
+              <div className="min-[420px]:col-span-2">
                 <Field label="Email">
                   {po.pmEmail ? (
                     <a className="text-[var(--accent)] hover:underline" href={`mailto:${po.pmEmail}`}>{po.pmEmail}</a>
@@ -1262,12 +1453,12 @@ function Overview({
               ) : undefined
             }
           >
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2">
               <Field label="Accepted">{formatDate(po.supplierAcceptedAt)}</Field>
               <Field label="Recorded by">{po.supplierAcceptedBy}</Field>
               <Field label="Supplier reference">{po.supplierAckReference}</Field>
               <Field label="Confirmed delivery">{formatDate(po.confirmedDeliveryDate)}</Field>
-              {po.supplierAcceptNotes && <div className="col-span-2"><Field label="Notes">{po.supplierAcceptNotes}</Field></div>}
+              {po.supplierAcceptNotes && <div className="min-[420px]:col-span-2"><Field label="Notes">{po.supplierAcceptNotes}</Field></div>}
             </div>
           </Card>
         )}
@@ -1275,7 +1466,7 @@ function Overview({
           <div className="space-y-3">
             <Field label="Warehouse">{po.warehouse?.name}</Field>
             <Field label="Address">{po.deliveryAddress || po.warehouse?.address}</Field>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2">
               <Field label="Delivery terms">{po.deliveryTermsLabel}</Field>
               <Field label="Payment terms">{po.paymentTerms}</Field>
             </div>
@@ -1283,7 +1474,7 @@ function Overview({
           </div>
         </Card>
         <Card title="Approval">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2">
             <Field label="Created by">{po.createdBy}</Field>
             {/* A PRF-born PO that skipped the submit step (fast-tracked: Finance already reviewed the
                 numbers on the PRF) has no "submitted by" — showing a blank row reads as "why wasn't
@@ -1310,8 +1501,8 @@ function Overview({
             <Field label="Approved">{formatDate(po.approvedAt)}</Field>
             <Field label="Sent">{formatDate(po.sentAt)}</Field>
             <Field label="Closed / cancelled">{formatDate(po.closedAt ?? po.cancelledAt)}</Field>
-            {po.rejectionReason && <div className="col-span-2"><Field label="Last rejection">{po.rejectionReason}</Field></div>}
-            {po.cancelReason && <div className="col-span-2"><Field label="Cancel reason">{po.cancelReason}</Field></div>}
+            {po.rejectionReason && <div className="min-[420px]:col-span-2"><Field label="Last rejection">{po.rejectionReason}</Field></div>}
+            {po.cancelReason && <div className="min-[420px]:col-span-2"><Field label="Cancel reason">{po.cancelReason}</Field></div>}
           </div>
         </Card>
         {(po.internalNotes || po.supplierNotes) && (
