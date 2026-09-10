@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 
 import * as transferSvc from "@/services/engineerTransfer.service";
+import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { subscribe } from "@/lib/socket";
 import {
@@ -32,6 +33,7 @@ import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { inputCls, labelCls, primaryBtn, secondaryBtn, toolbarActionsCls, toolbarPrimaryBtn } from "@/components/ui/styles";
 import type { EngineerTransfer, PagedTransfers } from "@/services/engineerTransfer.service";
 import { backingSize, isBlank, normalisePoint, type Stroke } from "./signaturePad";
+import { outgoingPendingAction } from "./transferActions";
 
 // Stock ownership shown in the lines table — "IRM (Company)" reads clearer than a bare "Company".
 const ownershipLabel = (o: string) => (o === "company" ? "IRM (Company)" : "Customer");
@@ -358,6 +360,11 @@ function TransferRow({
   // Both approve (accepts custody of another engineer's stock) and cancel (irreversible) go through a
   // confirm step, matching the deliberate-action bar the rest of the transfer/field-stock flow holds.
   const [confirm, setConfirm] = React.useState<null | "approve" | "cancel">(null);
+  const { principal } = useAuth();
+  // A pending "My requests" row offers Cancel only on a request this engineer raised; one the office
+  // arranged gets a label instead, since the server would refuse the cancel (see transferActions.ts).
+  const outgoingAction =
+    role === "outgoing" && transfer.status === "pending" ? outgoingPendingAction(transfer, principal?.id) : null;
 
   const approve = async () => {
     setBusy(true);
@@ -492,8 +499,16 @@ function TransferRow({
                 </button>
               </>
             )}
-            {/* Outgoing pending → Cancel */}
-            {role === "outgoing" && transfer.status === "pending" && (
+            {/* Outgoing pending → Cancel, on the engineer's own request only */}
+            {outgoingAction === "arranged-by-office" && (
+              <span
+                title="The office arranged this transfer. Ask them if it needs cancelling."
+                className="whitespace-nowrap rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2 py-0.5 text-[10px] font-bold text-[var(--muted)]"
+              >
+                Arranged by office
+              </span>
+            )}
+            {outgoingAction === "cancel" && (
               <button
                 type="button"
                 onClick={() => setConfirm("cancel")}

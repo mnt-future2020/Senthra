@@ -511,7 +511,7 @@ export async function decline(id: string, reason: string | undefined, actor: Aud
   // The holder or an oversight caller (root admin OR staff with engineer_stock.transfer) may decline.
   const actorId = actor.id ?? "";
   if (!hasStockOversight(actor) && actorId !== t.fromEngineerId) {
-    throw forbidden("Only the stock holder or an admin can decline this transfer.");
+    throw forbidden("You do not have permission to decline this transfer.");
   }
 
   const declinedBy = actor.email ?? "";
@@ -542,7 +542,7 @@ export async function cancel(id: string, actor: AuditActor): Promise<PublicTrans
   // The original requester or an oversight caller (root admin OR staff with engineer_stock.transfer) may cancel.
   const actorId = actor.id ?? "";
   if (!hasStockOversight(actor) && actorId !== t.requestedById) {
-    throw forbidden("Only the requester or an admin can cancel this transfer.");
+    throw forbidden("You do not have permission to cancel this transfer.");
   }
 
   const cancelled = await transferRepo.cancelTx(id);

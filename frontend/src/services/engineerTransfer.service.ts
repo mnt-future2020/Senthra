@@ -27,6 +27,9 @@ export interface EngineerTransfer {
   toEngineerId: string;
   toEngineerName: string;
   toEngineerEmail: string | null;
+  // Who raised it: the receiving engineer themselves, or the office user who arranged it. Only this
+  // person (or office oversight) may cancel it.
+  requestedById: string;
   requestedByKind: "engineer" | "admin";
   reason: string;
   notes: string | null;
