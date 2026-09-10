@@ -18,6 +18,7 @@ import { SaveBar } from "@/components/dashboard/settings/ui/SaveBar";
 import type { Msg } from "@/components/ui/types";
 import { useReportDirty } from "@/providers/NavigationGuardProvider";
 import { MAX_IMAGE_BYTES, readFileAsDataUrl, shrinkImage } from "@/lib/image";
+import { DEFAULT_BRAND_NAME, DEFAULT_BRANDING, defaultFooterText } from "@/lib/branding";
 
 // The brand accent applied when none is chosen. Kept in sync with the backend's
 // DEFAULT_BRAND_COLOR (backend/src/utils/email-html.ts) so the UI and sent emails
@@ -527,13 +528,14 @@ export function BrandingSection() {
 
         <Field
           label="Footer text"
-          hint="On every page. Leave blank to hide."
+          hint="Shown on login, password-reset and privacy pages. Leave blank to use the default."
         >
           <input
             type="text"
             value={footerText}
             onChange={(e) => setFooterText(e.target.value)}
-            placeholder="© 2026 Senthra. All rights reserved."
+            // What a blank field resolves to — follows the brand name being edited above it.
+            placeholder={defaultFooterText(brandName.trim() || DEFAULT_BRAND_NAME)}
             className={inputCls}
           />
         </Field>
@@ -546,7 +548,7 @@ export function BrandingSection() {
             type="text"
             value={loginHeadline}
             onChange={(e) => setLoginHeadline(e.target.value)}
-            placeholder="Effortlessly manage your business and operations."
+            placeholder={DEFAULT_BRANDING.loginHeadline}
             className={inputCls}
           />
         </Field>
@@ -559,7 +561,7 @@ export function BrandingSection() {
             value={loginSubtext}
             onChange={(e) => setLoginSubtext(e.target.value)}
             rows={2}
-            placeholder="Sign in to access your admin dashboard and run everything from one place."
+            placeholder={DEFAULT_BRANDING.loginSubtext}
             className={inputCls}
           />
         </Field>
