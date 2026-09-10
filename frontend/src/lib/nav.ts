@@ -2,6 +2,8 @@
 // unit-testable without rendering React. The Sidebar imports `isAdminNavItemVisible` and applies
 // it to each admin nav item.
 
+import type { Principal } from "@/types/auth";
+
 export interface NavVisibilityItem {
   // Visible if the principal holds ANY of these permissions (admin holds all). Empty = always
   // visible (e.g. the Dashboard landing).
@@ -25,4 +27,19 @@ export function isAdminNavItemVisible(
   if (item.hideForWarehouseScoped && isWarehouseScoped) return false;
   if (item.perms.length > 0 && !item.perms.some((p) => can(p))) return false;
   return true;
+}
+
+// The line under the brand name in the sidebar. It used to fall back to "Admin Suite" for every
+// staff user, telling a Finance Director or Project Manager they were in the admin suite. It now
+// claims only what is true:
+//   • customer → "Customer Portal"; pure engineer → "Engineer Portal" (their whole surface);
+//   • the super-admin account → "Admin Suite" (it IS the admin);
+//   • any other staff user → their role's display name, read from the live role, so a rename in
+//     Users & Roles shows on the next page load. A user with no role → "Staff Portal".
+export function sidebarSurfaceLabel(principal: Principal | null, isEngineerOnly: boolean): string {
+  if (!principal) return "";
+  if (principal.type === "customer") return "Customer Portal";
+  if (principal.type === "admin") return "Admin Suite";
+  if (isEngineerOnly) return "Engineer Portal";
+  return principal.role?.name.trim() || "Staff Portal";
 }

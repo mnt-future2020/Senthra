@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { isAdminNavItemVisible } from "./nav";
+import { isAdminNavItemVisible, sidebarSurfaceLabel } from "./nav";
+import type { AdminPrincipal, CustomerPrincipal, UserPrincipal } from "@/types/auth";
 
 // A permissive `can` for the tests: the principal holds exactly the listed perms.
 const holding = (...perms: string[]) => (p: string) => perms.includes(p);
@@ -35,5 +36,58 @@ describe("isAdminNavItemVisible", () => {
   it("hides a hideForWarehouseScoped item from a warehouse-scoped user who lacks the perm too", () => {
     const auditLog = { perms: ["audit.view"], hideForWarehouseScoped: true };
     expect(isAdminNavItemVisible(auditLog, holdsNothing, true)).toBe(false);
+  });
+});
+
+describe("sidebarSurfaceLabel", () => {
+  const admin: AdminPrincipal = { type: "admin", id: "a1", email: "admin@x.test", name: "Owner" };
+  const staff = (roleName: string | null): UserPrincipal => ({
+    type: "user",
+    id: "u1",
+    email: "u@x.test",
+    firstName: "Gokul",
+    lastName: "Test",
+    profileImageUrl: null,
+    signatureUrl: null,
+    status: "active",
+    mustResetPassword: false,
+    role: roleName === null ? null : { id: "r1", key: "role", name: roleName },
+    permissions: [],
+  });
+  const customer: CustomerPrincipal = {
+    type: "customer",
+    id: "c1",
+    customerId: "cu1",
+    email: "pm@client.test",
+    name: "Client Ltd",
+    userName: "Client PM",
+    customerCode: "CUS-0001",
+    logoUrl: null,
+    mustResetPassword: false,
+    permissions: [],
+  };
+
+  // The client's report: Finance Director and Project Manager logins both read "Admin Suite".
+  it("shows a staff user's own role instead of claiming the admin suite", () => {
+    expect(sidebarSurfaceLabel(staff("Finance Director"), false)).toBe("Finance Director");
+    expect(sidebarSurfaceLabel(staff("Project Manager"), false)).toBe("Project Manager");
+  });
+
+  it("keeps 'Admin Suite' for the super-admin account, which it is true of", () => {
+    expect(sidebarSurfaceLabel(admin, false)).toBe("Admin Suite");
+  });
+
+  it("keeps the portal labels for customers and engineer-only staff", () => {
+    expect(sidebarSurfaceLabel(customer, false)).toBe("Customer Portal");
+    expect(sidebarSurfaceLabel(staff("Field Engineer"), true)).toBe("Engineer Portal");
+  });
+
+  it("never falls back to 'Admin Suite' for a staff user without a usable role name", () => {
+    expect(sidebarSurfaceLabel(staff(null), false)).toBe("Staff Portal");
+    expect(sidebarSurfaceLabel(staff("   "), false)).toBe("Staff Portal");
+  });
+
+  it("renders nothing before the session is known", () => {
+    expect(sidebarSurfaceLabel(null, false)).toBe("");
   });
 });

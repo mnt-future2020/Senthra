@@ -4,20 +4,32 @@ import type { Branding } from "@/types/settings";
 import { env } from "./env";
 
 // The page <title> format — shared by SSR (generateMetadata) and the client-side
-// live update so they never drift.
+// live update so they never drift. Deliberately role-neutral: it is rendered on the
+// server before the session is known (the login screen included), so it cannot say who
+// is viewing — and "Admin Dashboard" was wrong for every non-admin who saw it.
 export function brandTitle(brandName: string): string {
-  return `${brandName} — Admin Dashboard`;
+  return `${brandName} — Dashboard`;
 }
 
+// The brand name, footer and login copy below mirror the backend's
+// backend/src/modules/settings/branding.defaults.ts — change both together.
+export const DEFAULT_BRAND_NAME = "Senthra";
+
+// The footer the backend applies when none is set: always the current year and brand name.
+export function defaultFooterText(brandName: string): string {
+  return `© ${new Date().getFullYear()} ${brandName}. All rights reserved.`;
+}
+
+// The fallback when the backend is unreachable.
 export const DEFAULT_BRANDING: Branding = {
-  brandName: "Senthra",
+  brandName: DEFAULT_BRAND_NAME,
   brandColor: "#7b6ef0",
   logoUrl: "",
   faviconUrl: "",
-  footerText: `© ${new Date().getFullYear()} Senthra. All rights reserved.`,
+  footerText: defaultFooterText(DEFAULT_BRAND_NAME),
   loginHeadline: "Effortlessly manage your business and operations.",
   loginSubtext:
-    "Sign in to access your admin dashboard and run everything from one place.",
+    "Sign in to access your dashboard and run everything from one place.",
 };
 
 // Server-side branding fetch for the root layout (SSR → no flash). Falls back to

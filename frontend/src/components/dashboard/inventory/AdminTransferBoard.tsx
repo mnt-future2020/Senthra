@@ -135,7 +135,7 @@ function AdminActionModal({
           )}
           {action === "override" && (
             <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-700">
-              Admin override: this will complete the transfer without the holder&apos;s approval and record your action in the audit log.
+              Override: this will complete the transfer without the holder&apos;s approval and record your action in the audit log.
             </p>
           )}
           <div className="flex gap-2 justify-end">

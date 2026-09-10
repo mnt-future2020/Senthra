@@ -4,6 +4,15 @@ import { env } from "../../config/env.js";
 import { uploadToCloudinary, type CloudinaryCreds } from "../../lib/cloudinary.js";
 import { sendMail } from "../../lib/mailer.js";
 import * as settingsRepo from "./settings.repository.js";
+import {
+  resolveBrandName,
+  resolveFooterText,
+  resolveLoginHeadline,
+  resolveLoginSubtext,
+  storedFooterText,
+  storedLoginHeadline,
+  storedLoginSubtext,
+} from "./branding.defaults.js";
 import { decryptSecret, encryptSecret } from "../../utils/crypto.js";
 import { safeBrandColor } from "../../utils/email-html.js";
 import { badRequest } from "../../utils/http-error.js";
@@ -139,20 +148,17 @@ export interface PublicBranding {
 // Map a Settings row to public branding, filling sensible defaults so a fresh
 // install still looks complete.
 function brandingFrom(s: Settings): PublicBranding {
-  const brandName = (s.brandName && s.brandName.trim()) || "Senthra";
+  const brandName = resolveBrandName(s.brandName);
   return {
     brandName,
     brandColor: safeBrandColor(s.brandColor),
     logoUrl: s.logoUrl || "",
     faviconUrl: s.faviconUrl || "",
-    footerText:
-      s.footerText ||
-      `© ${new Date().getFullYear()} ${brandName}. All rights reserved.`,
-    loginHeadline:
-      s.loginHeadline || "Effortlessly manage your business and operations.",
-    loginSubtext:
-      s.loginSubtext ||
-      "Sign in to access your admin dashboard and run everything from one place.",
+    // Footer + login copy defaults live in branding.defaults.ts — see there for why a stored
+    // default is never trusted as-is.
+    footerText: resolveFooterText(s.footerText, brandName),
+    loginHeadline: resolveLoginHeadline(s.loginHeadline),
+    loginSubtext: resolveLoginSubtext(s.loginSubtext),
   };
 }
 
@@ -463,12 +469,22 @@ export async function updateSettings(input: UpdateSettingsParams): Promise<Publi
   }
   if (typeof input.logoUrl === "string") data.logoUrl = input.logoUrl.trim() || null;
   if (typeof input.faviconUrl === "string") data.faviconUrl = input.faviconUrl.trim() || null;
-  if (typeof input.footerText === "string") data.footerText = input.footerText.trim() || null;
+  // A rename posts the new brand name together with the footer the form rendered under the old one,
+  // so both names count as "default" here; a brand-only rename likewise releases a footer frozen
+  // under the old name. A custom footer passes through unchanged either way.
+  if (typeof input.footerText === "string" || typeof input.brandName === "string") {
+    const previousBrand = resolveBrandName(s.brandName);
+    const nextBrand =
+      typeof input.brandName === "string" ? resolveBrandName(input.brandName) : previousBrand;
+    const footer = typeof input.footerText === "string" ? input.footerText : (s.footerText ?? "");
+    data.footerText = storedFooterText(footer, [previousBrand, nextBrand]);
+  }
+  // The form echoes the default back on every save; storing it would freeze it (branding.defaults.ts).
   if (typeof input.loginHeadline === "string") {
-    data.loginHeadline = input.loginHeadline.trim() || null;
+    data.loginHeadline = storedLoginHeadline(input.loginHeadline);
   }
   if (typeof input.loginSubtext === "string") {
-    data.loginSubtext = input.loginSubtext.trim() || null;
+    data.loginSubtext = storedLoginSubtext(input.loginSubtext);
   }
   // Stored uppercased; empty clears it back to the default. Validation already
   // bounded it to 2–5 letters.

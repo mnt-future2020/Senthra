@@ -32,7 +32,7 @@ import { useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { BrandMark } from "@/components/branding/BrandMark";
 import { optimizeCloudinaryUrl } from "@/lib/utils";
 import { dropdownRadius, dropdownSurfaceCls } from "@/components/ui/styles";
-import { isAdminNavItemVisible } from "@/lib/nav";
+import { isAdminNavItemVisible, sidebarSurfaceLabel } from "@/lib/nav";
 import { NavBadge } from "./NavBadge";
 
 type NavItem = {
@@ -206,6 +206,8 @@ export function Sidebar({
   // permless Dashboard item keeps engineer-only users routing to their portal (not a lone-Dashboard menu).
   const adminNavBeyondLanding = adminNav.filter((i) => i.perms.length > 0);
   const isEngineerOnly = canEngineer && adminNavBeyondLanding.length === 0;
+  // Under the brand name: the surface or, for staff, their role (see lib/nav.ts for the rule).
+  const surfaceLabel = sidebarSurfaceLabel(principal, isEngineerOnly);
 
   // Engineer items shown alongside the admin menu drop the shared account "Settings" link (admins
   // reach their account via the profile menu) to avoid a duplicate Settings entry. A pure engineer
@@ -319,11 +321,19 @@ export function Sidebar({
               collapsed ? "w-0 opacity-0 pointer-events-none" : "w-32 opacity-100"
             }`}
           >
-            <h2 className="font-extrabold text-base tracking-tight text-[var(--ink)]">
+            {/* Brand and role names are admin-defined and unbounded, so both truncate with the full
+                text on hover. */}
+            <h2
+              title={brandName}
+              className="font-extrabold text-base tracking-tight text-[var(--ink)] truncate"
+            >
               {brandName}
             </h2>
-            <span className="text-[10px] uppercase font-bold tracking-widest text-[var(--faint)] mt-0.5 block">
-              {isCustomer ? "Customer Portal" : isEngineerOnly ? "Engineer Portal" : "Admin Suite"}
+            <span
+              title={surfaceLabel}
+              className="text-[10px] uppercase font-bold tracking-widest text-[var(--faint)] mt-0.5 block truncate"
+            >
+              {surfaceLabel}
             </span>
           </div>
           <button
