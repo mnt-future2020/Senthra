@@ -47,4 +47,25 @@ describe("listCustomerOptions", () => {
     vi.mocked(customerRepo.findOptions).mockResolvedValue([] as never);
     expect(await listCustomerOptions()).toEqual([]);
   });
+
+  it("asks for the ACTIVE-only list by default", async () => {
+    vi.mocked(customerRepo.findOptions).mockResolvedValue([] as never);
+    await listCustomerOptions();
+    expect(customerRepo.findOptions).toHaveBeenCalledWith({ includeInactive: false });
+  });
+
+  // History and report filters: a deactivated customer still owns its movements, stock and jobs, so
+  // it must stay filterable — and be labelled, which is what the flag is for.
+  it("with includeInactive returns active AND deactivated customers, flagging only the deactivated", async () => {
+    vi.mocked(customerRepo.findOptions).mockResolvedValue([
+      { ...row("c1", "CUST-1", "Active Co"), status: "active" },
+      { ...row("c2", "CUST-2", "Retired Co"), status: "inactive" },
+    ] as never);
+    const out = await listCustomerOptions({ includeInactive: true });
+    expect(customerRepo.findOptions).toHaveBeenCalledWith({ includeInactive: true });
+    expect(out).toEqual([
+      { id: "c1", code: "CUST-1", name: "Active Co" },
+      { id: "c2", code: "CUST-2", name: "Retired Co", inactive: true },
+    ]);
+  });
 });

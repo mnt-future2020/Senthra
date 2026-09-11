@@ -38,6 +38,17 @@ export interface InventoryDetail extends InventoryBalance {
   outgoing: number;
 }
 
+// Where one item is stocked — GET /inventory/items/:id/warehouse-stock. Quantities only: no cost, no
+// value (mirror of the backend ItemWarehouseStock).
+export interface ItemWarehouseStock {
+  warehouseId: string;
+  warehouseName: string;
+  warehouseCode: string;
+  onHand: number;
+  /** Net of other jobs' planned demand — the same figure the inventory list shows. */
+  available: number;
+}
+
 // One immutable ledger entry (Transaction History tab).
 export interface InventoryTransaction {
   id: string;

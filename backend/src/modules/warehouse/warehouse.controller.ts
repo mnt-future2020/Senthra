@@ -4,7 +4,7 @@ import * as warehouseService from "./warehouse.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { sendCsv } from "../../utils/csv-response.js";
-import { param, queryInt, queryStr } from "../../utils/request.js";
+import { param, queryBool, queryInt, queryStr } from "../../utils/request.js";
 import type { CreateWarehouseInput, UpdateWarehouseInput } from "./warehouse.validation.js";
 
 // GET /warehouses?search=&status=&type=&sort=&page=&pageSize=
@@ -38,10 +38,18 @@ export const listEngineerOptions = asyncHandler(async (_req, res) => {
   res.json({ engineers: await warehouseService.listEngineerOptions() });
 });
 
-// GET /warehouses/options — active warehouses (id/code/name) for assignment / PO pickers. Scoped to
-// the caller: a warehouse-scoped user only sees their assigned warehouses.
+// GET /warehouses/options[?includeInactive=true] — warehouses (id/code/name) for assignment / PO
+// pickers: ACTIVE only unless a history filter asks for deactivated ones too. Scoped to the caller
+// either way: a warehouse-scoped user only sees their assigned warehouses.
 export const listWarehouseOptions = asyncHandler(async (req, res) => {
-  res.json({ options: await warehouseService.listWarehouseOptions(actorFrom(req)) });
+  const includeInactive = queryBool(req.query.includeInactive) === true;
+  res.json({ options: await warehouseService.listWarehouseOptions(actorFrom(req), { includeInactive }) });
+});
+
+// GET /warehouses/delivery-options — the PR / PO delivery-warehouse picker (option + address). Scoped
+// to the caller exactly like /options.
+export const listWarehouseDeliveryOptions = asyncHandler(async (req, res) => {
+  res.json({ options: await warehouseService.listWarehouseDeliveryOptions(actorFrom(req)) });
 });
 
 // GET /warehouses/:id  (id or code)

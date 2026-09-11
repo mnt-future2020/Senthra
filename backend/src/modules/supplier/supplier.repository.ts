@@ -185,11 +185,19 @@ export async function createWithCode(
   throw new Error("Could not allocate a unique supplier code.");
 }
 
-/** Lean, complete, active-only options for pickers. Ordered by name — how people scan a dropdown. */
-export function findOptions(): Promise<{ id: string; code: string; name: string }[]> {
+/**
+ * Lean, complete options for pickers. Ordered by name — how people scan a dropdown.
+ *
+ * ACTIVE only, unless `includeInactive` — which only a history filter asks for (a deactivated supplier
+ * still owns the requests raised against it). Deleted rows never. `status` is read so the service can
+ * flag those rows.
+ */
+export function findOptions({ includeInactive = false }: { includeInactive?: boolean } = {}): Promise<
+  { id: string; code: string; name: string; status: string }[]
+> {
   return prisma.supplier.findMany({
-    where: { deletedAt: null, status: "active" },
-    select: { id: true, code: true, name: true },
+    where: includeInactive ? { deletedAt: null } : { deletedAt: null, status: "active" },
+    select: { id: true, code: true, name: true, status: true },
     orderBy: { name: "asc" },
   });
 }

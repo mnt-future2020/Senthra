@@ -1041,6 +1041,12 @@ function Overview({
       copy is stale after it, so the panel says so rather than refetching a record it does not own. */
   onOrderChanged?: () => void;
 }) {
+  // Hire movements and Damage & loss are this order's RENTAL record, read behind `rentals.view`
+  // (/rental-receipts, /purchase-orders/:id/custody-exits). A purchase-order reader without it — the
+  // seeded System Admin — got an error panel and a silently empty timeline under an order that plainly
+  // has hires, so both sections are drawn only for a viewer who can read them.
+  const { can } = useAuth();
+  const canSeeHires = can("rentals.view");
   // Reported up by the movements panel, which is the only thing that knows how many there are.
   // The heading rendered a hardcoded 0, and its own `count > 0` test meant the number never
   // appeared at all.
@@ -1343,7 +1349,7 @@ function Overview({
           one container, with a box-in-a-box at the end of it. The nesting was the visual problem: two
           sibling questions carried different weights for no reason a reader could name, and neither
           had a section boundary the eye could use. They are siblings now, and they look like it. */}
-      {po.rentalItems.length > 0 && (
+      {po.rentalItems.length > 0 && canSeeHires && (
         <section className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
           <div className="border-b border-[var(--border)] px-4 py-3">
             <HireDeliveriesHeading count={movementCount} />
@@ -1365,7 +1371,7 @@ function Overview({
           something else. Renders nothing when there is nothing to say, so the gap collapses with it.
           Still gated on there being hires at all: on a goods-only order it can never hold a row, and
           the guard saves the fetch that would prove it. */}
-      {po.rentalItems.length > 0 && <HireCustodyTimeline purchaseOrderId={po.id} onChanged={() => onOrderChanged?.()} />}
+      {po.rentalItems.length > 0 && canSeeHires && <HireCustodyTimeline purchaseOrderId={po.id} onChanged={() => onOrderChanged?.()} />}
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Supplier">

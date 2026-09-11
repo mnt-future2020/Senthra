@@ -9,6 +9,7 @@ import type {
   Prisma,
 } from "@prisma/client";
 
+import { inactiveFlag } from "../../utils/pickerOption.js";
 import * as customerRepo from "./customer.repository.js";
 import type { CustomerWithChildren } from "./customer.repository.js";
 import { assertEmailNamespaceFree } from "#modules/auth/email-namespace.js";
@@ -1429,7 +1430,10 @@ export interface StockRequestInput {
 // reimplemented so "active, non-deleted" has ONE definition, and so it already returns only
 // id/code/name: no address, contact, notes or operational metadata can reach the portal.
 export async function listSelectableWarehouses(): Promise<{ id: string; code: string; name: string }[]> {
-  return warehouseRepo.findOptions();
+  // Mapped, not returned as-is: the query also reads `status` (for history filters), and nothing
+  // beyond id/code/name reaches the portal.
+  const rows = await warehouseRepo.findOptions();
+  return rows.map((w) => ({ id: w.id, code: w.code, name: w.name }));
 }
 
 // Resolve the optional preferred warehouse for a submission. A client-supplied id is NEVER
@@ -3022,11 +3026,40 @@ export async function listWarehouseStockEntries(
  * ACTIVE only: an inactive customer must not be newly selectable. A job that already references one
  * keeps showing it — the form appends the saved value marked "(inactive)".
  *
+ * `includeInactive` is for HISTORY and report filters only (movements, stock positions, reports): a
+ * deactivated customer still owns those rows, so it stays filterable — flagged `inactive: true` so the
+ * screen can label it. Create forms never ask for it.
+ *
  * No addresses, contacts, sites or projects: this feeds a dropdown. Sites and projects are still
  * fetched per customer by the existing endpoints once one is chosen.
  */
-export async function listCustomerOptions(): Promise<{ id: string; code: string; name: string }[]> {
-  const rows = await customerRepo.findOptions();
+export async function listCustomerOptions({ includeInactive = false }: { includeInactive?: boolean } = {}): Promise<
+  { id: string; code: string; name: string; inactive?: true }[]
+> {
+  const rows = await customerRepo.findOptions({ includeInactive });
   // `customerCode` → `code`, so suppliers, warehouses and customers all hand pickers one shape.
-  return rows.map((c) => ({ id: c.id, code: c.customerCode, name: c.name }));
+  return rows.map((c) => ({ id: c.id, code: c.customerCode, name: c.name, ...inactiveFlag(c.status) }));
+}
+
+/**
+ * One customer's projects in the same lean `{ id, code, name }` shape, COMPLETE — for the job form's
+ * project picker, the Jobs list's project filter and the report filters. The paged
+ * `/customers/:id/projects` stays the customer detail tab's read (and its `customers.view` gate):
+ * a picker needs every project and nothing else about them.
+ */
+export async function listCustomerProjectOptions(customerId: string): Promise<{ id: string; code: string; name: string }[]> {
+  await requireCustomer(customerId);
+  return customerRepo.findProjectOptions(customerId);
+}
+
+/** How many sites the job form's search offers at once — the SitePicker states the cap on screen. */
+const SITE_ADDRESS_OPTION_LIMIT = 50;
+
+/**
+ * The job form's site SEARCH for one customer: name, code and the address a picked site copies onto
+ * the job. Searched, never listed — a customer can hold thousands of bulk-imported sites.
+ */
+export async function searchCustomerSiteOptions(customerId: string, term: string | undefined): Promise<customerRepo.SiteAddressOption[]> {
+  await requireCustomer(customerId);
+  return customerRepo.searchSiteAddresses(customerId, term, SITE_ADDRESS_OPTION_LIMIT);
 }

@@ -28,7 +28,8 @@ export function GoodsReceiptDetail({ initial }: { initial: GoodsReceipt }) {
   const { can } = useAuth();
   const { pushToast } = useDashboard();
   const [grn, setGrn] = React.useState<GoodsReceipt>(initial);
-  const TABS: Tab[] = ["overview", "attachments", "audit"];
+  // The audit trail reads /audit (audit.view); without it the tab could only ever show an error.
+  const TABS: Tab[] = ["overview", "attachments", ...(can("audit.view") ? (["audit"] as Tab[]) : [])];
   const requestedTab = searchParams.get("tab");
   const tab: Tab = TABS.includes(requestedTab as Tab) ? (requestedTab as Tab) : "overview";
   const setTab = (t: Tab) => router.replace(`/dashboard/goods-in/${grn.code}?tab=${t}`, { scroll: false });
@@ -93,7 +94,7 @@ export function GoodsReceiptDetail({ initial }: { initial: GoodsReceipt }) {
       />
 
       <div className="shrink-0 flex gap-1 overflow-x-auto border-b border-[var(--border)]">
-        {(["overview", "attachments", "audit"] as Tab[]).map((t) => (
+        {TABS.map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`shrink-0 border-b-2 px-3.5 py-2.5 text-xs font-bold capitalize transition-colors ${tab === t ? "border-[var(--accent)] text-[var(--accent)]" : "border-transparent text-[var(--muted)] hover:text-[var(--ink)]"}`}>
             {t === "audit" ? "Audit trail" : t}
           </button>

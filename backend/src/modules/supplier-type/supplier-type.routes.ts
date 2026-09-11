@@ -20,9 +20,12 @@ router.use(requireAuth);
 // The type list is read by type-managers AND by the supplier form's type picker
 // (which staff reach via suppliers.create / suppliers.edit), so either may read it —
 // mirrors how the warehouse-type list allows warehouse.create / warehouse.edit.
+// `suppliers.view` for the Suppliers list's TYPE FILTER, which swallowed the refusal and rendered an
+// empty dropdown for every role that can read suppliers but not administer their types (the Finance
+// Director and the Project Manager). A type name is already on every supplier row that role can list.
 router.get(
   "/",
-  requireAnyPermission("supplier_types.view", "suppliers.create", "suppliers.edit"),
+  requireAnyPermission("supplier_types.view", "suppliers.view", "suppliers.create", "suppliers.edit"),
   supplierTypeController.listSupplierTypes,
 );
 router.get(

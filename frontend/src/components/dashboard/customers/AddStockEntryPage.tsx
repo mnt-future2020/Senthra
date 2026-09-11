@@ -8,7 +8,7 @@ import { printLabels } from "@/lib/printBarcode";
 import { BarcodePanel } from "@/components/dashboard/irm/BarcodePanel";
 
 import * as customerService from "@/services/customer.service";
-import * as warehouseService from "@/services/warehouse.service";
+import { listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import { listCategories, getCachedCategories } from "@/services/category.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
@@ -19,7 +19,6 @@ import { UOM_SELECT_OPTIONS } from "@/lib/uom";
 import { Select } from "@/components/ui/Select";
 import type { CustomerStockEntry } from "@/types/customer";
 import type { Category } from "@/types/category";
-import type { PagedWarehouses } from "@/services/warehouse.service";
 
 
 interface CustomerInfo {
@@ -47,8 +46,10 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
     },
     {
       label: "warehouses",
-      load: () => warehouseService.listWarehouses({ pageSize: 200 }),
-      onData: (r: PagedWarehouses) => setWarehouses(r.warehouses.filter((w) => w.status === "active").map((w) => ({ id: w.id, name: w.name, code: w.code }))),
+      // The COMPLETE, caller-scoped list of ACTIVE warehouses — admits customer_stock.create, this
+      // page's gate. The directory page it replaced needed warehouse.view and stopped at 100.
+      load: listWarehouseOptions,
+      onData: (ws: WarehouseOption[]) => setWarehouses(ws.map((w) => ({ id: w.id, name: w.name, code: w.code }))),
     },
   ]);
 

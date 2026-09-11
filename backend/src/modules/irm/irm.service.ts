@@ -304,6 +304,9 @@ export const IRM_PICKER_PERMISSIONS = [
   "goods_in.create",
   "jobs.create",
   "jobs.edit",
+  // The Custom Reports + scheduled-report ITEM filter. Names and codes only — cost stays behind
+  // IRM_COST_PERMISSIONS, which this key is not in.
+  "reports.view",
 ] as const;
 
 /**

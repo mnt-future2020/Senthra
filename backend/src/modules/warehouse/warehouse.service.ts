@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
+import { inactiveFlag } from "../../utils/pickerOption.js";
 import * as warehouseRepo from "./warehouse.repository.js";
 import type { WarehouseWithRelations } from "./warehouse.repository.js";
 import * as warehouseTypeService from "#modules/warehouse-type/warehouse-type.service.js";
@@ -512,11 +513,36 @@ export interface PublicWarehouseOption {
   id: string;
   code: string;
   name: string;
+  /** Only on a deactivated warehouse — which only an `includeInactive` list contains. */
+  inactive?: true;
 }
 // Scoped to the actor: a warehouse-scoped user (e.g. Warehouse Manager) only gets their assigned
 // warehouses; everyone else gets all active warehouses. Server-side — the picker can't be widened.
-export async function listWarehouseOptions(actor?: AuditActor): Promise<PublicWarehouseOption[]> {
-  return warehouseRepo.findOptions(warehouseScopeFilter(actor));
+// `includeInactive` (HISTORY filters only) adds deactivated warehouses — under the same scope.
+export async function listWarehouseOptions(
+  actor?: AuditActor,
+  { includeInactive = false }: { includeInactive?: boolean } = {},
+): Promise<PublicWarehouseOption[]> {
+  const rows = await warehouseRepo.findOptions(warehouseScopeFilter(actor), { includeInactive });
+  return rows.map((w) => ({ id: w.id, code: w.code, name: w.name, ...inactiveFlag(w.status) }));
+}
+
+// The purchase request / order DELIVERY-warehouse picker: an option plus the default flag and the
+// address the form shows as the destination. Its own read (rather than the full /warehouses list the
+// forms used to page) so a requester needs no warehouse-administration permission to choose where the
+// goods go — and receives nothing about a warehouse beyond what the document will print.
+export interface PublicWarehouseDeliveryOption extends PublicWarehouseOption {
+  isDefault: boolean;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  county: string | null;
+  postcode: string | null;
+  country: string | null;
+}
+// Scoped to the actor exactly like listWarehouseOptions.
+export async function listWarehouseDeliveryOptions(actor?: AuditActor): Promise<PublicWarehouseDeliveryOption[]> {
+  return warehouseRepo.findDeliveryOptions(warehouseScopeFilter(actor));
 }
 
 // Active FIELD ENGINEERS (canHoldStock roles) for the "assign an engineer" dropdowns on jobs and

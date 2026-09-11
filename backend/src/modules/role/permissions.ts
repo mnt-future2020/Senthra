@@ -328,9 +328,15 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       //
       // Every route below `manage` accepts EITHER its own key or `manage` (requireAnyPermission), so
       // no existing role changes behaviour and there is no migration.
-      { key: "rentals.hire.receive", action: "Receive & return", description: "Book hired equipment in at a warehouse, record it going back, and report damage found while it is with us." },
-      { key: "rentals.hire.settle", action: "Settle hire records", description: "Close a hire short when the outstanding units are never arriving, reverse a hire record entered in error, and record what a supplier is charging for damage — for this role's own warehouses. Includes everything Receive & return allows." },
-      { key: "rentals.hire.manage", action: "Manage hires", description: "Extend a hire period — a fresh commitment of money to the supplier. Includes everything Receive & return and Settle hire records allow." },
+      //
+      // All three REQUIRE `purchase_orders.view`: every hire movement is booked against its order —
+      // the receive, return and damage pages open by loading that purchase order, and without the
+      // read they cannot render at all. Declared here so the role editor ticks it along with the hire
+      // key, instead of saving a role whose hire pages are dead. Both seeded roles that hold a hire key
+      // (warehouse manager, project manager) already hold it, so no existing grant changes.
+      { key: "rentals.hire.receive", action: "Receive & return", description: "Book hired equipment in at a warehouse, record it going back, and report damage found while it is with us.", requires: ["purchase_orders.view"] },
+      { key: "rentals.hire.settle", action: "Settle hire records", description: "Close a hire short when the outstanding units are never arriving, reverse a hire record entered in error, and record what a supplier is charging for damage — for this role's own warehouses. Includes everything Receive & return allows.", requires: ["purchase_orders.view"] },
+      { key: "rentals.hire.manage", action: "Manage hires", description: "Extend a hire period — a fresh commitment of money to the supplier. Includes everything Receive & return and Settle hire records allow.", requires: ["purchase_orders.view"] },
     ],
   },
   {
@@ -744,6 +750,135 @@ export const WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS = [
  * role that already held it keeps every route it had.
  */
 export const HIRE_SETTLE_PERMISSIONS = ["rentals.hire.settle", "rentals.hire.manage"] as const;
+
+// ── Picker / option endpoints ─────────────────────────────────────────────────────────────────
+//
+// The lean reads behind the app's dropdowns and filters. They return id, code and name (plus the
+// address on the two that exist to prefill one) — never the full record — and each list below names
+// the permission of EVERY screen that renders the picker. A screen whose picker is refused shows
+// either an alarm the user can do nothing about or, worse, an empty dropdown that reads as "there is
+// nothing here"; both were live on seeded roles (the Finance Director's Jobs list, the Warehouse
+// Manager's purchase-order filters) before these lists existed.
+//
+// Widening one of these grants no reach: the names are already on the screen the reader is looking
+// at — the customer column of the job list, the supplier on every order row. Where that stops being
+// true, the key goes in an UNSCOPED list instead (see CUSTOMER_OPTION_UNSCOPED_READERS).
+//
+// Kept in the catalogue for the reason HIRE_SETTLE_PERMISSIONS is: one list, imported by the route
+// that enforces it and by the tests that check it against every seeded role.
+
+/**
+ * GET /customers/options and GET /customers/:id/project-options — every customer picker and filter,
+ * and the project list that follows a chosen customer. `jobs.view` is here because the Jobs list
+ * filters by both and already prints both on every row; `jobs.create` / `.edit` for the job form.
+ */
+export const CUSTOMER_OPTION_READERS = ["customers.view", "jobs.view", "jobs.create", "jobs.edit"] as const;
+
+/**
+ * Keys that open the customer, project and site pickers ONLY for a principal whose data is not
+ * warehouse-scoped. A warehouse-scoped user's Custom Reports are the reports scoped to their own
+ * warehouses (customReports.registry `warehouseScopable`), so handing that user every customer in the
+ * company to filter them by would widen their reach — the exact thing the scope exists to prevent.
+ */
+export const CUSTOMER_OPTION_UNSCOPED_READERS = ["reports.view"] as const;
+
+/**
+ * GET /customers/:id/site-options — the job form's site SEARCH. Carries the site's address, because
+ * picking a site copies it onto the job; that is why it is narrower than the name-only lists above.
+ */
+export const CUSTOMER_SITE_OPTION_READERS = ["customers.view", "jobs.create", "jobs.edit"] as const;
+
+/**
+ * GET /customers/:id/stock-options — the job form's customer-stock kit lines. The two stock keys are
+ * the customer Inventory tab's own; the job keys are the planner who draws a kit from that stock.
+ */
+export const CUSTOMER_STOCK_OPTION_READERS = ["customer_stock.view", "stock_requests.view", "jobs.create", "jobs.edit"] as const;
+
+/** GET /jobs/site-options — the site type-ahead FILTER (Jobs list, Custom Reports): name, code, postcode. */
+export const JOB_SITE_SEARCH_READERS = ["jobs.view"] as const;
+
+/** GET /suppliers/options — every supplier picker (forms) and supplier filter (lists). */
+export const SUPPLIER_OPTION_READERS = [
+  "suppliers.view",
+  // Forms that pick a supplier.
+  "purchase_requests.create", "purchase_requests.edit",
+  "purchase_orders.create", "purchase_orders.edit",
+  "jobs.create", "jobs.edit",
+  "irm.create", "irm.edit",
+  // Lists that filter by one — each already shows the supplier on every row.
+  "purchase_requests.view", // Purchase Requests list
+  "purchase_orders.view", // Purchase Orders list, a warehouse's Expected deliveries
+  "goods_in.view", // Goods receipts list
+  "irm.view", // IRM catalogue
+  "rentals.view", // Rentals → On hire
+  "reports.finance.view", // Finance → spend by supplier
+] as const;
+
+/**
+ * GET /warehouses/options — every warehouse picker and filter. Always SCOPED to the caller in the
+ * service (a warehouse-scoped user gets only their assigned warehouses), which is what makes a list
+ * this long safe: no key here can reveal a warehouse its holder could not already open.
+ */
+export const WAREHOUSE_OPTION_READERS = [
+  "users.create", "users.edit", // the user form's "Assigned warehouses"
+  "purchase_orders.create", // the purchase order's per-row warehouse
+  "jobs.create", "jobs.edit", // the job pack's kit-line source warehouse
+  "jobs.kit_request.review", // the additional-kit review modal
+  "van_stock_request.review", // the van stock request's per-line source
+  "purchase_requests.view", // Purchase Requests list filter
+  "purchase_orders.view", // Purchase Orders list filter
+  "goods_in.view", // Goods receipts list filter
+  "inventory.history", // movement feed + transfer history filters
+  "reports.view", // Custom Reports + scheduled report filters
+  "stock_requests.approve", // assign a stock submission / submit one for a customer
+  "customer_stock.create", // add a stock entry for a customer
+  "customer_stock.view", // the customer Inventory tab's warehouse filter
+] as const;
+
+/**
+ * GET /warehouses/delivery-options — the purchase request / order DELIVERY warehouse, which also shows
+ * the address the goods will go to. The address is why this is its own endpoint rather than a wider
+ * /warehouses/options: only the forms that print it on a document read it. Scoped like the above.
+ */
+export const WAREHOUSE_DELIVERY_OPTION_READERS = [
+  "warehouse.view",
+  "purchase_requests.create", "purchase_requests.edit",
+  "purchase_orders.create", "purchase_orders.edit",
+] as const;
+
+/** GET /warehouses/engineer-options — assignable field engineers (jobs, walk-in issue, transfer board). */
+export const ENGINEER_OPTION_READERS = [
+  "jobs.view", "jobs.create", "jobs.edit", "jobs.assign",
+  "van_stock_request.review",
+  "engineer_stock.view", // the admin engineer-transfer board's engineer filter
+] as const;
+
+/** GET /inventory/engineer-options — the complete engineer roster for filters (movements, reports). */
+export const INVENTORY_ENGINEER_OPTION_READERS = ["inventory.view", "inventory.history", "reports.view"] as const;
+
+/**
+ * The job planner's STOCK CHECKS — GET /inventory/availability, /inventory/items/:id/warehouse-stock
+ * and /goods-management/demand. Quantities per item × warehouse, never cost or value; availability
+ * and warehouse stock are scoped to the caller's warehouses in the service. Without them the job form
+ * and the kit-request review switch their "N free" caps off without a word, and the reviewer's
+ * warehouse dropdown falls back to every warehouse.
+ */
+export const STOCK_CHECK_READERS = ["inventory.view", "jobs.create", "jobs.edit", "jobs.kit_request.review"] as const;
+
+/**
+ * requireAnyPermission's question, plus a list that only counts for a principal whose data is NOT
+ * warehouse-scoped — see CUSTOMER_OPTION_UNSCOPED_READERS. Pure, so the seeded-role tests ask exactly
+ * what the route middleware asks.
+ */
+export function grantsAnyUnlessScoped(
+  permissions: string[],
+  isWarehouseScoped: boolean,
+  anyOf: readonly string[],
+  unscopedOnly: readonly string[],
+): boolean {
+  if (anyOf.some((p) => roleGrants(permissions, p))) return true;
+  return !isWarehouseScoped && unscopedOnly.some((p) => roleGrants(permissions, p));
+}
 
 // `irm.view` is NOT optional here. Every warehouse item picker is built from GET /irm — Add Stock,
 // Adjust Stock, Transfer and the movement feed — and each of those swallows the rejection, so

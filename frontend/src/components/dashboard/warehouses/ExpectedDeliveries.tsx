@@ -9,7 +9,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { Pagination } from "@/components/ui/Pagination";
 import { PoCodeLink } from "@/components/dashboard/purchase-orders/PoCodeLink";
 import { listPurchaseOrders } from "@/services/purchase-order.service";
-import { listSuppliers } from "@/services/supplier.service";
+import { listSupplierOptions } from "@/services/supplier.service";
 import { Select } from "@/components/ui/Select";
 import { FilterPopover } from "@/components/ui/FilterPopover";
 import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
@@ -374,8 +374,10 @@ export function ExpectedDeliveries({
   const [supplierOptions, setSupplierOptions] = React.useState<{ value: string; label: string }[]>([]);
   React.useEffect(() => {
     let alive = true;
-    listSuppliers({ status: "active", pageSize: 200 })
-      .then((r) => alive && setSupplierOptions(r.suppliers.map((x) => ({ value: x.id, label: x.name }))))
+    // The COMPLETE lean list, which admits purchase_orders.view — this pane's own gate. The directory
+    // read it replaced needed suppliers.view (the Warehouse Manager's filter was empty) and capped at 100.
+    listSupplierOptions()
+      .then((os) => alive && setSupplierOptions(os.map((x) => ({ value: x.id, label: x.name }))))
       .catch(() => alive && setSupplierOptions([]));
     return () => { alive = false; };
   }, []);

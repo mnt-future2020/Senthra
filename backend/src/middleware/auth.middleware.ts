@@ -5,7 +5,8 @@ import * as userRepo from "#modules/user/user.repository.js";
 import * as userWarehouseRepo from "#modules/user/user-warehouse.repository.js";
 import * as customerRepo from "#modules/customer/customer.repository.js";
 import * as sessionService from "#modules/auth/session.service.js";
-import { roleGrants } from "#modules/role/permissions.js";
+import { grantsAnyUnlessScoped, roleGrants } from "#modules/role/permissions.js";
+import { isWarehouseScopedUser } from "../lib/warehouse-access.js";
 import { ACCESS_COOKIE } from "../utils/cookies.js";
 import { verifyAccessToken } from "../utils/jwt.js";
 import { adminPrincipal, customerPrincipal, userPrincipal } from "../types/principal.js";
@@ -189,6 +190,36 @@ export function requireAnyPermission(...permissions: string[]): RequestHandler {
       return;
     }
     if (permissions.some((p) => roleGrants(principal.permissions, p))) {
+      next();
+      return;
+    }
+    res.status(403).json({ error: "You don't have permission to do that." });
+  };
+}
+
+// requireAnyPermission, plus keys that count ONLY for a principal whose data is not warehouse-scoped.
+// For the customer / project / site pickers a report permission may open: a warehouse-scoped user's
+// reports are scoped to their warehouses, so the same key must not hand them the company's customer
+// list (see CUSTOMER_OPTION_UNSCOPED_READERS). The super-admin always passes.
+export function requireAnyPermissionUnlessScoped(
+  anyOf: readonly string[],
+  unscopedOnly: readonly string[],
+): RequestHandler {
+  return (req, res, next) => {
+    const principal = req.principal;
+    if (!principal) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    if (principal.type === "admin") {
+      next();
+      return;
+    }
+    if (principal.mustResetPassword) {
+      res.status(403).json({ error: "Set your password before continuing." });
+      return;
+    }
+    if (grantsAnyUnlessScoped(principal.permissions, isWarehouseScopedUser(principal), anyOf, unscopedOnly)) {
       next();
       return;
     }

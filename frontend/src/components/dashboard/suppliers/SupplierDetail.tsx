@@ -60,7 +60,9 @@ export function SupplierDetail({ initial }: { initial: Supplier }) {
     ...(can("irm.view") ? tab$("items", "Items") : []),
     ...(can("purchase_orders.view") ? tab$("procurement", "Procurement") : []),
     ...(can("goods_in.view") ? tab$("goods-in", "Goods In") : []),
-    { key: "audit", label: "Audit trail" },
+    // The audit trail reads /audit (audit.view). It was the one ungated tab, so a supplier reader
+    // without it (the System Admin) opened a tab that could only ever show an error.
+    ...(can("audit.view") ? tab$("audit", "Audit trail") : []),
   ];
 
   const requestedTab = searchParams.get("tab");

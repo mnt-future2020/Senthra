@@ -867,9 +867,58 @@ export interface CustomerOption {
   id: string;
   code: string;
   name: string;
+  /** Only on a deactivated customer — which only an `includeInactive` list contains. */
+  inactive?: boolean;
 }
 
-/** The COMPLETE set of active customers, for dropdowns. See `listSupplierOptions` for the rationale. */
-export function listCustomerOptions(): Promise<CustomerOption[]> {
-  return api<{ options: CustomerOption[] }>("/customers/options").then((r) => r.options);
+/**
+ * The COMPLETE set of active customers, for dropdowns. See `listSupplierOptions` for the rationale.
+ *
+ * `includeInactive` is for HISTORY and report filters only: deactivated customers come back flagged
+ * `inactive` (label them with `markInactive`). A create form must never pass it.
+ */
+export function listCustomerOptions({ includeInactive = false }: { includeInactive?: boolean } = {}): Promise<CustomerOption[]> {
+  return api<{ options: CustomerOption[] }>(`/customers/options${includeInactive ? "?includeInactive=true" : ""}`).then(
+    (r) => r.options,
+  );
+}
+
+/** Lean {id, code, name} for a project picker. */
+export interface CustomerProjectOption {
+  id: string;
+  code: string;
+  name: string;
+}
+
+/**
+ * ONE customer's projects, COMPLETE and lean — every project picker and project filter (the job form,
+ * the Jobs list, the report filters). Use this rather than `listCustomerProjects`, which is the
+ * customer detail tab's paged read: a page silently hid every project past it, and that read needs
+ * `customers.view`, which a job planner or a Finance user reading the Jobs list may not hold.
+ */
+export function listCustomerProjectOptions(customerId: string): Promise<CustomerProjectOption[]> {
+  return api<{ options: CustomerProjectOption[] }>(`/customers/${customerId}/project-options`).then((r) => r.options);
+}
+
+/** A site as the job form's site search returns it — the address it copies onto the job, no contacts. */
+export interface CustomerSiteOption {
+  id: string;
+  name: string;
+  code: string | null;
+  postcode: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  county: string | null;
+  country: string | null;
+}
+
+/**
+ * SEARCH one customer's sites for the job form. A search, never a listing: a customer can hold
+ * thousands of bulk-imported sites, and the form's old 100-row page had no row for the rest.
+ */
+export function searchCustomerSiteOptions(customerId: string, q: string): Promise<CustomerSiteOption[]> {
+  const term = q.trim();
+  const qs = term ? `?q=${encodeURIComponent(term)}` : "";
+  return api<{ sites: CustomerSiteOption[] }>(`/customers/${customerId}/site-options${qs}`).then((r) => r.sites);
 }

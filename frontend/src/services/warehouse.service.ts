@@ -126,11 +126,37 @@ export function listEngineerOptions(): Promise<WarehouseManager[]> {
 }
 
 // Lean active-warehouse options (id/code/name) for the user form's "Assigned Warehouses" picker.
+// `includeInactive` is for HISTORY filters only: deactivated warehouses come back flagged `inactive`
+// (label them with `markInactive`). A create form must never pass it. Caller-scoped either way.
 export interface WarehouseOption {
   id: string;
   code: string;
   name: string;
+  /** Only on a deactivated warehouse — which only an `includeInactive` list contains. */
+  inactive?: boolean;
 }
-export function listWarehouseOptions(): Promise<WarehouseOption[]> {
-  return api<{ options: WarehouseOption[] }>("/warehouses/options").then((r) => r.options);
+export function listWarehouseOptions({ includeInactive = false }: { includeInactive?: boolean } = {}): Promise<WarehouseOption[]> {
+  return api<{ options: WarehouseOption[] }>(`/warehouses/options${includeInactive ? "?includeInactive=true" : ""}`).then(
+    (r) => r.options,
+  );
+}
+
+/** A delivery-warehouse option: the lean option, the default flag, and the address it will print. */
+export interface WarehouseDeliveryOption extends WarehouseOption {
+  isDefault: boolean;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  county: string | null;
+  postcode: string | null;
+  country: string | null;
+}
+
+/**
+ * The purchase request / order DELIVERY-warehouse picker — complete, scoped to the caller, and readable
+ * by whoever may fill the form in (the forms used to page the full `/warehouses` list, which needs
+ * `warehouse.view` and stopped at 100). Carries the address the form shows as the destination.
+ */
+export function listWarehouseDeliveryOptions(): Promise<WarehouseDeliveryOption[]> {
+  return api<{ options: WarehouseDeliveryOption[] }>("/warehouses/delivery-options").then((r) => r.options);
 }

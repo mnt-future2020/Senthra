@@ -4,7 +4,7 @@ import * as supplierService from "./supplier.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { sendCsv } from "../../utils/csv-response.js";
-import { param, queryInt, queryStr } from "../../utils/request.js";
+import { param, queryBool, queryInt, queryStr } from "../../utils/request.js";
 import type { CreateSupplierInput, UpdateSupplierInput } from "./supplier.validation.js";
 
 // GET /suppliers?search=&status=&type=&sort=&page=&pageSize=
@@ -63,7 +63,9 @@ export const deleteSupplier = asyncHandler(async (req, res) => {
   res.json({ ok: true });
 });
 
-// GET /suppliers/options — the complete active set, lean, for pickers.
-export const listSupplierOptions = asyncHandler(async (_req, res) => {
-  res.json({ options: await supplierService.listSupplierOptions() });
+// GET /suppliers/options[?includeInactive=true] — the complete set, lean, for pickers. ACTIVE only
+// unless a history filter asks for deactivated suppliers too.
+export const listSupplierOptions = asyncHandler(async (req, res) => {
+  const includeInactive = queryBool(req.query.includeInactive) === true;
+  res.json({ options: await supplierService.listSupplierOptions({ includeInactive }) });
 });

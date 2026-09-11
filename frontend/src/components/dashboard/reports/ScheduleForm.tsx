@@ -8,6 +8,14 @@ import * as reportsService from "@/services/reports.service";
 import type { SchedulablePayloadState, SchedulableReport, ScheduleRecipient } from "./scheduleTypes";
 import { coverageNote, DAY_NAMES, LAST_DAY_OF_MONTH, MAX_DAY_OF_MONTH } from "./scheduleDraft";
 import { useProjectOptions, useReportFilterOptions } from "./reportFilterOptions";
+import { IrmItemPicker } from "@/components/dashboard/irm/IrmItemPicker";
+import { mergeIrmItems, missingIrmIds } from "@/components/dashboard/irm/irmItemPickerModel";
+import { useIrmItemsByIds } from "@/hooks/useIrmItemsByIds";
+import { useAuth } from "@/hooks/useAuth";
+import { canPickCustomers, canSearchSites, isWarehouseScoped } from "@/lib/pickerAccess";
+import { SitePicker, siteOptionLabel } from "@/components/ui/SitePicker";
+import { searchJobSites } from "@/services/job.service";
+import type { IrmItem } from "@/types/irm";
 
 // The schedule form. Deliberately a plain modal form rather than a wizard: there are eight fields and
 // a modal form is the existing dashboard convention.
@@ -19,6 +27,7 @@ import { useProjectOptions, useReportFilterOptions } from "./reportFilterOptions
 const FILTER_LABEL: Record<string, string> = {
   customerId: "Customer",
   projectId: "Project",
+  siteId: "Site",
   warehouseId: "Warehouse",
   irmItemId: "Item",
   engineerId: "Engineer",
@@ -119,18 +128,47 @@ export function ScheduleForm({
 
   // A schedule's period comes from its cadence, so a fixed date range is never offered — storing one
   // would pin every future run to the same period forever.
-  const filters = (active?.filters ?? []).filter((f) => f !== "dateFrom" && f !== "dateTo");
+  //
+  // The customer, project and site pickers only for a viewer the server lets read them
+  // (lib/pickerAccess) — hidden, not drawn empty, for a warehouse-scoped user, whose reports are scoped
+  // to their warehouses. The same rule as the Custom Reports screen.
+  const { can, principal } = useAuth();
+  const scoped = isWarehouseScoped(principal);
+  const showCustomerFilters = canPickCustomers(can, scoped);
+  const showSiteFilter = canSearchSites(can, scoped);
+  const filters = (active?.filters ?? []).filter(
+    (f) =>
+      f !== "dateFrom" &&
+      f !== "dateTo" &&
+      (showCustomerFilters || (f !== "customerId" && f !== "projectId")) &&
+      (showSiteFilter || f !== "siteId"),
+  );
   const set = (patch: Partial<SchedulablePayloadState>) => onChange({ ...draft, ...patch });
 
   // The SAME lists the Custom Reports screen builds its pickers from. A schedule's filters are that
   // screen's filters, saved — so they have to be chosen the same way and from the same source.
-  const lists = useReportFilterOptions();
-  const projects = useProjectOptions(draft.filters.customerId || undefined);
+  const lists = useReportFilterOptions({ customers: showCustomerFilters });
+  const projects = useProjectOptions(showCustomerFilters ? draft.filters.customerId || undefined : undefined);
+  // The ITEM filter searches the whole catalogue, as on the Custom Reports screen. A saved schedule's
+  // item may be outside the first page, so it is resolved by id to keep its label.
+  const [foundItems, setFoundItems] = React.useState<IrmItem[]>([]);
+  const knownItems = React.useMemo(() => mergeIrmItems(lists.items, foundItems), [lists.items, foundItems]);
+  useIrmItemsByIds(missingIrmIds([draft.filters.irmItemId || undefined], knownItems), (found) =>
+    setFoundItems((prev) => mergeIrmItems(prev, found)),
+  );
+  // The SITE filter (Project Activity) is a type-ahead, as on the Custom Reports screen — sites are
+  // bulk-imported in the thousands, so no list could hold them. Narrowed to the chosen customer. The
+  // picked site's label is kept because a search result is not a complete set to look an id up in.
+  const [siteLabel, setSiteLabel] = React.useState<string | null>(null);
+  const customerForSites = draft.filters.customerId || undefined;
+  const searchSites = React.useCallback(
+    (term: string) => searchJobSites(term, customerForSites).then((r) => r.sites),
+    [customerForSites],
+  );
 
   const optionsFor = (f: string) =>
     f === "customerId" ? lists.customers
     : f === "warehouseId" ? lists.warehouses
-    : f === "irmItemId" ? lists.items
     : f === "engineerId" ? lists.engineers
     : f === "projectId" ? projects
     : [];
@@ -312,34 +350,73 @@ export function ScheduleForm({
           Fulfillment Centre" in a 150px box. */}
       {filters.length > 0 ? (
         <div className="flex flex-col gap-3">
-          {filters.map((f) => (
-            <label key={f} className="block">
-              <span className={labelCls}>{FILTER_LABEL[f] ?? f}</span>
-              {f === "itemKind" ? (
-                <Select
-                  size="sm"
-                  value={draft.filters[f] ?? ""}
-                  onChange={(v) => set({ filters: { ...draft.filters, [f]: v } })}
-                  options={STOCK_TYPE_OPTIONS}
-                  ariaLabel={FILTER_LABEL[f] ?? f}
-                />
-              ) : (
-                <Select
-                  size="sm"
-                  disabled={f === "projectId" && !draft.filters.customerId}
-                  value={draft.filters[f] ?? ""}
-                  onChange={(v) => {
-                    // Changing the customer invalidates a project chosen under the previous one.
-                    const next = { ...draft.filters, [f]: v };
-                    if (f === "customerId") delete next.projectId;
-                    set({ filters: next });
-                  }}
-                  options={[{ value: "", label: placeholderFor(f, Boolean(draft.filters.customerId)) }, ...optionsFor(f)]}
-                  ariaLabel={FILTER_LABEL[f] ?? f}
-                />
-              )}
-            </label>
-          ))}
+          {filters.map((f) => {
+            // The item picker renders its menu INLINE, so inside a <label> a click on the menu's padding
+            // or hint is forwarded to the picker's trigger and closes it — the recipients trap above.
+            // That one filter gets a <div>; the rest keep the <label>, as their popups are portalled.
+            const Wrapper = f === "irmItemId" ? "div" : "label";
+            return (
+              <Wrapper key={f} className="block">
+                <span className={labelCls}>{FILTER_LABEL[f] ?? f}</span>
+                {f === "itemKind" ? (
+                  <Select
+                    size="sm"
+                    value={draft.filters[f] ?? ""}
+                    onChange={(v) => set({ filters: { ...draft.filters, [f]: v } })}
+                    options={STOCK_TYPE_OPTIONS}
+                    ariaLabel={FILTER_LABEL[f] ?? f}
+                  />
+                ) : f === "irmItemId" ? (
+                  // Searched across the whole catalogue — the dropdown this replaced held the first 100
+                  // items and nothing past them.
+                  <IrmItemPicker
+                    size="sm"
+                    ariaLabel={FILTER_LABEL[f] ?? f}
+                    value={draft.filters.irmItemId ?? ""}
+                    selectedItem={knownItems.find((i) => i.id === draft.filters.irmItemId) ?? null}
+                    seed={lists.items}
+                    onSelect={(i) => {
+                      setFoundItems((prev) => mergeIrmItems(prev, [i]));
+                      set({ filters: { ...draft.filters, irmItemId: i.id } });
+                    }}
+                    onClear={() => set({ filters: { ...draft.filters, irmItemId: "" } })}
+                    canCreate={false}
+                  />
+                ) : f === "siteId" ? (
+                  <SitePicker
+                    value={draft.filters.siteId ?? ""}
+                    selectedLabel={siteLabel}
+                    search={searchSites}
+                    onChange={(id, option) => {
+                      setSiteLabel(option ? siteOptionLabel(option) : null);
+                      set({ filters: { ...draft.filters, siteId: id } });
+                    }}
+                    placeholder="Any site"
+                    clearLabel="Any site"
+                    ariaLabel={FILTER_LABEL[f] ?? f}
+                  />
+                ) : (
+                  <Select
+                    size="sm"
+                    disabled={f === "projectId" && !draft.filters.customerId}
+                    value={draft.filters[f] ?? ""}
+                    onChange={(v) => {
+                      // Changing the customer invalidates the project AND the site chosen under it.
+                      const next = { ...draft.filters, [f]: v };
+                      if (f === "customerId") {
+                        delete next.projectId;
+                        delete next.siteId;
+                        setSiteLabel(null);
+                      }
+                      set({ filters: next });
+                    }}
+                    options={[{ value: "", label: placeholderFor(f, Boolean(draft.filters.customerId)) }, ...optionsFor(f)]}
+                    ariaLabel={FILTER_LABEL[f] ?? f}
+                  />
+                )}
+              </Wrapper>
+            );
+          })}
         </div>
       ) : null}
 

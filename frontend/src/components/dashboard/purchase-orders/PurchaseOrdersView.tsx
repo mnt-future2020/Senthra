@@ -20,8 +20,8 @@ import { HireStateBadge, PO_DERIVED_STATUS_OPTIONS, PO_PRIORITY_LABELS, PO_STATU
 import { FilterPopover } from "@/components/ui/FilterPopover";
 import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { useReferenceData } from "@/hooks/useReferenceData";
-import { listSuppliers, type PagedSuppliers } from "@/services/supplier.service";
-import { listWarehouses, type PagedWarehouses } from "@/services/warehouse.service";
+import { listSupplierOptions, type SupplierOption } from "@/services/supplier.service";
+import { listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import type { PoPriority, PoStatus, PurchaseOrder } from "@/types/purchase-order";
 
 const PAGE_SIZE = 20;
@@ -228,21 +228,23 @@ export function PurchaseOrdersView() {
   // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
   // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
   // was taken from, and nothing about the resulting file looks wrong.
-  // Filter dropdown sources. Both degrade to an empty list, which renders as "All …" — a PO user
-  // need not hold `suppliers.view`, and a control that 403s on use is worse than one that cannot
-  // narrow.
+  // Filter dropdown sources — the COMPLETE lean option lists. They used to page the full supplier and
+  // warehouse directories, which a PO user need not be able to read: the seeded Warehouse Manager (no
+  // `suppliers.view`) got a permission toast on every visit — worded with this list's internal label —
+  // and anything past 100 had no row. Both options endpoints admit `purchase_orders.view`; the
+  // warehouse list is scoped to the caller.
   const [supplierOptions, setSupplierOptions] = React.useState<{ value: string; label: string }[]>([]);
   const [warehouseOptions, setWarehouseOptions] = React.useState<{ value: string; label: string }[]>([]);
   useReferenceData([
     {
-      label: "po-suppliers",
-      load: () => listSuppliers({ status: "active", pageSize: 200 }),
-      onData: (r: PagedSuppliers) => setSupplierOptions(r.suppliers.map((x) => ({ value: x.id, label: x.name }))),
+      label: "suppliers",
+      load: listSupplierOptions,
+      onData: (os: SupplierOption[]) => setSupplierOptions(os.map((x) => ({ value: x.id, label: x.name }))),
     },
     {
-      label: "po-warehouses",
-      load: () => listWarehouses({ status: "active", pageSize: 200 }),
-      onData: (r: PagedWarehouses) => setWarehouseOptions(r.warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))),
+      label: "warehouses",
+      load: listWarehouseOptions,
+      onData: (ws: WarehouseOption[]) => setWarehouseOptions(ws.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))),
     },
   ]);
 

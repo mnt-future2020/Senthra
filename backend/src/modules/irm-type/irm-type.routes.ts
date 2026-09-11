@@ -16,9 +16,12 @@ router.use(requireAuth);
 
 // The type list is read by type-managers AND by the IRM item form's type picker
 // (which staff reach via irm.create / irm.edit), so either may read it.
+// `irm.view` for the catalogue's TYPE FILTER — the same reason irm-category.routes admits it for the
+// category filter: without it the filter was an empty dropdown for everyone who can read the
+// catalogue but not manage its types, and a type name is already on every item they can list.
 router.get(
   "/",
-  requireAnyPermission("irm_types.view", "irm.create", "irm.edit"),
+  requireAnyPermission("irm_types.view", "irm.view", "irm.create", "irm.edit"),
   irmTypeController.listIrmTypes,
 );
 router.get(

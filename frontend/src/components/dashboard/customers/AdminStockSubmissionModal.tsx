@@ -4,7 +4,7 @@ import * as React from "react";
 import { Loader2 } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
-import { listWarehouses } from "@/services/warehouse.service";
+import { listWarehouseOptions } from "@/services/warehouse.service";
 import { Modal } from "@/components/ui/Modal";
 import { Select } from "@/components/ui/Select";
 import { preferredWarehouseOptions, shouldShowPreferredWarehouse } from "@/lib/preferredWarehouse";
@@ -62,12 +62,13 @@ export function AdminStockSubmissionModal({
     };
   }, [customerId]);
 
-  // Active, non-deleted warehouses — the same set the portal offers, read through the staff service
-  // this screen already has permission for. A failed lookup costs only the optional field.
+  // Active, non-deleted warehouses — the same set the portal offers, as the COMPLETE lean option list,
+  // which admits stock_requests.approve (the key this modal is opened under). The full directory read
+  // it replaced needed warehouse.view and stopped at 100. A failed lookup costs only the optional field.
   React.useEffect(() => {
     let alive = true;
-    listWarehouses({ status: "active", pageSize: 200 })
-      .then((r) => alive && setWarehouses(r.warehouses.map((w) => ({ id: w.id, name: w.name, code: w.code }))))
+    listWarehouseOptions()
+      .then((ws) => alive && setWarehouses(ws.map((w) => ({ id: w.id, name: w.name, code: w.code }))))
       .catch(() => alive && setWarehouses([]))
       .finally(() => alive && setWarehousesLoaded(true));
     return () => {

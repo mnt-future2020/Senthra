@@ -11,7 +11,7 @@ import {
   type Placement,
   type PlacementCause,
 } from "./popoverPlacement";
-import { toolbarInputCls } from "./styles";
+import { inputCls, toolbarInputCls } from "./styles";
 
 // ── The SITE filter's picker ───────────────────────────────────────────────────────────────────
 //
@@ -54,6 +54,15 @@ export interface SitePickerProps {
   placeholder?: string;
   disabled?: boolean;
   ariaLabel?: string;
+  /**
+   * The always-present first row, which clears the selection. A filter says "All sites"; a form field
+   * says what "no site" means there (the job form: enter the address by hand).
+   */
+  clearLabel?: string;
+  /** "filter" (default) = the compact list-toolbar trigger; "form" = a full-width form field. */
+  variant?: "filter" | "form";
+  /** Form variant: marks the field invalid. */
+  invalid?: boolean;
 }
 
 /** Panel size, in px — see FilterPopover for why it is declared rather than measured. PANEL_H is the
@@ -77,6 +86,9 @@ export function SitePicker({
   placeholder = "All sites",
   disabled,
   ariaLabel = "Filter by site",
+  clearLabel = "All sites",
+  variant = "filter",
+  invalid,
 }: SitePickerProps) {
   const [open, setOpen] = React.useState(false);
   const [pos, setPos] = React.useState<Placement | null>(null);
@@ -172,14 +184,19 @@ export function SitePicker({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={ariaLabel}
-        className={`flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2.5 text-xs font-bold transition-all disabled:cursor-not-allowed disabled:opacity-60 ${
-          value
-            ? "border-[var(--accent)] bg-[var(--accent-10)] text-[var(--accent)]"
-            : "border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
-        }`}
+        className={
+          variant === "form"
+            ? // `aria-invalid` is not valid on a button, so the invalid ring inputCls keys off it is applied directly.
+              `${inputCls} flex items-center gap-2 text-left ${value ? "" : "text-[var(--faint)]"} ${invalid ? "border-[var(--neg)] ring-2 ring-[var(--neg)]/20" : ""}`
+            : `flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2.5 text-xs font-bold transition-all disabled:cursor-not-allowed disabled:opacity-60 ${
+                value
+                  ? "border-[var(--accent)] bg-[var(--accent-10)] text-[var(--accent)]"
+                  : "border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
+              }`
+        }
       >
-        <MapPin aria-hidden className="h-3.5 w-3.5" />
-        <span className="max-w-[11rem] truncate">{label}</span>
+        <MapPin aria-hidden className="h-3.5 w-3.5 shrink-0" />
+        <span className={variant === "form" ? "min-w-0 flex-1 truncate" : "max-w-[11rem] truncate"}>{label}</span>
       </button>
       {open &&
         pos &&
@@ -227,7 +244,7 @@ export function SitePicker({
                     value ? "text-[var(--muted)]" : "text-[var(--accent)]"
                   }`}
                 >
-                  All sites
+                  {clearLabel}
                 </button>
                 {options === null ? (
                   <p className="px-2 py-3 text-[11px] text-[var(--faint)]">Searching…</p>

@@ -31,6 +31,11 @@ export const CATEGORY_LIST_READERS = [
   "customer_stock.edit", // PUT /stock-entries/:id - edit form
   "stock_requests.complete", // warehouse receive, then fill in the entry's details
   "customers.edit", // legacy coarse key, pre-RBAC-split roles
+  // The READ-ONLY stock entry page (the same pair its route gate admits). Its Category field needs
+  // the list to show the entry's category by name; without it a viewer got a permission toast and a
+  // blank Category. Names only — the category is already on the entry they are reading.
+  "customer_stock.view",
+  "stock_requests.view",
 ];
 
 router.get("/", requireAnyPermission(...CATEGORY_LIST_READERS), categoryController.listCategories);

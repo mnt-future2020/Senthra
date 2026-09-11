@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
+import { inactiveFlag } from "../../utils/pickerOption.js";
 import * as supplierRepo from "./supplier.repository.js";
 import type { SupplierWithRelations } from "./supplier.repository.js";
 import * as supplierTypeService from "#modules/supplier-type/supplier-type.service.js";
@@ -431,9 +432,16 @@ export async function requireActiveSupplier(supplierId: string): Promise<Supplie
  * one keeps showing it — the form appends the saved value marked "(inactive)", which is the
  * convention IrmItemForm already uses for its type, category and supplier links.
  *
+ * `includeInactive` is for HISTORY filters only (the purchase request list): a deactivated supplier
+ * still owns the requests raised against it, so it stays filterable — flagged `inactive: true` so the
+ * screen can label it. Create forms never ask for it.
+ *
  * No contact details, addresses or notes: this feeds a dropdown, and the one supplier a form
  * actually needs in full is fetched by id when it is chosen.
  */
-export function listSupplierOptions(): Promise<{ id: string; code: string; name: string }[]> {
-  return supplierRepo.findOptions();
+export async function listSupplierOptions({ includeInactive = false }: { includeInactive?: boolean } = {}): Promise<
+  { id: string; code: string; name: string; inactive?: true }[]
+> {
+  const rows = await supplierRepo.findOptions({ includeInactive });
+  return rows.map((s) => ({ id: s.id, code: s.code, name: s.name, ...inactiveFlag(s.status) }));
 }

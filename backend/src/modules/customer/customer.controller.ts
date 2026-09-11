@@ -4,7 +4,7 @@ import * as customerService from "./customer.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { sendCsv } from "../../utils/csv-response.js";
-import { param, queryInt, queryStr } from "../../utils/request.js";
+import { param, queryBool, queryInt, queryStr } from "../../utils/request.js";
 import { unauthorized } from "../../utils/http-error.js";
 import type {
   AdminStockRequestInput,
@@ -526,7 +526,19 @@ export const submitStockRequest = asyncHandler(async (req, res) => {
   res.status(201).json({ request });
 });
 
-// GET /customers/options — the complete active set, lean, for pickers.
-export const listCustomerOptions = asyncHandler(async (_req, res) => {
-  res.json({ options: await customerService.listCustomerOptions() });
+// GET /customers/options[?includeInactive=true] — the complete set, lean, for pickers. ACTIVE only
+// unless a history/report filter asks for deactivated customers too.
+export const listCustomerOptions = asyncHandler(async (req, res) => {
+  const includeInactive = queryBool(req.query.includeInactive) === true;
+  res.json({ options: await customerService.listCustomerOptions({ includeInactive }) });
+});
+
+// GET /customers/:id/project-options — one customer's projects, lean and complete, for pickers.
+export const listCustomerProjectOptions = asyncHandler(async (req, res) => {
+  res.json({ options: await customerService.listCustomerProjectOptions(param(req, "id")) });
+});
+
+// GET /customers/:id/site-options?q= — the job form's site search (name, code and address).
+export const searchCustomerSiteOptions = asyncHandler(async (req, res) => {
+  res.json({ sites: await customerService.searchCustomerSiteOptions(param(req, "id"), queryStr(req.query.q)) });
 });

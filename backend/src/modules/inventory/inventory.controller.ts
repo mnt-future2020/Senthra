@@ -54,6 +54,11 @@ export const getAvailability = asyncHandler(async (req, res) => {
   res.json(await inventoryService.getAvailability(queryStr(req.query.irmItem) ?? "", queryStr(req.query.warehouse) ?? "", actorFrom(req)));
 });
 
+// GET /inventory/items/:irmItemId/warehouse-stock — where one item is stocked (quantities only).
+export const getItemWarehouseStock = asyncHandler(async (req, res) => {
+  res.json({ stock: await inventoryService.listItemWarehouseStock(param(req, "irmItemId"), actorFrom(req)) });
+});
+
 // GET /inventory/transfers (movement history)
 export const listTransfers = asyncHandler(async (req, res) => {
   const { search, irmItem, warehouse, fromWarehouse, toWarehouse, movedFrom, movedTo, page, pageSize } = req.query;

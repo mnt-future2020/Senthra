@@ -29,7 +29,12 @@ export interface EngineerOverviewState {
   reload: () => void;
 }
 
-export function useEngineerOverview(): EngineerOverviewState {
+/**
+ * `loadRecent` — whether the viewer may read their own stock movements (`engineer.inventory.view`).
+ * Without it the Recent activity card is not drawn, so the read is not made: it used to be sent anyway
+ * and its 403 swallowed into an empty list, which the card then presented as "no activity".
+ */
+export function useEngineerOverview(loadRecent = true): EngineerOverviewState {
   const [overview, setOverview] = React.useState<EngineerOverview | null>(null);
   const [recent, setRecent] = React.useState<Movement[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -58,7 +63,9 @@ export function useEngineerOverview(): EngineerOverviewState {
     try {
       const [ov, mv] = await Promise.all([
         engineerService.getOwnOverview(),
-        engineerService.getOwnMovements({ limit: 6 }).catch(() => EMPTY_MOVEMENTS),
+        loadRecent
+          ? engineerService.getOwnMovements({ limit: 6 }).catch(() => EMPTY_MOVEMENTS)
+          : Promise.resolve(EMPTY_MOVEMENTS),
       ]);
       if (seq !== seqRef.current || !mountedRef.current) return;
       setOverview(ov);
@@ -74,7 +81,7 @@ export function useEngineerOverview(): EngineerOverviewState {
         setRefreshing(false);
       }
     }
-  }, []);
+  }, [loadRecent]);
 
   React.useEffect(() => {
     void (async () => {

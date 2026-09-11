@@ -81,7 +81,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   repo.findById.mockResolvedValue({ id: CUST_ID, name: "LOBBI" } as never);
   repo.createStockRequest.mockResolvedValue(createdRow());
-  whRepo.findOptions.mockResolvedValue(SELECTABLE);
+  // The query also reads `status` (history filters flag deactivated rows by it). The portal list must
+  // still come back as exactly SELECTABLE — id/code/name, nothing more.
+  whRepo.findOptions.mockResolvedValue(SELECTABLE.map((w) => ({ ...w, status: "active" })));
   whRepo.findActiveByIds.mockImplementation(async (ids: string[]) =>
     SELECTABLE.filter((w) => ids.includes(w.id)).map((w) => ({ id: w.id })),
   );

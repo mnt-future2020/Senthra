@@ -24,7 +24,9 @@ const CAPTION_TICK_MS = 30_000;
 
 export function EngineerDashboard() {
   const { can } = useAuth();
-  const { overview, recent, loading, refreshing, error, updatedAt, reload } = useEngineerOverview();
+  // Recent activity is the engineer's own movement ledger (/engineer/movements → engineer.inventory.view).
+  const canInventory = can("engineer.inventory.view");
+  const { overview, recent, loading, refreshing, error, updatedAt, reload } = useEngineerOverview(canInventory);
 
   // Re-render the "Updated X ago" caption on a tick, without refetching.
   const [, setTick] = React.useState(0);
@@ -88,7 +90,8 @@ export function EngineerDashboard() {
         <NextUpJobs jobs={overview.jobs.next} canJobs={can("engineer.jobs.view")} />
         <div className="space-y-6">
           <EngineerQuickActions />
-          <RecentActivityCard movements={recent} />
+          {/* Not drawn without the ledger permission — an empty card would read as "no activity". */}
+          {canInventory && <RecentActivityCard movements={recent} />}
         </div>
       </div>
     </div>

@@ -11,7 +11,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { downloadCsv } from "@/lib/csvExport";
-import { listSuppliers } from "@/services/supplier.service";
+import { listSupplierOptions } from "@/services/supplier.service";
 import { toolbarActionsCls, toolbarBtn, toolbarDateCls, toolbarPrimaryBtn } from "@/components/ui/styles";
 import { basisLine, bucketLabel, money, moneyCompact, shareOf } from "./financeFormat";
 
@@ -215,14 +215,15 @@ export function FinanceView() {
 
   // Suppliers for the filter. `supplierId` was already honoured end-to-end — the service typed it,
   // the query string carried it and the repository scoped on it — with NO control anywhere that could
-  // set it, so the only way to reach it was to hand-edit the URL. Degrades to an empty list (and so
-  // to "All suppliers" alone) for a finance user without `suppliers.view`.
+  // set it, so the only way to reach it was to hand-edit the URL. The COMPLETE lean list, which
+  // admits reports.finance.view — a finance role need not hold `suppliers.view` to filter its own
+  // spend, and the directory read this replaced stopped at 100.
   const [suppliers, setSuppliers] = React.useState<{ value: string; label: string }[]>([]);
   React.useEffect(() => {
     let active = true;
     void (async () => {
-      const rows = await listSuppliers({ status: "active", pageSize: 200 })
-        .then((r) => r.suppliers.map((x) => ({ value: x.id, label: x.name })))
+      const rows = await listSupplierOptions()
+        .then((os) => os.map((x) => ({ value: x.id, label: x.name })))
         .catch(() => []);
       if (active) setSuppliers(rows);
     })();

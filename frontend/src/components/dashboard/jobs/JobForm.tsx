@@ -5,7 +5,9 @@ import { useRouter } from "next/navigation";
 import { ExternalLink, FileText, Globe, Image as ImageIcon, Link as LinkIcon, Loader2, Lock, Plus, Trash2, Upload } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
-import { listCustomerOptions, listCustomerProjects, listCustomerSites, listCustomerStockOptions, type CustomerOption, type CustomerStockOption } from "@/services/customer.service";
+import { listCustomerOptions, listCustomerProjectOptions, listCustomerStockOptions, searchCustomerSiteOptions, type CustomerOption, type CustomerProjectOption, type CustomerSiteOption, type CustomerStockOption } from "@/services/customer.service";
+import { SitePicker, siteOptionLabel, type SiteOptionLike } from "@/components/ui/SitePicker";
+import { isPermissionError } from "@/lib/api";
 import { listEngineerOptions, listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
 import { IrmItemPicker } from "@/components/dashboard/irm/IrmItemPicker";
@@ -45,7 +47,6 @@ import {
   JOB_TYPES,
   JOB_TYPE_LABELS,
 } from "./jobStatus";
-import type { CustomerProject, CustomerSite } from "@/types/customer";
 import type { Job, JobLineType } from "@/types/job";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 import { isHttpUrl } from "@/lib/validation";
@@ -209,8 +210,13 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
 
   // --- reference data ---
   const [customers, setCustomers] = React.useState<Opt[]>([]);
-  const [projects, setProjects] = React.useState<CustomerProject[]>([]);
-  const [sites, setSites] = React.useState<CustomerSite[]>([]);
+  // One customer's projects — the COMPLETE lean list (see listCustomerProjectOptions).
+  const [projects, setProjects] = React.useState<CustomerProjectOption[]>([]);
+  // Sites are SEARCHED, never listed (a customer can hold thousands). The latest results are kept so a
+  // pick can copy the chosen site's address; the trigger's label is remembered on its own because a
+  // saved site need not be in any search result.
+  const siteResults = React.useRef<Map<string, CustomerSiteOption>>(new Map());
+  const [siteLabel, setSiteLabel] = React.useState<string | null>(o?.siteId ? (o.siteName || null) : null);
   const [loadingProjects, setLoadingProjects] = React.useState(false);
   // Open demand (planned-but-not-issued) from OTHER active jobs, keyed by item+warehouse / entry — so
   // "available" in the kit list reflects TRUE free stock across all jobs, not just this one.
@@ -289,21 +295,31 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
     { label: "warehouses", load: listWarehouseOptions, onData: (ws: WarehouseOption[]) => setWarehouses(ws) },
   ]);
 
-  // Projects, sites + customer-stock catalogue depend on the chosen customer. One effect,
+  // Projects + customer-stock catalogue depend on the chosen customer. One effect,
   // keyed on customerId, so it covers BOTH edit-mode seeding (customerId arrives from `o`)
   // AND user changes (onPickCustomer sets customerId). Every setState happens inside an
   // async callback — never synchronously in the effect body (react-hooks/set-state-in-effect).
   React.useEffect(() => {
     if (!customerId) return;
     let active = true;
-    // Project/site pickers — paged endpoints with the app-wide picker cap (the customer detail
-    // payload no longer carries the child sets).
-    Promise.all([
-      listCustomerProjects(customerId, { pageSize: 100 }),
-      listCustomerSites(customerId, { pageSize: 100 }),
-    ]).then(
-      ([p, s]) => { if (active) { setProjects(p.projects); setSites(s.sites); setLoadingProjects(false); } },
-      () => { if (active) { setProjects([]); setSites([]); setLoadingProjects(false); } },
+    // The project picker — the COMPLETE lean list, readable with jobs.create / jobs.edit (the paged
+    // detail-tab read it replaced needed customers.view and stopped at 100). Project is REQUIRED, so a
+    // failure is said out loud: the old swallowed rejection left an empty picker and a form that could
+    // never be saved, with nothing on screen to say why. Sites are not loaded here any more — they are
+    // searched as the user types (searchSites below), because a customer can hold thousands.
+    listCustomerProjectOptions(customerId).then(
+      (p) => { if (active) { setProjects(p); setLoadingProjects(false); } },
+      (err: unknown) => {
+        if (!active) return;
+        setProjects([]);
+        setLoadingProjects(false);
+        pushToast(
+          isPermissionError(err)
+            ? "Couldn't load this customer's projects — you don't have permission to view them."
+            : `Couldn't load this customer's projects. ${err instanceof Error ? err.message : "Please try again."}`,
+          "alert",
+        );
+      },
     );
     listCustomerStockOptions(customerId).then(
       (rows) => {
@@ -321,7 +337,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
       () => { if (active) setStockEntries([]); },
     );
     return () => { active = false; };
-  }, [customerId]);
+  }, [customerId, pushToast]);
 
   // Edit mode: once warehouses are loaded, backfill the IRM availability hint for already-populated
   // irm lines (seeded with available:null) so the "N available / short" signal shows without the PM
@@ -368,9 +384,9 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
 
   const onPickCustomer = (id: string) => {
     // Customer change invalidates project/site/customer-stock selections; the effect above
-    // then reloads the new customer's projects/sites/stock.
+    // then reloads the new customer's projects and stock (sites are searched — see searchSites).
     setProjects([]);
-    setSites([]);
+    siteResults.current = new Map();
     setStockEntries([]);
     setLoadingProjects(Boolean(id));
     setCustomerId(id);
@@ -378,6 +394,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
     // The selected site belongs to the OLD customer, so it — and everything auto-filled from it — is
     // now invalid. Clear the whole site block so a stale address can never outlive its customer.
     setSiteId("");
+    setSiteLabel(null);
     setSiteName("");
     setAddressLine1("");
     setAddressLine2("");
@@ -391,15 +408,30 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
     clearError("projectId");
   };
 
+  // The site SEARCH, inside the chosen customer: name, code and the address a pick copies. It replaced a
+  // Select fed by ONE 100-row page — past the hundredth site a customer's site simply had no row, and a
+  // customer can hold thousands. Each result is remembered so onPickSite can read the chosen address.
+  const searchSites = React.useCallback(
+    (term: string) =>
+      customerId
+        ? searchCustomerSiteOptions(customerId, term).then((rows) => {
+            for (const r of rows) siteResults.current.set(r.id, r);
+            return rows;
+          })
+        : Promise.resolve([] as CustomerSiteOption[]),
+    [customerId],
+  );
+
   // Picking a saved site auto-fills the address block from that site's master record: name → site name,
   // and the full structured address (line 1/2, city, county, postcode, country) 1:1. Floor/suite/rack/
   // shelf + TRS area stay manual — they're job-specific micro-location, not site data. "None" (id === "")
   // clears the site-derived fields so the address can be typed by hand (country resets to the UK default).
   // Coordinates are deliberately left untouched: v1 jobs never geocode (job.validation.ts —
   // "latitude/longitude are never set from the client"), so lat/long stay null.
-  const onPickSite = (id: string) => {
-    const site = id ? sites.find((s) => s.id === id) ?? null : null;
+  const onPickSite = (id: string, option?: SiteOptionLike) => {
+    const site = id ? siteResults.current.get(id) ?? null : null;
     setSiteId(id);
+    setSiteLabel(option ? siteOptionLabel(option) : null);
     setSiteName(site?.name ?? "");
     setAddressLine1(site?.addressLine1 ?? "");
     setAddressLine2(site?.addressLine2 ?? "");
@@ -973,7 +1005,8 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                 project={null}
                 onClose={() => setShowProjectModal(false)}
                 onSaved={(p) => {
-                  setProjects((prev) => [...prev, p]);
+                  // Folded in as an option — the picker holds the lean {id, code, name} shape.
+                  setProjects((prev) => [...prev, { id: p.id, code: p.code ?? "", name: p.name }]);
                   setProjectId(p.id);
                   touch();
                   clearError("projectId");
@@ -990,7 +1023,19 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="sm:col-span-2">
                 <label className={labelCls}>Site</label>
-                <Select value={siteId} onChange={onPickSite} options={[{ value: "", label: "— None / enter manually —" }, ...sites.map((s) => ({ value: s.id, label: s.code ? `${s.code} — ${s.name}` : s.name }))]} placeholder={customerId ? "— Select site —" : "Pick a customer first"} disabled={!customerId} invalid={Boolean(errors.siteId)} ariaLabel="Site" />
+                {/* A SEARCH over this customer's sites, not a dropdown — see searchSites. */}
+                <SitePicker
+                  variant="form"
+                  value={siteId}
+                  selectedLabel={siteLabel}
+                  search={searchSites}
+                  onChange={onPickSite}
+                  clearLabel="— None / enter manually —"
+                  placeholder={customerId ? "— None / enter manually —" : "Pick a customer first"}
+                  disabled={!customerId}
+                  invalid={Boolean(errors.siteId)}
+                  ariaLabel="Site"
+                />
                 <FieldError message={errors.siteId} />
                 {!errors.siteId && (
                   <p className="mt-1.5 text-[11px] text-[var(--faint)]">Choose a saved customer site, or leave as “None” and fill in the address below.</p>

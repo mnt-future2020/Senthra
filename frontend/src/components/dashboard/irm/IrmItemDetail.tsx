@@ -60,9 +60,12 @@ export function IrmItemDetail({ initial }: { initial: IrmItem }) {
   const canViewInventory = can("inventory.view");
   const canViewHistory = can("inventory.history");
   const canViewPurchases = can("purchase_orders.view");
+  // The audit trail reads /audit (audit.view). The other tabs explain a missing permission in place
+  // (TabNotice); this one has nothing to show without it, so it is not offered at all.
+  const visibleTabs = TABS.filter((t) => t.key !== "audit" || can("audit.view"));
 
   const requestedTab = searchParams.get("tab");
-  const tab: Tab = TABS.find((t) => t.key === requestedTab)?.key ?? "overview";
+  const tab: Tab = visibleTabs.find((t) => t.key === requestedTab)?.key ?? "overview";
   const selectTab = (t: Tab) =>
     router.replace(`/dashboard/irm/${i.code}?tab=${t}`, { scroll: false });
 
@@ -120,7 +123,7 @@ export function IrmItemDetail({ initial }: { initial: IrmItem }) {
       />
 
       <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--border)]">
-        {TABS.map((t) => (
+        {visibleTabs.map((t) => (
           <button
             key={t.key}
             onClick={() => selectTab(t.key)}

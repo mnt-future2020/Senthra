@@ -40,7 +40,9 @@ const TABS: { id: Lens; label: string; attention?: string; perm?: string }[] = [
   { id: "customer", label: "Customer" },
   { id: "engineer", label: "Engineer" },
   { id: "damaged", label: "Damaged" },
-  { id: "movements", label: "Movements" },
+  // The ledger reads /inventory/movements, which needs inventory.history — not the inventory.view this
+  // hub opens on. The same gate the warehouse Transactions tab carries.
+  { id: "movements", label: "Movements", perm: "inventory.history" },
   { id: "reorder", label: "Reorder", attention: "inv.reorder" },
 ];
 

@@ -20,6 +20,7 @@ import { useEntityAttention } from "@/hooks/useEntityAttention";
 import { CountPill } from "@/components/dashboard/shell/TabCount";
 import { followQuery, keysForPane, keysForTab } from "./warehouseAttention";
 import { warehouseDeactivateDetail } from "./warehouseDeactivate";
+import { INVENTORY_TAB_PERMS, stockPoolAccess } from "./stockPools";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import type { AttentionTone } from "@/services/attention.service";
 import { NoStaffAssigned, StaffChip } from "@/components/ui/StaffChip";
@@ -135,7 +136,10 @@ function sumKeys(keys: string[], keyAttention: KeyAttention): { count: number; t
 const TABS: { key: Tab; label: string; perms?: string[]; fill?: boolean }[] = [
   { key: "overview", label: "Overview" },
   { key: "incoming", label: "Incoming stock", perms: ["goods_in.view", "stock_requests.view"], fill: true },
-  { key: "inventory", label: "Inventory", fill: true },
+  // Each pool on this tab is gated on its own read (see StockTab), so the tab is offered to anyone who
+  // can open at least one of them — and to nobody who would only land on a pane answering 403. It was
+  // ungated and opened on the customer pool, which is how a Finance Director met an error here.
+  { key: "inventory", label: "Inventory", perms: INVENTORY_TAB_PERMS, fill: true },
   { key: "goods", label: "Goods Management", perms: ["goods_management.view"], fill: true },
   { key: "van", label: "Field Stock Requests", perms: ["van_stock_request.review"], fill: true },
   { key: "demand", label: "Demand", perms: ["inventory.view"], fill: true },
@@ -144,7 +148,8 @@ const TABS: { key: Tab; label: string; perms?: string[]; fill?: boolean }[] = [
   // advertising a capability they don't have. `fill` because the feed is a full-height inline-scroll
   // layout (its own body scrolls); omitting it gave the tab a second, outer scrollbar.
   { key: "transactions", label: "Transactions", perms: ["inventory.history"], fill: true },
-  { key: "audit", label: "Audit trail" },
+  // /audit needs audit.view — the same rule as the Transactions tab above.
+  { key: "audit", label: "Audit trail", perms: ["audit.view"] },
 ];
 
 export function WarehouseDetail({ initial }: { initial: Warehouse }) {
@@ -631,6 +636,11 @@ function IncomingStock({
   pushToast: (msg: string, type?: "success" | "alert") => void;
 }) {
   const router = useRouter();
+  const { can } = useAuth();
+  // Receiving and closing short are stock_requests.complete on the server. This pane opens on
+  // stock_requests.view, so without the check a viewer who may only look (the Project Manager) was
+  // offered both buttons and got a 403 from each.
+  const canComplete = can("stock_requests.complete");
   const [items, setItems] = React.useState<PendingStockItem[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [receiveTarget, setReceiveTarget] = React.useState<PendingStockItem | null>(null);
@@ -858,7 +868,8 @@ function IncomingStock({
                   </td>
                   <td className="cell-y px-4 text-xs text-[var(--muted)]">{fmtDate(it.createdAt)}</td>
                   <td className="cell-y px-4">
-                    {remaining > 0 && (
+                    {/* Only for a viewer who can do it (stock_requests.complete) — see canComplete. */}
+                    {remaining > 0 && canComplete && (
                       <div className="flex items-center justify-end gap-1.5">
                         <button
                           type="button"
@@ -986,14 +997,14 @@ function StockTab({
 }) {
   const { can } = useAuth();
   const searchParams = useSearchParams();
-  const canIrm = can("inventory.view");
-  const canRental = can("rentals.view");
-
   const POOLS = ["irm", "customer", "damaged", "rental"] as const;
   type Pool = (typeof POOLS)[number];
-  // What this viewer may open. Customer stock has no separate gate — the tab itself is the gate.
-  const allowed: Record<Pool, boolean> = { irm: canIrm, customer: true, damaged: canIrm, rental: canRental };
-  const firstAllowed: Pool = (POOLS.find((k) => allowed[k]) ?? "customer") as Pool;
+  // What this viewer may open — each pool on the read its OWN pane makes (see stockPoolAccess). The
+  // customer pool used to ride on the tab alone and the damaged pool on inventory.view, so a Finance
+  // Director landed on a customer pool that answered 403 and a Project Manager on a damaged pool that
+  // did. The tab is only offered when at least one is allowed (INVENTORY_TAB_PERMS).
+  const allowed: Record<Pool, boolean> = stockPoolAccess(can);
+  const firstAllowed: Pool = (POOLS.find((k) => allowed[k]) ?? "irm") as Pool;
 
   const requested = searchParams.get("pool");
   const pool: Pool = POOLS.includes(requested as Pool) ? (requested as Pool) : firstAllowed;

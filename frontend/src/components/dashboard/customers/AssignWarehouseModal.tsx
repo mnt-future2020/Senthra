@@ -4,7 +4,7 @@ import * as React from "react";
 import { Loader2, Plus, Trash2 } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
-import { listWarehouses, type PagedWarehouses } from "@/services/warehouse.service";
+import { listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { Modal } from "@/components/ui/Modal";
 import { Select } from "@/components/ui/Select";
@@ -38,9 +38,11 @@ export function AssignWarehouseModal({
   const { isLoading: refLoading } = useReferenceData([
     {
       label: "warehouses",
-      load: () => listWarehouses({ status: "active", pageSize: 200 }),
-      onData: (r: PagedWarehouses) => {
-        const list = r.warehouses.map((w) => ({ id: w.id, name: w.name, code: w.code }));
+      // The COMPLETE, caller-scoped lean list — admits stock_requests.approve, the key this modal is
+      // opened under. The directory read it replaced needed warehouse.view and stopped at 100.
+      load: listWarehouseOptions,
+      onData: (ws: WarehouseOption[]) => {
+        const list = ws.map((w) => ({ id: w.id, name: w.name, code: w.code }));
         setWarehouses(list);
         // Pre-fill the first row with the customer's PREFERENCE — a starting point, nothing more.
         // Gated on the warehouse still being in the ACTIVE list we just loaded, so a warehouse
