@@ -13,8 +13,8 @@ import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { FilterPopover } from "@/components/ui/FilterPopover";
 import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
-import { listSuppliers } from "@/services/supplier.service";
-import { listWarehouses } from "@/services/warehouse.service";
+import { listSupplierOptions } from "@/services/supplier.service";
+import { listWarehouseOptions } from "@/services/warehouse.service";
 import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } from "@/components/ui/tableLayout";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -188,13 +188,15 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
   React.useEffect(() => {
     let alive = true;
     void Promise.all([
-      listSuppliers({ status: "active", pageSize: 200 })
-        .then((r) => r.suppliers.map((s) => ({ value: s.id, label: s.name })))
+      // The COMPLETE lean lists, both of which admit goods_in.view (the warehouse list scoped to the
+      // caller). The directory reads they replaced needed suppliers.view / warehouse.view and capped at 100.
+      listSupplierOptions()
+        .then((os) => os.map((s) => ({ value: s.id, label: s.name })))
         .catch(() => []),
       warehouseId
         ? Promise.resolve([])
-        : listWarehouses({ status: "active", pageSize: 200 })
-            .then((r) => r.warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` })))
+        : listWarehouseOptions()
+            .then((ws) => ws.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` })))
             .catch(() => []),
     ]).then(([sup, wh]) => {
       if (!alive) return;

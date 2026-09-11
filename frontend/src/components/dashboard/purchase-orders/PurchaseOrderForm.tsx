@@ -8,7 +8,7 @@ import * as poService from "@/services/purchase-order.service";
 import { getSupplier, listSupplierOptions, type SupplierOption } from "@/services/supplier.service";
 import { withHistoricalOption } from "@/lib/historicalOption";
 import { supplierDetailNotice } from "@/lib/supplierPanel";
-import { listWarehouses, listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
+import { listWarehouseDeliveryOptions, listWarehouseOptions, type WarehouseDeliveryOption, type WarehouseOption } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
 import { listRentalItems } from "@/services/rental.service";
 import { IrmItemPicker } from "@/components/dashboard/irm/IrmItemPicker";
@@ -35,7 +35,6 @@ import { formatDate, formatMoney, PoStatusBadge } from "./poStatus";
 import type { PoPriority, PurchaseOrder } from "@/types/purchase-order";
 import type { RentalItem } from "@/types/rental";
 import type { Supplier } from "@/types/supplier";
-import type { Warehouse } from "@/types/warehouse";
 import type { IrmItem } from "@/types/irm";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
@@ -123,7 +122,8 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
   // supplier is fetched by id, so the dropdown can never hide one behind a page boundary.
   const [suppliers, setSuppliers] = React.useState<SupplierOption[]>([]);
   const [supplierDetail, setSupplierDetail] = React.useState<Supplier | null>(null);
-  const [warehouses, setWarehouses] = React.useState<Warehouse[]>([]);
+  // The delivery-warehouse options — option + address, caller-scoped (see listWarehouseDeliveryOptions).
+  const [warehouses, setWarehouses] = React.useState<WarehouseDeliveryOption[]>([]);
   // Active-warehouse OPTIONS for the per-row picker (create flow). Server-scoped: a Warehouse Manager
   // receives only their assigned warehouses, so the picker can never offer one they aren't allowed.
   const [warehouseOptions, setWarehouseOptions] = React.useState<WarehouseOption[]>([]);
@@ -145,10 +145,12 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
         ? [{ label: "the supplier", load: () => getSupplier(o.supplierId), onData: (full: Supplier) => setSupplierDetail(full), onError: (err: unknown) => setSupplierNotice(supplierDetailNotice(err)) }]
         : []),
       // Create: per-row warehouse picker from the SCOPED options endpoint (manager → only their
-      // warehouses). Edit: full warehouses for the header + address panel (single-warehouse model).
+      // warehouses). Edit: the delivery list — option + address for the header and address panel
+      // (single-warehouse model), complete and caller-scoped, readable with purchase_orders.edit rather
+      // than the full `/warehouses` directory this used to page (warehouse.view, capped at 100).
       mode === "create"
         ? { label: "warehouses", load: () => listWarehouseOptions(), onData: (opts) => setWarehouseOptions(opts) }
-        : { label: "warehouses", load: () => listWarehouses({ status: "active", pageSize: 100 }), onData: (r) => setWarehouses(r.warehouses) },
+        : { label: "warehouses", load: listWarehouseDeliveryOptions, onData: (ws: WarehouseDeliveryOption[]) => setWarehouses(ws) },
       { label: "the item catalogue", load: () => listIrmItems({ status: "active", pageSize: 100 }), onData: (r) => setItems(r.items) },
       ...(canSeeRentals
         ? [{ label: "the rental catalogue", load: () => listRentalItems({ status: "active", pageSize: 100 }), onData: (r: { items: RentalItem[] }) => setRentalItems(r.items) }]

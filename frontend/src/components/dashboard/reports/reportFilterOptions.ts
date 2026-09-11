@@ -2,10 +2,12 @@
 
 import * as React from "react";
 
-import { listCustomers, listCustomerProjects } from "@/services/customer.service";
-import { listWarehouses } from "@/services/warehouse.service";
+import { listCustomerOptions, listCustomerProjectOptions } from "@/services/customer.service";
+import { listWarehouseOptions } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
 import { listEngineerOptions } from "@/services/stockPosition.service";
+import { markInactive } from "@/lib/historicalOption";
+import type { IrmItem } from "@/types/irm";
 
 // ── Option lists for the Custom Reports filter bar ────────────────────────────────────────────
 //
@@ -17,10 +19,16 @@ import { listEngineerOptions } from "@/services/stockPosition.service";
 // the only two outcomes were "no rows" and "a crash". The same lists already back the Stock Movement
 // feed's filters (MovementFeed), which is where this pattern comes from.
 //
-// Every fetch is permission-gated server-side and every one degrades to an EMPTY list rather than
-// failing the screen: `reports.view` does not imply `customers.view`, so a legitimate report user may
-// hold none of these. An empty list renders as "All customers" alone — that dimension simply cannot
-// be narrowed, which is honest, and better than a control that 403s on use.
+// Every list is COMPLETE — the lean options endpoints, never a page of a list read. The pickers used to
+// load `pageSize: 200` from the list endpoints, which the server clamps to 100, so the 101st customer or
+// warehouse simply had no row. Items are the exception: the catalogue is searched server-side by the
+// item picker, and this only loads the first page it shows before anything is typed.
+//
+// Each options endpoint admits `reports.view`, so a report user can fill every picker. The one
+// exception is the customer (and so project) list for a WAREHOUSE-SCOPED user, whose reports are scoped
+// to their warehouses: the caller passes `customers: false` and hides those filters rather than
+// fetching a list the server refuses (see lib/pickerAccess). A genuine failure still degrades to an
+// empty list rather than failing the screen.
 
 export interface Option {
   value: string;
@@ -30,22 +38,22 @@ export interface Option {
 export interface FilterOptions {
   customers: Option[];
   warehouses: Option[];
-  items: Option[];
+  /** Whole rows, not {value,label}: the item picker seeds from these and labels the selected one. */
+  items: IrmItem[];
   engineers: Option[];
 }
 
 const EMPTY: FilterOptions = { customers: [], warehouses: [], items: [], engineers: [] };
 
-/** How many of each bounded entity the pickers carry. Matches MovementFeed's own ceiling. */
-const PICKER_PAGE = 200;
+/** The first page of the catalogue the item picker offers before anything is typed. */
+const ITEM_SEED_PAGE = 100;
 
 /**
  * The lookup lists, loaded once per mount.
  *
- * Not memo-cached across mounts on purpose: the underlying services already cache their list reads,
- * so a second visit is served from there rather than from a copy this module would have to invalidate.
+ * `customers: false` skips the customer list for a viewer who may not read it (see the header).
  */
-export function useReportFilterOptions(enabled = true): FilterOptions {
+export function useReportFilterOptions({ enabled = true, customers: loadCustomers = true }: { enabled?: boolean; customers?: boolean } = {}): FilterOptions {
   const [lists, setLists] = React.useState<FilterOptions>(EMPTY);
 
   React.useEffect(() => {
@@ -53,19 +61,19 @@ export function useReportFilterOptions(enabled = true): FilterOptions {
     let active = true;
     void (async () => {
       const [customers, warehouses, items, engineers] = await Promise.all([
-        listCustomers({ pageSize: PICKER_PAGE })
-          .then((r) => r.customers.map((c) => ({ value: c.id, label: c.name })))
+        // Deactivated customers too, labelled "(inactive)": a report reads history, and a retired
+        // customer still owns its rows.
+        loadCustomers
+          ? listCustomerOptions({ includeInactive: true })
+              .then((cs) => cs.map((c) => ({ value: c.id, label: markInactive(c.name, c.inactive) })))
+              .catch(() => [])
+          : Promise.resolve([] as Option[]),
+        listWarehouseOptions()
+          .then((ws) => ws.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` })))
           .catch(() => []),
-        listWarehouses({ status: "active", pageSize: PICKER_PAGE })
-          .then((r) => r.warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` })))
-          .catch(() => []),
-        listIrmItems({ status: "active", pageSize: PICKER_PAGE })
-          .then((r) =>
-            r.items
-              .map((i) => ({ value: i.id, label: i.code ? `${i.code} — ${i.name}` : i.name }))
-              .sort((a, b) => a.label.localeCompare(b.label)),
-          )
-          .catch(() => []),
+        listIrmItems({ status: "active", pageSize: ITEM_SEED_PAGE })
+          .then((r) => r.items)
+          .catch(() => [] as IrmItem[]),
         listEngineerOptions()
           .then((r) => r.map((e) => ({ value: e.engineerId, label: e.name })))
           .catch(() => []),
@@ -75,13 +83,13 @@ export function useReportFilterOptions(enabled = true): FilterOptions {
     return () => {
       active = false;
     };
-  }, [enabled]);
+  }, [enabled, loadCustomers]);
 
   return lists;
 }
 
 /**
- * Projects for the selected customer.
+ * Projects for the selected customer — the complete set, via the lean project options.
  *
  * Deliberately DEPENDENT rather than a flat list of every project in the system. There is no
  * all-customers project endpoint, and there should not be one for this: a project is only meaningful
@@ -104,8 +112,8 @@ export function useProjectOptions(customerId: string | undefined): Option[] {
     if (!customerId) return;
     let active = true;
     void (async () => {
-      const rows = await listCustomerProjects(customerId, { pageSize: PICKER_PAGE })
-        .then((r) => r.projects.map((p) => ({ value: p.id, label: p.name })))
+      const rows = await listCustomerProjectOptions(customerId)
+        .then((ps) => ps.map((p) => ({ value: p.id, label: p.name })))
         .catch(() => []);
       if (active) setLoaded({ customerId, projects: rows });
     })();

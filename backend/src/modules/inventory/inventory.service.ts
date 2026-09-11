@@ -561,6 +561,38 @@ export async function getAvailability(irmItemId: string, warehouseId: string, ac
   return { irmItemId, warehouseId, onHand, reserved, available: onHand - reserved };
 }
 
+/** Where one IRM item is stocked — quantities only. See listItemWarehouseStock. */
+export interface ItemWarehouseStock {
+  warehouseId: string;
+  warehouseName: string;
+  warehouseCode: string;
+  onHand: number;
+  /** Net of other jobs' planned demand — the same figure the inventory list shows. */
+  available: number;
+}
+
+/**
+ * The warehouses holding one item, and how much each can still give — the job kit picker's and the
+ * kit-request review's warehouse dropdown, and the stock-adjust form's.
+ *
+ * Its own read rather than the inventory LIST filtered to one item (what those pickers used to page):
+ * that row carries the item's unit cost and stock value, which a job planner has no reason to receive,
+ * and it needs `inventory.view`, which a planner may not hold. This returns the quantities and nothing
+ * else. Scoped like the list — a warehouse-scoped caller sees only their own warehouses — and uncapped,
+ * because the set is bounded by the number of warehouses.
+ */
+export async function listItemWarehouseStock(irmItemId: string, actor?: AuditActor): Promise<ItemWarehouseStock[]> {
+  if (!OBJECT_ID_RE.test(irmItemId)) throw badRequest("Select an item.");
+  const rows = await filteredBalanceDTOs({ irmItem: irmItemId }, actor);
+  return rows.map((r) => ({
+    warehouseId: r.warehouseId,
+    warehouseName: r.warehouseName,
+    warehouseCode: r.warehouseCode,
+    onHand: r.onHand,
+    available: r.available,
+  }));
+}
+
 // ── Stock transfer (warehouse → warehouse, atomic) ─────────────────────────────────────────────
 export async function transferStock(input: CreateTransferInput, actor?: AuditActor): Promise<PublicStockTransfer> {
   if (input.fromWarehouseId === input.toWarehouseId) throw badRequest("Source and destination warehouses must be different.");

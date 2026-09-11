@@ -20,9 +20,12 @@ router.use(requireAuth);
 // The type list is read by type-managers AND by the warehouse form's type picker
 // (which staff reach via warehouse.create / warehouse.edit), so either may read it —
 // mirrors how the category list allows customers.edit.
+// `warehouse.view` for the Warehouses list's TYPE FILTER, which rendered empty for every role that can
+// open warehouses but not manage their types (the Finance Director, the Project Manager). A type name
+// is already shown on every warehouse row that role can list.
 router.get(
   "/",
-  requireAnyPermission("warehouse_types.view", "warehouse.create", "warehouse.edit"),
+  requireAnyPermission("warehouse_types.view", "warehouse.view", "warehouse.create", "warehouse.edit"),
   warehouseTypeController.listWarehouseTypes,
 );
 router.get(

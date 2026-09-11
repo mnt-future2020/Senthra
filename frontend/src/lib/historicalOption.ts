@@ -27,3 +27,14 @@ export function withHistoricalOption(
   if (!savedLabel) return options;
   return [...options, { value: savedId, label: `${savedLabel} (inactive)` }];
 }
+
+/**
+ * An option label, marked "(inactive)" when its record has been deactivated — the wording above.
+ *
+ * For HISTORY and report filters, which list deactivated records on purpose: a retired customer or
+ * supplier still owns its movements, requests and report rows, so it must stay filterable — and look
+ * different from the records a create form could pick.
+ */
+export function markInactive(label: string, inactive?: boolean): string {
+  return inactive ? `${label} (inactive)` : label;
+}

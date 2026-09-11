@@ -5,8 +5,10 @@ import { Download, Loader2, ScrollText } from "lucide-react";
 
 import * as svc from "@/services/stockPosition.service";
 import type { MovementFilters } from "@/services/stockPosition.service";
-import { listWarehouses } from "@/services/warehouse.service";
-import { listCustomers } from "@/services/customer.service";
+import { listWarehouseOptions } from "@/services/warehouse.service";
+import { listCustomerOptions } from "@/services/customer.service";
+import { markInactive } from "@/lib/historicalOption";
+import { canPickCustomers, isWarehouseScoped } from "@/lib/pickerAccess";
 import { listIrmItems } from "@/services/irm.service";
 import type { IrmItem } from "@/types/irm";
 import { IrmItemPicker } from "@/components/dashboard/irm/IrmItemPicker";
@@ -97,6 +99,7 @@ function FilterBar({
   exporting,
   onExport,
   lockedWarehouse,
+  showCustomerFilter,
 }: {
   scope: "admin" | "engineer";
   value: MovementFilters;
@@ -110,6 +113,8 @@ function FilterBar({
   exporting: boolean;
   onExport: () => void;
   lockedWarehouse?: string;
+  /** False hides the customer filter — see MovementFeed's showCustomerFilter. */
+  showCustomerFilter: boolean;
 }) {
   const set = (patch: Partial<MovementFilters>) => onChange({ ...value, ...patch });
   const active = activeFilterCount(value, lockedWarehouse);
@@ -156,7 +161,9 @@ function FilterBar({
               <Select size="sm" ariaLabel="Filter by warehouse" value={value.warehouse ?? ""} onChange={(v) => set({ warehouse: v || undefined })} options={[{ value: "", label: "All warehouses" }, ...lists.warehouses]} />
             )}
             <Select size="sm" ariaLabel="Filter by engineer" value={value.engineer ?? ""} onChange={(v) => set({ engineer: v || undefined })} options={[{ value: "", label: "All engineers" }, ...lists.engineers]} />
-            <Select size="sm" ariaLabel="Filter by customer" value={value.customer ?? ""} onChange={(v) => set({ customer: v || undefined })} options={[{ value: "", label: "All customers" }, ...lists.customers]} />
+            {showCustomerFilter && (
+              <Select size="sm" ariaLabel="Filter by customer" value={value.customer ?? ""} onChange={(v) => set({ customer: v || undefined })} options={[{ value: "", label: "All customers" }, ...lists.customers]} />
+            )}
           </>
         )}
         <Select size="sm" ariaLabel="Filter by ownership" value={value.ownership ?? ""} onChange={(v) => set({ ownership: v || undefined })} options={OWNERSHIP_OPTIONS} />
@@ -248,8 +255,12 @@ export function MovementFeed({
    */
   lockedWarehouse?: string;
 }) {
-  const { can } = useAuth();
+  const { can, principal } = useAuth();
   const { pushToast } = useDashboard();
+  // The customer filter reads the company-wide customer list, which the warehouse-scoped Warehouse
+  // Manager must not be handed — so it is hidden for any viewer the server would refuse (lib/pickerAccess)
+  // instead of being drawn empty.
+  const showCustomerFilter = canPickCustomers(can, isWarehouseScoped(principal));
 
   const [filters, setFilters] = React.useState<MovementFilters>(
     lockedWarehouse ? { warehouse: lockedWarehouse } : {},
@@ -278,8 +289,16 @@ export function MovementFeed({
     let active = true;
     void (async () => {
       const [wh, cust, eng, items] = await Promise.all([
-        listWarehouses({ status: "active", pageSize: 200 }).then((r) => r.warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))).catch(() => []),
-        listCustomers({ pageSize: 200 }).then((r) => r.customers.map((c) => ({ value: c.id, label: c.name }))).catch(() => []),
+        // COMPLETE lean lists — the directory pages these replaced asked for 200 and got 100. The
+        // customer list is company-wide, so it is not asked for (and its filter not drawn) for a viewer
+        // the server would refuse — the warehouse-scoped Warehouse Manager on their Transactions tab.
+        // Deactivated customers are included (their movements are still history), labelled "(inactive)".
+        listWarehouseOptions().then((ws) => ws.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))).catch(() => []),
+        showCustomerFilter
+          ? listCustomerOptions({ includeInactive: true })
+              .then((cs) => cs.map((c) => ({ value: c.id, label: markInactive(c.name, c.inactive) })))
+              .catch(() => [])
+          : Promise.resolve([] as SelectOption[]),
         svc.listEngineerOptions().then((r) => r.map((e) => ({ value: e.engineerId, label: e.name }))).catch(() => []),
         // A bounded first page for the filter to show before anything is typed; the picker
         // searches the rest server-side, so an item past it is still filterable.
@@ -288,7 +307,7 @@ export function MovementFeed({
       if (active) setLists({ warehouses: wh, customers: cust, engineers: eng, items });
     })();
     return () => { active = false; };
-  }, [scope]);
+  }, [scope, showCustomerFilter]);
 
   // (Re)load page 1 whenever filters change. A request token discards superseded responses.
   React.useEffect(() => {
@@ -363,6 +382,7 @@ export function MovementFeed({
         exporting={exporting}
         onExport={() => void onExport()}
         lockedWarehouse={lockedWarehouse}
+        showCustomerFilter={showCustomerFilter}
       />
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">

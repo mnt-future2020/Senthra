@@ -617,23 +617,66 @@ export function searchSites(
   customerId: string | undefined,
   take: number,
 ): Promise<{ id: string; name: string; code: string | null; postcode: string | null; customerName: string | null }[]> {
-  const q = term?.trim() ? escapeRegex(term.trim()) : undefined;
   return prisma.customerSite.findMany({
-    where: {
-      ...(customerId && { customerId }),
-      ...(q && {
-        OR: [
-          { name: { contains: q, mode: "insensitive" } },
-          { code: { contains: q, mode: "insensitive" } },
-          { postcode: { contains: q, mode: "insensitive" } },
-          { city: { contains: q, mode: "insensitive" } },
-        ],
-      }),
-    },
+    where: siteSearchWhere(term, customerId),
     select: { id: true, name: true, code: true, postcode: true, customer: { select: { name: true } } },
     orderBy: { name: "asc" },
     take,
   }).then((rows) => rows.map((r) => ({ id: r.id, name: r.name, code: r.code, postcode: r.postcode, customerName: r.customer?.name ?? null })));
+}
+
+// The WHERE both site searches share — one customer when given, and the term matched across name,
+// code, postcode and city — so the filter's type-ahead and the job form's cannot drift apart.
+function siteSearchWhere(term: string | undefined, customerId: string | undefined): Prisma.CustomerSiteWhereInput {
+  const q = term?.trim() ? escapeRegex(term.trim()) : undefined;
+  return {
+    ...(customerId && { customerId }),
+    ...(q && {
+      OR: [
+        { name: { contains: q, mode: "insensitive" } },
+        { code: { contains: q, mode: "insensitive" } },
+        { postcode: { contains: q, mode: "insensitive" } },
+        { city: { contains: q, mode: "insensitive" } },
+      ],
+    }),
+  };
+}
+
+export interface SiteAddressOption {
+  id: string;
+  name: string;
+  code: string | null;
+  postcode: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  county: string | null;
+  country: string | null;
+}
+
+/**
+ * The JOB FORM's site search: one customer's sites, with the address a picked site copies onto the
+ * job. A search rather than a listing for the reason `searchSites` is one — sites arrive by bulk
+ * import in the thousands, and the form's old 100-row page simply had no row for the rest. No contact
+ * fields: the form never reads them, and a site search should not hand them out.
+ */
+export function searchSiteAddresses(customerId: string, term: string | undefined, take: number): Promise<SiteAddressOption[]> {
+  return prisma.customerSite.findMany({
+    where: siteSearchWhere(term, customerId),
+    select: {
+      id: true,
+      name: true,
+      code: true,
+      postcode: true,
+      addressLine1: true,
+      addressLine2: true,
+      city: true,
+      county: true,
+      country: true,
+    },
+    orderBy: { name: "asc" },
+    take,
+  });
 }
 function projectListWhere(customerId: string, f: PortalChildFilters): Prisma.CustomerProjectWhereInput {
   const q = f.search ? escapeRegex(f.search) : undefined;
@@ -658,6 +701,19 @@ export function findProjectsByCustomerPaged(customerId: string, f: PortalChildFi
 }
 export function countProjectsByCustomer(customerId: string, f: PortalChildFilters = {}): Promise<number> {
   return prisma.customerProject.count({ where: projectListWhere(customerId, f) });
+}
+
+/**
+ * One customer's projects as picker options — id, code and name, name-ordered, COMPLETE. Projects are
+ * created one at a time by hand (never bulk-imported like sites), so the set stays small; paging it is
+ * what hid every project past the hundredth from the job form and the Jobs list filter.
+ */
+export function findProjectOptions(customerId: string): Promise<{ id: string; code: string; name: string }[]> {
+  return prisma.customerProject.findMany({
+    where: { customerId },
+    select: { id: true, code: true, name: true },
+    orderBy: { name: "asc" },
+  });
 }
 
 // Bulk-create sites with a RACE-SAFE contiguous STE-#### block.
@@ -1931,15 +1987,21 @@ export function findActiveStockEntries(filters: { warehouseId?: string; customer
 }
 
 /**
- * Lean, complete, active-only options for pickers. Ordered by name — how people scan a dropdown.
+ * Lean, complete options for pickers. Ordered by name — how people scan a dropdown.
+ *
+ * ACTIVE only, unless `includeInactive` — which only a history/report filter asks for, so a deactivated
+ * customer that still owns movements, stock and report rows stays filterable. Deleted rows never.
+ * `status` is read so the service can flag those rows; it is not passed through.
  *
  * The column is `customerCode`, NOT `code` (unlike Supplier and Warehouse). It is mapped to `code`
  * in the service so every picker consumes one option shape.
  */
-export function findOptions(): Promise<{ id: string; customerCode: string; name: string }[]> {
+export function findOptions({ includeInactive = false }: { includeInactive?: boolean } = {}): Promise<
+  { id: string; customerCode: string; name: string; status: string }[]
+> {
   return prisma.customer.findMany({
-    where: { deletedAt: null, status: "active" },
-    select: { id: true, customerCode: true, name: true },
+    where: includeInactive ? { deletedAt: null } : { deletedAt: null, status: "active" },
+    select: { id: true, customerCode: true, name: true, status: true },
     orderBy: { name: "asc" },
   });
 }

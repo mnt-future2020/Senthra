@@ -4,9 +4,16 @@ import * as customerController from "./customer.controller.js";
 import {
   requireAuth,
   requireAnyPermission,
+  requireAnyPermissionUnlessScoped,
   requireCustomer,
   requirePermission,
 } from "../../middleware/auth.middleware.js";
+import {
+  CUSTOMER_OPTION_READERS,
+  CUSTOMER_OPTION_UNSCOPED_READERS,
+  CUSTOMER_SITE_OPTION_READERS,
+  CUSTOMER_STOCK_OPTION_READERS,
+} from "#modules/role/permissions.js";
 import { writeLimiter, bulkWriteLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
 import * as reportsController from "#modules/reports/reports.controller.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
@@ -41,11 +48,14 @@ adminRouter.get("/", requirePermission("customers.view"), customerController.lis
 // Static route BEFORE "/:id" so "options" is not parsed as an id.
 //
 // Wider than customers.view on purpose, and it grants no reach: only the id, code and name of
-// ACTIVE customers — the same names already shown on the jobs these callers create. A planner who
-// may raise a job but not administer the customer directory still has to be able to pick one.
+// ACTIVE customers — the same names already shown on the jobs these callers create and list. A
+// planner who may raise a job but not administer the customer directory still has to be able to pick
+// one, and the Jobs list's customer filter must not 403 for a role that can read every job.
+// `reports.view` counts only for a principal that is NOT warehouse-scoped — see
+// CUSTOMER_OPTION_UNSCOPED_READERS.
 adminRouter.get(
   "/options",
-  requireAnyPermission("customers.view", "jobs.create", "jobs.edit"),
+  requireAnyPermissionUnlessScoped(CUSTOMER_OPTION_READERS, CUSTOMER_OPTION_UNSCOPED_READERS),
   customerController.listCustomerOptions,
 );
 adminRouter.get("/export.csv", requirePermission("customers.export"), exportLimiter, customerController.exportCustomersCsv);
@@ -228,12 +238,29 @@ adminRouter.get(
   requireAnyPermission("customer_stock.view", "stock_requests.view"),
   customerController.listCustomerStockEntries,
 );
-// The job form's picker. SAME gate as the list above — it is that data in option form, not a wider
-// reach. Declared alongside it; the paths differ in their last segment so neither shadows the other.
+// The job form's picker — the list above in option form. The job keys are the planner drawing a kit
+// from this customer's stock: without them a role that may build a job could not offer the customer's
+// own stock at all (see CUSTOMER_STOCK_OPTION_READERS). Declared alongside the list; the paths differ
+// in their last segment so neither shadows the other.
 adminRouter.get(
   "/:id/stock-options",
-  requireAnyPermission("customer_stock.view", "stock_requests.view"),
+  requireAnyPermission(...CUSTOMER_STOCK_OPTION_READERS),
   customerController.listCustomerStockOptions,
+);
+// One customer's projects, lean and COMPLETE, for every project picker and filter — the job form, the
+// Jobs list, the report filters. Same reader rule as /options: a project name is already on every job
+// row these callers can read. The paged /:id/projects above stays the detail tab's read.
+adminRouter.get(
+  "/:id/project-options",
+  requireAnyPermissionUnlessScoped(CUSTOMER_OPTION_READERS, CUSTOMER_OPTION_UNSCOPED_READERS),
+  customerController.listCustomerProjectOptions,
+);
+// The job form's site SEARCH — name, code and the address a picked site copies onto the job. Narrower
+// than the name-only options because it carries an address (see CUSTOMER_SITE_OPTION_READERS).
+adminRouter.get(
+  "/:id/site-options",
+  requireAnyPermission(...CUSTOMER_SITE_OPTION_READERS),
+  customerController.searchCustomerSiteOptions,
 );
 // Same gate as the list it downloads — this is that list in a file, not a wider reach. Declared
 // after it because the paths differ in their LAST segment, so neither can shadow the other.

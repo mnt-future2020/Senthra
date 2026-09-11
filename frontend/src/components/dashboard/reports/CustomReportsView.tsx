@@ -17,6 +17,11 @@ import { SitePicker, siteOptionLabel } from "@/components/ui/SitePicker";
 import { searchJobSites } from "@/services/job.service";
 import { CELL_ONE_LINE, tableMinWidth, type ColWidth } from "@/components/ui/tableLayout";
 import { useProjectOptions, useReportFilterOptions, type Option } from "./reportFilterOptions";
+import { IrmItemPicker } from "@/components/dashboard/irm/IrmItemPicker";
+import { mergeIrmItems, missingIrmIds } from "@/components/dashboard/irm/irmItemPickerModel";
+import { useIrmItemsByIds } from "@/hooks/useIrmItemsByIds";
+import { canPickCustomers, canSearchSites, isWarehouseScoped } from "@/lib/pickerAccess";
+import type { IrmItem } from "@/types/irm";
 
 // ── Custom Reports (FLOW 10B) ──────────────────────────────────────────────────────────────────
 //
@@ -69,7 +74,7 @@ const widthOf = (header: string, numeric?: boolean): ColWidth => {
 export function CustomReportsView() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { can } = useAuth();
+  const { can, principal } = useAuth();
   const { pushToast } = useDashboard();
 
   const [types, setTypes] = React.useState<CustomReportType[] | null>(null);
@@ -85,8 +90,26 @@ export function CustomReportsView() {
   const reportKey = searchParams.get("type") ?? "";
   const active = types?.find((t) => t.key === reportKey) ?? types?.[0];
 
-  const lists = useReportFilterOptions();
-  const projects = useProjectOptions(searchParams.get("customerId") || undefined);
+  // The customer, project and site pickers only for a viewer the server lets read them: a
+  // warehouse-scoped user's reports are scoped to their warehouses, and these lists are company-wide
+  // (lib/pickerAccess). Those filters are HIDDEN for such a user rather than drawn empty.
+  const scoped = isWarehouseScoped(principal);
+  const showCustomerFilters = canPickCustomers(can, scoped);
+  const showSiteFilter = canSearchSites(can, scoped);
+  const hiddenFilters = React.useMemo(
+    () => new Set([...(showCustomerFilters ? [] : ["customerId", "projectId"]), ...(showSiteFilter ? [] : ["siteId"])]),
+    [showCustomerFilters, showSiteFilter],
+  );
+  const lists = useReportFilterOptions({ customers: showCustomerFilters });
+  const projects = useProjectOptions(showCustomerFilters ? searchParams.get("customerId") || undefined : undefined);
+  // The ITEM filter searches the whole catalogue (the old dropdown held the first 100 items and no
+  // more). An item picked from a search, or named in a shared link, is folded in so it can be labelled.
+  const [foundItems, setFoundItems] = React.useState<IrmItem[]>([]);
+  const knownItems = React.useMemo(() => mergeIrmItems(lists.items, foundItems), [lists.items, foundItems]);
+  const selectedItemId = searchParams.get("irmItemId") ?? "";
+  useIrmItemsByIds(missingIrmIds([selectedItemId || undefined], knownItems), (found) =>
+    setFoundItems((prev) => mergeIrmItems(prev, found)),
+  );
   // The picked site's label — a search result is not a complete set, so a selected id cannot be
   // looked up in the options afterwards.
   const [siteLabel, setSiteLabel] = React.useState<string | null>(null);
@@ -99,7 +122,11 @@ export function CustomReportsView() {
   // The period is PRIMARY — it is the axis a report is read along and it is set on every run.
   // Everything else is set occasionally and folds behind the Filters trigger.
   const primary = React.useMemo(() => (active?.filters ?? []).filter((f) => f === "dateFrom" || f === "dateTo"), [active]);
-  const secondary = React.useMemo(() => (active?.filters ?? []).filter((f) => f !== "dateFrom" && f !== "dateTo"), [active]);
+  // Minus any picker this viewer may not read (see hiddenFilters) — hidden, never drawn empty.
+  const secondary = React.useMemo(
+    () => (active?.filters ?? []).filter((f) => f !== "dateFrom" && f !== "dateTo" && !hiddenFilters.has(f)),
+    [active, hiddenFilters],
+  );
 
   // What the trigger counts. SECONDARY only: the dates are visible on the row, and counting a filter
   // the user can already see would make the badge read high for no reason anyone could act on.
@@ -113,11 +140,14 @@ export function CustomReportsView() {
   const query = React.useMemo<CustomReportQuery>(() => {
     const q: CustomReportQuery = { report: active?.key ?? "" };
     for (const f of active?.filters ?? []) {
+      // A hidden filter is not applied from a stale or shared link — it would narrow the report by a
+      // control this viewer cannot see or clear.
+      if (hiddenFilters.has(f)) continue;
       const v = searchParams.get(f);
       if (v) (q as unknown as Record<string, string>)[f] = v;
     }
     return q;
-  }, [active, searchParams]);
+  }, [active, searchParams, hiddenFilters]);
 
   const patch = (updates: Record<string, string | null>) => {
     const params = new URLSearchParams(window.location.search);
@@ -210,7 +240,6 @@ export function CustomReportsView() {
   const pickerFor = (f: string): { options: Option[]; placeholder: string; disabled?: boolean; hint?: string } => {
     if (f === "customerId") return { options: lists.customers, placeholder: "All customers" };
     if (f === "warehouseId") return { options: lists.warehouses, placeholder: "All warehouses" };
-    if (f === "irmItemId") return { options: lists.items, placeholder: "All items" };
     if (f === "engineerId") return { options: lists.engineers, placeholder: "All engineers" };
     // Projects belong to a customer. Asked for in that order rather than offered as a flat list —
     // see useProjectOptions.
@@ -271,6 +300,25 @@ export function CustomReportsView() {
           onChange={(v) => patch({ [f]: v || null })}
           options={STOCK_TYPE_OPTIONS}
           ariaLabel={label}
+        />
+      );
+    }
+    // ITEM is searched across the whole catalogue — the dropdown this replaced held the first 100 items
+    // and nothing past them. No create action: this is a read-only filter.
+    if (f === "irmItemId") {
+      return (
+        <IrmItemPicker
+          size="sm"
+          ariaLabel={label}
+          value={selectedItemId}
+          selectedItem={knownItems.find((i) => i.id === selectedItemId) ?? null}
+          seed={lists.items}
+          onSelect={(i) => {
+            setFoundItems((prev) => mergeIrmItems(prev, [i]));
+            patch({ irmItemId: i.id });
+          }}
+          onClear={() => patch({ irmItemId: null })}
+          canCreate={false}
         />
       );
     }
@@ -357,14 +405,21 @@ export function CustomReportsView() {
               panel is worse than no trigger. */}
           {secondary.length > 0 ? (
             <FilterPopover activeCount={activeFilterCount} onClear={clearFilters}>
-              {secondary.map((f) => (
-                <label key={f} className="block">
-                  <span className="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                    {FILTER_LABEL[f] ?? f}
-                  </span>
-                  {controlFor(f)}
-                </label>
-              ))}
+              {secondary.map((f) => {
+                // The item picker renders its menu INLINE, so inside a <label> a click on the menu's
+                // padding or hint is forwarded to the picker's trigger and closes it. That one filter
+                // gets a <div> (see ScheduleForm's recipients); the rest keep the <label>, as their
+                // popups are portalled out of it.
+                const Wrapper = f === "irmItemId" ? "div" : "label";
+                return (
+                  <Wrapper key={f} className="block">
+                    <span className="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                      {FILTER_LABEL[f] ?? f}
+                    </span>
+                    {controlFor(f)}
+                  </Wrapper>
+                );
+              })}
             </FilterPopover>
           ) : null}
 

@@ -1,7 +1,8 @@
 import { Router } from "express";
 
 import * as jobController from "./job.controller.js";
-import { requireAuth, requireCustomer, requirePermission } from "../../middleware/auth.middleware.js";
+import { requireAnyPermissionUnlessScoped, requireAuth, requireCustomer, requirePermission } from "../../middleware/auth.middleware.js";
+import { CUSTOMER_OPTION_UNSCOPED_READERS, JOB_SITE_SEARCH_READERS } from "#modules/role/permissions.js";
 import { writeLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import { assignJobSchema, cancelJobSchema, createJobSchema, updateJobSchema } from "./job.validation.js";
@@ -13,8 +14,14 @@ router.use(requireAuth);
 router.get("/", requirePermission("jobs.view"), jobController.listJobs);
 // BEFORE "/:idOrCode" — otherwise "export.csv" is parsed as a job code and 404s on lookup.
 router.get("/export.csv", requirePermission("jobs.export"), exportLimiter, jobController.exportJobsCsv);
-// Also before "/:idOrCode" — "site-options" is not a job code.
-router.get("/site-options", requirePermission("jobs.view"), jobController.listJobSiteOptions);
+// Also before "/:idOrCode" — "site-options" is not a job code. The Custom Reports site filter reads it
+// too; `reports.view` counts only for a principal that is NOT warehouse-scoped (sites span every
+// customer — see CUSTOMER_OPTION_UNSCOPED_READERS).
+router.get(
+  "/site-options",
+  requireAnyPermissionUnlessScoped(JOB_SITE_SEARCH_READERS, CUSTOMER_OPTION_UNSCOPED_READERS),
+  jobController.listJobSiteOptions,
+);
 router.get("/:idOrCode", requirePermission("jobs.view"), jobController.getJob);
 
 router.post("/", requirePermission("jobs.create"), writeLimiter, validateBody(createJobSchema), jobController.createJob);

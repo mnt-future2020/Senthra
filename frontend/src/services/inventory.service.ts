@@ -1,7 +1,7 @@
 import { api } from "@/lib/api";
 import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
-import type { Availability, InventoryBalance, InventoryDetail, InventoryTransaction, PurchaseHistoryRow, StockTransfer } from "@/types/inventory";
+import type { Availability, InventoryBalance, InventoryDetail, InventoryTransaction, ItemWarehouseStock, PurchaseHistoryRow, StockTransfer } from "@/types/inventory";
 
 // Typed wrappers around the backend /inventory endpoints (read + warehouse→warehouse transfer).
 // Components call these, never api()/axios directly.
@@ -145,12 +145,14 @@ export function getAvailability(irmItemId: string, warehouseId: string): Promise
   return api<Availability>(`/inventory/availability?irmItem=${irmItemId}&warehouse=${warehouseId}`);
 }
 
-// Per-warehouse balances for a single IRM item — feeds the job kit picker so its warehouse dropdown
-// only offers warehouses that actually hold the item. Uncached + bypasses the list cache (a small,
-// selection-time lookup whose key would otherwise collide with the inventory-list cache).
-export function listItemWarehouseStock(irmItemId: string): Promise<InventoryBalance[]> {
+// Where one IRM item is stocked — feeds the job kit picker, the kit-request review and the stock-adjust
+// form, so each warehouse dropdown only offers warehouses that actually hold the item. Its own endpoint
+// (quantities only, every stocking warehouse, scoped to the caller) rather than the inventory LIST
+// filtered to one item: that row carries unit cost and stock value a job planner has no reason to
+// receive, needs `inventory.view`, and was capped at 100 rows. Uncached — a selection-time lookup.
+export function listItemWarehouseStock(irmItemId: string): Promise<ItemWarehouseStock[]> {
   if (!irmItemId) return Promise.resolve([]);
-  return api<PagedInventory>(`/inventory${listQs({ irmItem: irmItemId, pageSize: 200 })}`).then((r) => r.inventory);
+  return api<{ stock: ItemWarehouseStock[] }>(`/inventory/items/${irmItemId}/warehouse-stock`).then((r) => r.stock);
 }
 
 // ── Reorder workbench ─────────────────────────────────────────────────────────

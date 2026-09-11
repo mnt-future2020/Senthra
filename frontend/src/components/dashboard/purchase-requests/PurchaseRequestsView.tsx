@@ -6,8 +6,9 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { FileText, MoreHorizontal, Pencil, Plus, Rows3, Search, Trash2 } from "lucide-react";
 
 import * as prfService from "@/services/purchase-request.service";
-import { listSuppliers } from "@/services/supplier.service";
-import { listWarehouses } from "@/services/warehouse.service";
+import { listSupplierOptions, type SupplierOption } from "@/services/supplier.service";
+import { listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
+import { markInactive } from "@/lib/historicalOption";
 import { useAuth } from "@/hooks/useAuth";
 import { ExportButton } from "@/components/ui/ExportButton";
 import { FilterPopover } from "@/components/ui/FilterPopover";
@@ -23,8 +24,6 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { AttentionMenu } from "@/components/dashboard/shell/AttentionMenu";
 import { PRF_DERIVED_STATUS_OPTIONS, PRF_STATUS_LABELS, PrfStatusBadge, formatDate, formatMoney } from "./prfStatus";
 import type { PrfStatus, PurchaseRequest } from "@/types/purchase-request";
-import type { Supplier } from "@/types/supplier";
-import type { Warehouse } from "@/types/warehouse";
 
 const PAGE_SIZE = 20;
 
@@ -193,12 +192,15 @@ export function PurchaseRequestsView() {
   const [confirm, setConfirm] = React.useState<{ open: boolean; prf: PurchaseRequest | null }>({ open: false, prf: null });
   const [deleting, setDeleting] = React.useState(false);
 
-  // Filter dropdown sources.
-  const [suppliers, setSuppliers] = React.useState<Supplier[]>([]);
-  const [warehouses, setWarehouses] = React.useState<Warehouse[]>([]);
+  // Filter dropdown sources — the COMPLETE lean option lists, both of which admit
+  // purchase_requests.view. The full directories these used to page stopped at 100 and needed
+  // suppliers.view / warehouse.view, which a request reader need not hold. These filter PAST requests,
+  // so deactivated suppliers and warehouses are listed too, labelled "(inactive)".
+  const [suppliers, setSuppliers] = React.useState<SupplierOption[]>([]);
+  const [warehouses, setWarehouses] = React.useState<WarehouseOption[]>([]);
   useReferenceData([
-    { label: "suppliers", load: () => listSuppliers({ pageSize: 100 }), onData: (r) => setSuppliers(r.suppliers) },
-    { label: "warehouses", load: () => listWarehouses({ pageSize: 100 }), onData: (r) => setWarehouses(r.warehouses) },
+    { label: "suppliers", load: () => listSupplierOptions({ includeInactive: true }), onData: (os: SupplierOption[]) => setSuppliers(os) },
+    { label: "warehouses", load: () => listWarehouseOptions({ includeInactive: true }), onData: (ws: WarehouseOption[]) => setWarehouses(ws) },
   ]);
 
   const canEdit = can("purchase_requests.edit");
@@ -328,8 +330,8 @@ export function PurchaseRequestsView() {
           onClear={() => patchParams({ status: null, supplier: null, warehouse: null, requiredFrom: null, requiredTo: null, validFrom: null, validTo: null }, true)}
         >
           <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, ...PRF_DERIVED_STATUS_OPTIONS, ...(Object.keys(PRF_STATUS_LABELS) as PrfStatus[]).map((s) => ({ value: s, label: PRF_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
-          <Select size="sm" value={supplierFilter || "all"} onChange={(v) => patchParams({ supplier: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All suppliers" }, ...suppliers.map((s) => ({ value: s.id, label: s.name }))]} ariaLabel="Filter by supplier" />
-          <Select size="sm" value={warehouseFilter || "all"} onChange={(v) => patchParams({ warehouse: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: w.name }))]} ariaLabel="Filter by warehouse" />
+          <Select size="sm" value={supplierFilter || "all"} onChange={(v) => patchParams({ supplier: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All suppliers" }, ...suppliers.map((s) => ({ value: s.id, label: markInactive(s.name, s.inactive) }))]} ariaLabel="Filter by supplier" />
+          <Select size="sm" value={warehouseFilter || "all"} onChange={(v) => patchParams({ warehouse: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: markInactive(w.name, w.inactive) }))]} ariaLabel="Filter by warehouse" />
           {/* WHEN THE GOODS ARE NEEDED — the question a buyer prioritises by, and the field the
               generated PO inherits its expected delivery date from. */}
           <DateRangeFilter

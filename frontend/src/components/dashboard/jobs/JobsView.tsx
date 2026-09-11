@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ChevronRight, ClipboardList, MoreHorizontal, PackagePlus, Pencil, Plus, Search, Trash2 } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
-import { listCustomers, type PagedCustomers } from "@/services/customer.service";
+import { listCustomerOptions, listCustomerProjectOptions, type CustomerOption } from "@/services/customer.service";
 import { listEngineerOptions } from "@/services/warehouse.service";
 import type { WarehouseManager } from "@/types/warehouse";
 import { useAuth } from "@/hooks/useAuth";
@@ -14,7 +14,6 @@ import { ExportButton } from "@/components/ui/ExportButton";
 import { FilterPopover } from "@/components/ui/FilterPopover";
 import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { SitePicker, siteOptionLabel } from "@/components/ui/SitePicker";
-import { listCustomerProjects } from "@/services/customer.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useJobSocket } from "@/hooks/useJobSocket";
@@ -231,20 +230,26 @@ export function JobsView() {
     return () => clearTimeout(t);
   }, [searchInput, search, patchParams]);
 
+  // The COMPLETE lean lists. The customer filter used to page GET /customers, which needs
+  // customers.view — so a Jobs reader without it (the Finance Director) got a permission toast on
+  // every visit — and stopped at 100 rows. /customers/options admits jobs.view: every customer it
+  // returns is already named on the job rows this user can read.
   useReferenceData([
-    { label: "customers", load: () => listCustomers({ status: "active", pageSize: 200 }), onData: (r: PagedCustomers) => setCustomers(r.customers.map((c) => ({ id: c.id, name: c.name }))) },
+    { label: "customers", load: listCustomerOptions, onData: (os: CustomerOption[]) => setCustomers(os.map((c) => ({ id: c.id, name: c.name }))) },
     { label: "engineers", load: () => listEngineerOptions(), onData: (us: WarehouseManager[]) => setEngineers(us.map((u) => ({ id: u.id, name: u.name }))) },
   ]);
 
   // Projects belong to a customer, so the picker only has a bounded set to offer once one is chosen.
   // Without a customer it stays empty and reads as "All projects", which is honest: there is no
-  // company-wide project list to narrow by.
+  // company-wide project list to narrow by. The lean, COMPLETE project options — the paged detail-tab
+  // read this replaced needed customers.view (it failed silently for the same Finance user) and
+  // stopped at 100.
   React.useEffect(() => {
     let alive = true;
     // No customer → resolve to an empty list through the SAME async path rather than clearing state
     // synchronously in the effect body (a cascading render the React-Compiler lint rejects).
     const load = customer
-      ? listCustomerProjects(customer, { pageSize: 200 }).then((r) => r.projects.map((pr) => ({ id: pr.id, name: pr.name })))
+      ? listCustomerProjectOptions(customer).then((ps) => ps.map((pr) => ({ id: pr.id, name: pr.name })))
       : Promise.resolve([] as { id: string; name: string }[]);
     void load.then((rows) => { if (alive) setProjects(rows); }).catch(() => { if (alive) setProjects([]); });
     return () => { alive = false; };

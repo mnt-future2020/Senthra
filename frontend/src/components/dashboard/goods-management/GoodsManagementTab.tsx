@@ -37,7 +37,9 @@ import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { SitePicker, siteOptionLabel } from "@/components/ui/SitePicker";
 import { searchJobSites } from "@/services/job.service";
 import { listEngineerOptions } from "@/services/warehouse.service";
-import { listCustomers } from "@/services/customer.service";
+import { listCustomerOptions } from "@/services/customer.service";
+import { useAuth } from "@/hooks/useAuth";
+import { canPickCustomers, canSearchSites, isWarehouseScoped } from "@/lib/pickerAccess";
 import { toolbarBtn, toolbarDateCls } from "@/components/ui/styles";
 import { JobScanPanel } from "./JobScanPanel";
 import { OverdueHoldingsView } from "./OverdueHoldingsView";
@@ -257,8 +259,6 @@ export function GoodsManagementTab({
   // Whose work it is. `engineerId` here is the JOB's ASSIGNED engineer — the person the warehouse
   // hands kit to and chases it from, which is the same name the Engineer column shows.
   const engineerFilter = searchParams.get("gmEngineer") ?? "";
-  const customerFilter = searchParams.get("gmCustomer") ?? "";
-  const siteFilter = searchParams.get("gmSite") ?? "";
   const showAllLines = searchParams.get("gmLines") === "all";
   const rawSort = searchParams.get("gmSort");
   const queueSort = (rawSort && SORT_VALUES.includes(rawSort) ? rawSort : "newest") as QueueSort;
@@ -266,8 +266,19 @@ export function GoodsManagementTab({
   // Local search input — seeded from URL, debounce-writes back to ?gmq.
   const [searchInput, setSearchInput] = React.useState(urlSearch);
 
-  // Option lists for the three id filters. Each degrades to an empty array — `goods_management.view`
-  // implies neither `customers.view` nor the engineer roster — which renders as "All …" alone.
+  // Option lists for the three id filters. The CUSTOMER and SITE filters are company-wide lists, and
+  // `goods_management.view` is held by the warehouse-scoped Warehouse Manager — so they are shown only
+  // to a viewer the server lets read them (lib/pickerAccess), and are NOT widened to the scoped role.
+  // They used to be drawn for everyone and fail silently: an empty "All customers" and a site search
+  // that "found nothing", for exactly the role that holds this tab.
+  const { can, principal } = useAuth();
+  const scoped = isWarehouseScoped(principal);
+  const showCustomerFilter = canPickCustomers(can, scoped);
+  const showSiteFilter = canSearchSites(can, scoped);
+  // A hidden filter is not applied from a stale or shared link, nor counted on the badge — it would
+  // narrow the queue by a control this viewer can neither see nor clear (the Custom Reports rule).
+  const customerFilter = showCustomerFilter ? (searchParams.get("gmCustomer") ?? "") : "";
+  const siteFilter = showSiteFilter ? (searchParams.get("gmSite") ?? "") : "";
   const [engineerOptions, setEngineerOptions] = React.useState<{ value: string; label: string }[]>([]);
   const [customerOptions, setCustomerOptions] = React.useState<{ value: string; label: string }[]>([]);
   const [siteLabel, setSiteLabel] = React.useState<string | null>(null);
@@ -284,16 +295,20 @@ export function GoodsManagementTab({
     let alive = true;
     void Promise.all([
       listEngineerOptions().then((us) => us.map((u) => ({ value: u.id, label: u.name }))).catch(() => []),
-      listCustomers({ status: "active", pageSize: 200 })
-        .then((r) => r.customers.map((c) => ({ value: c.id, label: c.name })))
-        .catch(() => []),
+      // The COMPLETE lean list (the directory page it replaced capped at 100) — and not asked at all
+      // for a viewer the filter is hidden from.
+      showCustomerFilter
+        ? listCustomerOptions()
+            .then((cs) => cs.map((c) => ({ value: c.id, label: c.name })))
+            .catch(() => [])
+        : Promise.resolve([] as { value: string; label: string }[]),
     ]).then(([eng, cust]) => {
       if (!alive) return;
       setEngineerOptions(eng);
       setCustomerOptions(cust);
     });
     return () => { alive = false; };
-  }, []);
+  }, [showCustomerFilter]);
 
   const [data, setData] = React.useState<QueuePage | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -758,23 +773,29 @@ export function GoodsManagementTab({
                       to={dueTo}
                       onChange={({ from, to }) => patch({ gmDueFrom: from || null, gmDueTo: to || null })}
                     />
-                    <Select
-                      size="sm"
-                      ariaLabel="Filter by customer"
-                      value={customerFilter}
-                      onChange={(v) => patch({ gmCustomer: v || null, gmSite: null })}
-                      options={[{ value: "", label: "All customers" }, ...customerOptions]}
-                    />
+                    {/* Customer and site are company-wide lists — drawn only for a viewer the server lets
+                        read them (see showCustomerFilter / showSiteFilter above). */}
+                    {showCustomerFilter && (
+                      <Select
+                        size="sm"
+                        ariaLabel="Filter by customer"
+                        value={customerFilter}
+                        onChange={(v) => patch({ gmCustomer: v || null, gmSite: null })}
+                        options={[{ value: "", label: "All customers" }, ...customerOptions]}
+                      />
+                    )}
                     {/* A SEARCH, not a dropdown — sites are bulk-imported in the thousands. */}
-                    <SitePicker
-                      value={siteFilter}
-                      selectedLabel={siteLabel}
-                      search={searchSites}
-                      onChange={(id, option) => {
-                        setSiteLabel(option ? siteOptionLabel(option) : null);
-                        patch({ gmSite: id || null });
-                      }}
-                    />
+                    {showSiteFilter && (
+                      <SitePicker
+                        value={siteFilter}
+                        selectedLabel={siteLabel}
+                        search={searchSites}
+                        onChange={(id, option) => {
+                          setSiteLabel(option ? siteOptionLabel(option) : null);
+                          patch({ gmSite: id || null });
+                        }}
+                      />
+                    )}
                     {/* Purely how much of each kit is drawn — no refetch, so it isn't in the fetch deps. */}
                     <Select
                       size="sm"

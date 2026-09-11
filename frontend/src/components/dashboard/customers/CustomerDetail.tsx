@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
-import { listWarehouses } from "@/services/warehouse.service";
+import { listWarehouseOptions } from "@/services/warehouse.service";
 import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { FilterPopover } from "@/components/ui/FilterPopover";
 import { useAuth } from "@/hooks/useAuth";
@@ -891,10 +891,11 @@ function StockEntriesTab({
   const [warehouses, setWarehouses] = React.useState<{ value: string; label: string }[]>([]);
   React.useEffect(() => {
     let alive = true;
-    // Degrades to "All warehouses" rather than failing the tab: `customers.view` does not imply
-    // `warehouse.view`, and a control that 403s on use is worse than one that cannot narrow.
-    listWarehouses({ status: "active", pageSize: 200 })
-      .then((r) => alive && setWarehouses(r.warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))))
+    // The COMPLETE, caller-scoped lean list, which admits customer_stock.view — this tab's gate. The
+    // directory read it replaced needed `warehouse.view` (which `customers.view` does not imply) and
+    // stopped at 100. A genuine failure still degrades to "All warehouses" rather than failing the tab.
+    listWarehouseOptions()
+      .then((ws) => alive && setWarehouses(ws.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))))
       .catch(() => alive && setWarehouses([]));
     return () => { alive = false; };
   }, []);

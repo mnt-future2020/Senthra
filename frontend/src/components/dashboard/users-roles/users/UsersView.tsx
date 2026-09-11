@@ -233,7 +233,11 @@ export function UsersView() {
   // Filters derived from the URL — survive a browser refresh.
   const search = searchParams.get("q") ?? "";
   const statusFilter = (searchParams.get("status") ?? "all") as "all" | UserStatus;
-  const roleFilter = searchParams.get("role") ?? "all";
+  // The role filter's options come from /roles, which a users.view-only role cannot read (it needs
+  // roles.view or users.create / users.edit). Such a user gets no role filter rather than an empty one,
+  // and a stale ?role= in the URL is ignored rather than narrowing the list invisibly.
+  const canFilterByRole = can("roles.view") || can("users.create") || can("users.edit");
+  const roleFilter = canFilterByRole ? (searchParams.get("role") ?? "all") : "all";
   const sort = (searchParams.get("sort") ?? "newest") as "newest" | "oldest" | "name";
   // `createdAt` is an INSTANT, so which calendar day it falls on is a COMPANY-timezone question —
   // resolved server-side, like every other day boundary in this app.
@@ -312,6 +316,8 @@ export function UsersView() {
   );
 
   React.useEffect(() => {
+    // Not asked at all without a key /roles admits — the filter is not drawn (see canFilterByRole).
+    if (!canFilterByRole) return;
     let active = true;
     (async () => {
       try {
@@ -324,7 +330,7 @@ export function UsersView() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [canFilterByRole]);
 
   // Debounce the search box into ?q so typing doesn't fire a request per keystroke.
   React.useEffect(() => {
@@ -489,16 +495,20 @@ export function UsersView() {
           activeCount={usersPopoverFilterCount(filterState)}
           onClear={() => patch({ role: null, addedFrom: null, addedTo: null })}
         >
-          <Select
-            size="sm"
-            value={roleFilter}
-            onChange={(v) => patch({ role: v === "all" ? null : v })}
-            ariaLabel="Role filter"
-            options={[
-              { value: "all", label: "All roles" },
-              ...roles.map((r) => ({ value: r.id, label: r.name })),
-            ]}
-          />
+          {/* Only for a viewer who can read the role list — see canFilterByRole. An empty role filter
+              would read as "there are no roles". */}
+          {canFilterByRole && (
+            <Select
+              size="sm"
+              value={roleFilter}
+              onChange={(v) => patch({ role: v === "all" ? null : v })}
+              ariaLabel="Role filter"
+              options={[
+                { value: "all", label: "All roles" },
+                ...roles.map((r) => ({ value: r.id, label: r.name })),
+              ]}
+            />
+          )}
           {/* WHEN the account was added — the "Added" column, which had no way to be filtered on. */}
           <DateRangeFilter
             label="Added"

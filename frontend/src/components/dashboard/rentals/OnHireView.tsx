@@ -16,7 +16,7 @@ import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { FilterPopover } from "@/components/ui/FilterPopover";
 import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
-import { listSuppliers } from "@/services/supplier.service";
+import { listSupplierOptions } from "@/services/supplier.service";
 import { extensionChargePence, periodsFor, type RatePeriod } from "@/lib/rentalPricing";
 import { formatMoney } from "@/components/dashboard/purchase-orders/poStatus";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -149,12 +149,14 @@ export function OnHireView() {
     [router],
   );
 
-  // Supplier options — degrades to empty, which reads as "All suppliers".
+  // Supplier options — the COMPLETE lean list, which admits rentals.view: the Warehouse Manager reads
+  // every hire here but holds no suppliers.view, so the directory read this replaced left their filter
+  // silently empty (and stopped at 100 for everyone else).
   const [supplierOptions, setSupplierOptions] = React.useState<{ value: string; label: string }[]>([]);
   React.useEffect(() => {
     let alive = true;
-    listSuppliers({ status: "active", pageSize: 200 })
-      .then((r) => alive && setSupplierOptions(r.suppliers.map((x) => ({ value: x.id, label: x.name }))))
+    listSupplierOptions()
+      .then((os) => alive && setSupplierOptions(os.map((x) => ({ value: x.id, label: x.name }))))
       .catch(() => alive && setSupplierOptions([]));
     return () => { alive = false; };
   }, []);

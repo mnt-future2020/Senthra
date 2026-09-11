@@ -8,7 +8,7 @@ import * as prfService from "@/services/purchase-request.service";
 import { getSupplier, listSupplierOptions, type SupplierOption } from "@/services/supplier.service";
 import { withHistoricalOption } from "@/lib/historicalOption";
 import { supplierDetailNotice } from "@/lib/supplierPanel";
-import { listWarehouses } from "@/services/warehouse.service";
+import { listWarehouseDeliveryOptions, type WarehouseDeliveryOption } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
 import { listRentalItems } from "@/services/rental.service";
 import { mergeById, missingIds } from "@/lib/cataloguePicker";
@@ -38,7 +38,6 @@ import { Notice } from "@/components/ui/Notice";
 import { formatMoney } from "./prfStatus";
 import type { PrfDocumentType, PurchaseRequest } from "@/types/purchase-request";
 import type { Supplier } from "@/types/supplier";
-import type { Warehouse } from "@/types/warehouse";
 import type { IrmItem } from "@/types/irm";
 import type { RentalItem } from "@/types/rental";
 import { rentalEstimate, savedRentalLineRow, toRentalPayload, validateRentalLines, type RentalLineRow } from "./rentalLineRows";
@@ -124,7 +123,8 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
   // carries just a lean {id, code, name} reference, so on EDIT this is loaded once alongside the
   // other reference data — one request, not a page of suppliers the form will never show.
   const [supplierDetail, setSupplierDetail] = React.useState<Supplier | null>(null);
-  const [warehouses, setWarehouses] = React.useState<Warehouse[]>([]);
+  // The delivery-warehouse options — option + address, caller-scoped (see listWarehouseDeliveryOptions).
+  const [warehouses, setWarehouses] = React.useState<WarehouseDeliveryOption[]>([]);
   const [items, setItems] = React.useState<IrmItem[]>([]);
   const todayForNotice = React.useSyncExternalStore(subscribeNever, today, serverToday);
   const [rentalItems, setRentalItems] = React.useState<RentalItem[]>([]);
@@ -156,7 +156,10 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
     ...(r?.supplierId
       ? [{ label: "the supplier", load: () => getSupplier(r.supplierId), onData: (full: Supplier) => setSupplierDetail(full), onError: (err: unknown) => setSupplierNotice(supplierDetailNotice(err)) }]
       : []),
-    { label: "delivery warehouses", load: () => listWarehouses({ status: "active", pageSize: 100 }), onData: (w) => setWarehouses(w.warehouses) },
+    // The delivery list: option + address, complete and caller-scoped. It admits the requester's own
+    // create / edit key, so raising a request no longer needs `warehouse.view` — and the full records
+    // this used to page (contacts, managers, notes) never reach the form.
+    { label: "delivery warehouses", load: listWarehouseDeliveryOptions, onData: (ws: WarehouseDeliveryOption[]) => setWarehouses(ws) },
     { label: "the item catalogue", load: () => listIrmItems({ status: "active", pageSize: 100 }), onData: (i) => setItems(i.items) },
     { label: "the rental catalogue", load: () => listRentalItems({ status: "active", pageSize: 100 }), onData: (r) => setRentalItems(r.items) },
   ]);

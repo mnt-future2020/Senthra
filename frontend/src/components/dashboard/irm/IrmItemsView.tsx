@@ -17,7 +17,7 @@ import { Select } from "@/components/ui/Select";
 import { FilterPopover } from "@/components/ui/FilterPopover";
 import { listIrmTypes } from "@/services/irm-type.service";
 import { listIrmCategories } from "@/services/irm-category.service";
-import { listSuppliers } from "@/services/supplier.service";
+import { listSupplierOptions } from "@/services/supplier.service";
 import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
 import { listToolbarCls } from "@/components/ui/styles";
 import type { IrmItem, IrmStatus } from "@/types/irm";
@@ -257,7 +257,9 @@ export function IrmItemsView() {
     void Promise.all([
       listIrmTypes().then(keep).catch(() => []),
       listIrmCategories().then(keep).catch(() => []),
-      listSuppliers({ status: "active", pageSize: 200 }).then((r) => keep(r.suppliers)).catch(() => []),
+      // The COMPLETE lean list, which admits irm.view. The directory read it replaced needed
+      // suppliers.view (the Warehouse Manager's filter was silently empty) and stopped at 100.
+      listSupplierOptions().then((os) => keep(os)).catch(() => []),
     ]).then(([t, c, sup]) => {
       if (!alive) return;
       setIrmTypes(t);

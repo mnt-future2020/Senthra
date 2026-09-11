@@ -7,7 +7,9 @@ import { Boxes, Download, Loader2, Search } from "lucide-react";
 import * as svc from "@/services/stockPosition.service";
 import { listWarehouses } from "@/services/warehouse.service";
 import { listIrmCategories } from "@/services/irm-category.service";
-import { listCustomers } from "@/services/customer.service";
+import { listCustomerOptions } from "@/services/customer.service";
+import { markInactive } from "@/lib/historicalOption";
+import { canPickCustomers, isWarehouseScoped } from "@/lib/pickerAccess";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Pagination } from "@/components/ui/Pagination";
@@ -197,7 +199,7 @@ export function StockPositionTable({
 }: StockPositionTableProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { can } = useAuth();
+  const { can, principal } = useAuth();
   const { pushToast } = useDashboard();
 
   // Filters derived from URL params — survive refresh.
@@ -206,7 +208,6 @@ export function StockPositionTable({
   const warehouseFilter = searchParams.get("warehouse") ?? "";
   const categoryFilter = searchParams.get("category") ?? "";
   const statusFilter = searchParams.get("status") ?? "";
-  const customerFilter = searchParams.get("customer") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
   // Local immediate value for the search box; debounced writes to ?q.
@@ -229,17 +230,23 @@ export function StockPositionTable({
   const [categories, setCategories] = React.useState<{ value: string; label: string }[]>([]);
   const [customers, setCustomers] = React.useState<{ value: string; label: string }[]>([]);
 
-  // Only the filters this lens configures count — a stale `?customer=` left over from another lens
-  // must not claim a narrowing this screen can neither show nor clear. See columnPriority.
-  const activeFilterCount = countActiveFilters(filters, (k) => searchParams.get(k));
-  const clearFilters = () => patch(clearFilterPatch(filters));
-
   const showWarehouse = filters.includes("warehouse");
   const showOwner = filters.includes("owner");
   const showLocation = filters.includes("location");
   const showCategory = filters.includes("category");
   const showStatus = filters.includes("status");
-  const showCustomer = filters.includes("customer");
+  // The customer filter reads the company-wide customer list — HIDDEN for a viewer the server would
+  // refuse it to (the warehouse-scoped Warehouse Manager), rather than drawn empty. See lib/pickerAccess.
+  const showCustomer = filters.includes("customer") && canPickCustomers(can, isWarehouseScoped(principal));
+  // A hidden filter is not applied from a stale or shared link — it would narrow the list by a control
+  // this viewer can neither see nor clear. The rule Custom Reports and Users already follow.
+  const customerFilter = showCustomer ? (searchParams.get("customer") ?? "") : "";
+  const visibleFilters = showCustomer ? filters : filters.filter((f) => f !== "customer");
+
+  // Only the filters this lens configures — and this viewer can see — count: a stale `?customer=` must
+  // not claim a narrowing this screen can neither show nor clear. See columnPriority.
+  const activeFilterCount = countActiveFilters(visibleFilters, (k) => searchParams.get(k));
+  const clearFilters = () => patch(clearFilterPatch(filters));
 
   React.useEffect(() => {
     let active = true;
@@ -262,9 +269,11 @@ export function StockPositionTable({
       }
       if (showCustomer) {
         try {
-          const r = await listCustomers({ pageSize: 100 });
+          // The COMPLETE lean list — the directory page it replaced stopped at 100. Deactivated
+          // customers are included (their stock is still on record), labelled "(inactive)".
+          const cs = await listCustomerOptions({ includeInactive: true });
           if (active) {
-            setCustomers(r.customers.map((c) => ({ value: c.id, label: c.name })));
+            setCustomers(cs.map((c) => ({ value: c.id, label: markInactive(c.name, c.inactive) })));
           }
         } catch { /* silently skip */ }
       }

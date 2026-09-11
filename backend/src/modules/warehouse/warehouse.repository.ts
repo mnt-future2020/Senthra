@@ -132,15 +132,44 @@ export function findActiveByIds(ids: string[]): Promise<{ id: string }[]> {
   });
 }
 
-// Lean active-warehouse options for a picker (id/code/name only), code-sorted. A trimmed list
-// instead of paging the full warehouse records. `ids` scopes the result to a warehouse-scoped
-// user's assigned set (undefined = unrestricted).
-export function findOptions(ids?: string[]): Promise<{ id: string; code: string; name: string }[]> {
+// Lean warehouse options for a picker (id/code/name, plus `status` so the service can flag a
+// deactivated row), code-sorted. A trimmed list instead of paging the full warehouse records.
+// ACTIVE only unless `includeInactive` — which only a history filter asks for. `ids` scopes the result
+// to a warehouse-scoped user's assigned set (undefined = unrestricted), in both modes.
+export function findOptions(
+  ids?: string[],
+  { includeInactive = false }: { includeInactive?: boolean } = {},
+): Promise<{ id: string; code: string; name: string; status: string }[]> {
+  const where: Prisma.WarehouseWhereInput = { deletedAt: null };
+  if (!includeInactive) where.status = "active";
+  if (ids !== undefined) where.id = { in: ids };
+  return prisma.warehouse.findMany({
+    where,
+    select: { id: true, code: true, name: true, status: true },
+    orderBy: { code: "asc" },
+  });
+}
+
+// The purchase request / order DELIVERY-warehouse picker: the lean option plus the default flag it
+// labels and the address it shows as the destination. No contacts, managers or notes. Scoped exactly
+// like findOptions (`ids` = a warehouse-scoped user's assigned set; undefined = unrestricted).
+export function findDeliveryOptions(ids?: string[]) {
   const where: Prisma.WarehouseWhereInput = { status: "active", deletedAt: null };
   if (ids !== undefined) where.id = { in: ids };
   return prisma.warehouse.findMany({
     where,
-    select: { id: true, code: true, name: true },
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      isDefault: true,
+      addressLine1: true,
+      addressLine2: true,
+      city: true,
+      county: true,
+      postcode: true,
+      country: true,
+    },
     orderBy: { code: "asc" },
   });
 }

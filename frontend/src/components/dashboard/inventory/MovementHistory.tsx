@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, ArrowLeftRight, Search } from "lucide-react";
 
 import * as inventoryService from "@/services/inventory.service";
-import { listWarehouses } from "@/services/warehouse.service";
+import { listWarehouseOptions } from "@/services/warehouse.service";
 import { Select } from "@/components/ui/Select";
 import { FilterPopover } from "@/components/ui/FilterPopover";
 import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
@@ -67,8 +67,10 @@ export function MovementHistory() {
   const [warehouseOptions, setWarehouseOptions] = React.useState<{ value: string; label: string }[]>([]);
   React.useEffect(() => {
     let alive = true;
-    listWarehouses({ status: "active", pageSize: 200 })
-      .then((r) => alive && setWarehouseOptions(r.warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))))
+    // The COMPLETE, caller-scoped lean list (admits inventory.history) — the directory page it replaced
+    // asked for 200 and got 100.
+    listWarehouseOptions()
+      .then((ws) => alive && setWarehouseOptions(ws.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))))
       .catch(() => alive && setWarehouseOptions([]));
     return () => { alive = false; };
   }, []);

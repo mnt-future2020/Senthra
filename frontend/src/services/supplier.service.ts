@@ -131,6 +131,8 @@ export interface SupplierOption {
   id: string;
   code: string;
   name: string;
+  /** Only on a deactivated supplier — which only an `includeInactive` list contains. */
+  inactive?: boolean;
 }
 
 /**
@@ -140,7 +142,12 @@ export interface SupplierOption {
  * read silently hides every supplier past the page, and the shared Select renders its placeholder
  * for a value it cannot find, so a saved record reads as "none selected". The full supplier record
  * (contacts, payment terms) is fetched by id with `getSupplier` once one is chosen.
+ *
+ * `includeInactive` is for HISTORY filters only: deactivated suppliers come back flagged `inactive`
+ * (label them with `markInactive`). A create form must never pass it.
  */
-export function listSupplierOptions(): Promise<SupplierOption[]> {
-  return api<{ options: SupplierOption[] }>("/suppliers/options").then((r) => r.options);
+export function listSupplierOptions({ includeInactive = false }: { includeInactive?: boolean } = {}): Promise<SupplierOption[]> {
+  return api<{ options: SupplierOption[] }>(`/suppliers/options${includeInactive ? "?includeInactive=true" : ""}`).then(
+    (r) => r.options,
+  );
 }

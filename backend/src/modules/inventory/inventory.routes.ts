@@ -1,7 +1,8 @@
 import { Router } from "express";
 
 import * as inventoryController from "./inventory.controller.js";
-import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
+import { requireAnyPermission, requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
+import { INVENTORY_ENGINEER_OPTION_READERS, STOCK_CHECK_READERS } from "#modules/role/permissions.js";
 import { writeLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import { addStockSchema, adjustStockSchema, createTransferSchema } from "./inventory.validation.js";
@@ -13,7 +14,8 @@ router.use(requireAuth);
 // Static paths first so they aren't captured by "/:id".
 router.get("/", requirePermission("inventory.view"), inventoryController.listInventory);
 router.get("/export.csv", requirePermission("inventory.export"), exportLimiter, inventoryController.exportInventoryCsv);
-router.get("/availability", requirePermission("inventory.view"), inventoryController.getAvailability);
+// The job form's per-line "N free" check — see STOCK_CHECK_READERS. Warehouse-scoped in the service.
+router.get("/availability", requireAnyPermission(...STOCK_CHECK_READERS), inventoryController.getAvailability);
 // Reorder workbench: netted per-item×warehouse buy suggestions (warehouse-scoped in the service).
 router.get("/reorder-suggestions", requirePermission("inventory.view"), inventoryController.getReorderSuggestions);
 
@@ -40,10 +42,14 @@ router.get("/movements", requirePermission("inventory.history"), inventoryContro
 router.get("/items/:irmItemId/distribution", requirePermission("inventory.view"), inventoryController.getItemDistribution);
 router.get("/items/:irmItemId/holders", requirePermission("inventory.view"), inventoryController.getItemHolders);
 router.get("/items/:irmItemId/jobs", requirePermission("inventory.view"), inventoryController.getItemJobs);
+// Where one item is stocked, quantities only — the job kit picker's and kit-request review's warehouse
+// dropdown (see STOCK_CHECK_READERS). Warehouse-scoped in the service.
+router.get("/items/:irmItemId/warehouse-stock", requireAnyPermission(...STOCK_CHECK_READERS), inventoryController.getItemWarehouseStock);
 
 // Engineer lens — engineers overview + one engineer's holdings/jobs (static paths before /:id).
-// BEFORE "/engineers/:engineerId" — "engineer-options" is not an engineer id.
-router.get("/engineer-options", requirePermission("inventory.view"), inventoryController.listEngineerOptions);
+// BEFORE "/engineers/:engineerId" — "engineer-options" is not an engineer id. The roster also feeds
+// the movement feed's and the report filters' engineer pickers — see INVENTORY_ENGINEER_OPTION_READERS.
+router.get("/engineer-options", requireAnyPermission(...INVENTORY_ENGINEER_OPTION_READERS), inventoryController.listEngineerOptions);
 router.get("/engineers", requirePermission("inventory.view"), inventoryController.listEngineers);
 router.get("/engineers/:engineerId", requirePermission("inventory.view"), inventoryController.getEngineerInventory);
 
