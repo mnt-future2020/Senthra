@@ -8,6 +8,7 @@ import {
   type RentalLineInput,
   type SplitRentalLineInput,
 } from "./rentalLine.validation.js";
+import { customFieldValuesField } from "./poCustomField.validation.js";
 
 // Purchase Order validation. PROCUREMENT WORKFLOW ONLY. Codes/status/totals are SYSTEM-owned
 // and never accepted from the client. Editable only in `draft` (enforced in the service).
@@ -113,6 +114,10 @@ const sharedHeader = {
   paymentTerms: z.string().trim().max(100).nullable().optional(),
   internalNotes: z.string().trim().max(2000).optional(),
   supplierNotes: z.string().trim().max(2000).optional(),
+  // Additional information (PO custom fields) — `{ [definitionId]: text }`. Optional, informational,
+  // never required; every rule above is untouched by it. Ids are checked against live definitions in
+  // the service. See poCustomField.validation.ts.
+  customFields: customFieldValuesField.optional(),
 };
 
 // Expected delivery can't precede the order date (when both are present).

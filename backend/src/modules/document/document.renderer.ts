@@ -10,6 +10,7 @@ import { COLORS, FONT, PAGE } from "./document.constants.js";
 import { formatDateTime } from "./document.formatter.js";
 import type {
   DocumentRegional,
+  PoDocCustomField,
   PoDocLine,
   PurchaseOrderDocumentData,
 } from "./document.types.js";
@@ -131,6 +132,7 @@ function drawBody(doc: Doc, data: PurchaseOrderDocumentData): void {
   y = drawItemsTable(doc, data.lines, M, y, W, accent) + 14;
   y = drawTotals(doc, data, M, y, W) + 14;
   y = drawTerms(doc, data, M, y, W, accent) + 14;
+  if (data.customFields.length) y = drawCustomFields(doc, data.customFields, M, y, W, accent) + 14;
   if (data.notes) y = drawNotes(doc, data.notes, M, y, W) + 14;
   if (data.signature) drawSignature(doc, data, M, y, W);
 }
@@ -169,6 +171,52 @@ function drawTerms(doc: Doc, data: PurchaseOrderDocumentData, x: number, y: numb
     // A wrapped value can push past one line; advance to whichever column ended lower.
     yy = Math.max(doc.y, startY + 14);
   }
+  return yy;
+}
+
+// ADDITIONAL INFORMATION — the order's PO custom-field values that are set to print. Same visual
+// language as TERMS & AUTHORISATION (accent heading, faint label column, bold wrapping value), so it reads
+// as another block of the same document. Only ever called with at least one row: no values, no heading.
+//
+// Page fit is MEASURED, not estimated. A value can wrap to several lines, and any of it drawn into the
+// bottom margin lands on the footer and makes pdfkit spawn a blank page. The block moves to the next page
+// whole when it fits on one; a block taller than a page keeps its heading with the first row and then
+// breaks between rows, never inside one.
+function drawCustomFields(doc: Doc, rows: PoDocCustomField[], x: number, y: number, W: number, accent: string): number {
+  const pageBottom = doc.page.height - PAGE.margin - 30;
+  const labelW = W * 0.22;
+  const valueW = W * 0.78;
+  const heading = "ADDITIONAL INFORMATION";
+
+  const heights = rows.map((r) => {
+    doc.font("Helvetica").fontSize(FONT.label);
+    const labelH = doc.heightOfString(r.label.toUpperCase(), { width: labelW }) + 1;
+    doc.font("Helvetica-Bold").fontSize(FONT.small);
+    const valueH = doc.heightOfString(r.value, { width: valueW });
+    return Math.max(labelH, valueH, 14);
+  });
+  doc.font("Helvetica-Bold").fontSize(FONT.label);
+  const headingH = doc.heightOfString(heading, { width: W }) + 4;
+  const blockH = headingH + heights.reduce((sum, h) => sum + h, 0);
+  const fitsOnOnePage = blockH <= pageBottom - PAGE.margin;
+
+  let yy = y;
+  if (fitsOnOnePage ? yy + blockH > pageBottom : yy + headingH + heights[0] > pageBottom) {
+    doc.addPage();
+    yy = PAGE.margin;
+  }
+  doc.font("Helvetica-Bold").fontSize(FONT.label).fillColor(accent).text(heading, x, yy, { width: W });
+  yy = doc.y + 4;
+  rows.forEach((r, i) => {
+    if (yy + heights[i] > pageBottom) {
+      doc.addPage();
+      yy = PAGE.margin;
+    }
+    const startY = yy;
+    doc.font("Helvetica").fontSize(FONT.label).fillColor(COLORS.faint).text(r.label.toUpperCase(), x, startY + 1, { width: labelW });
+    doc.font("Helvetica-Bold").fontSize(FONT.small).fillColor(COLORS.ink).text(r.value, x + labelW, startY, { width: valueW });
+    yy = Math.max(doc.y, startY + heights[i]);
+  });
   return yy;
 }
 

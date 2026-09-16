@@ -30,6 +30,9 @@ export interface SettingsUpdate {
   stockCodePrefix?: string;
   irmCodePrefix?: string;
   rentalCodePrefix?: string;
+  // PO document branding. The logo can only be CLEARED here ("") — it is set through the upload.
+  poDocLogoUrl?: "";
+  poDocAccentColor?: string;
   // Company profile + regional (all optional; empty string clears back to the backend default).
   companyLegalName?: string;
   companyRegNumber?: string;

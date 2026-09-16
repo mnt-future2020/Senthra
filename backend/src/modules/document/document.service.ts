@@ -4,7 +4,12 @@
 // a sibling generate*Pdf here reusing resolveLetterhead() + the builder/renderer primitives.
 
 import type { PurchaseOrderWithRelations } from "#modules/purchase-order/purchase-order.repository.js";
-import { getBranding, getCompanyProfile, getRegionalSettings } from "#modules/settings/settings.service.js";
+import {
+  getBranding,
+  getCompanyProfile,
+  getPurchaseOrderDocumentBranding,
+  getRegionalSettings,
+} from "#modules/settings/settings.service.js";
 import { getDisplayNamesForEmails } from "#modules/user/user.service.js";
 import { buildPurchaseOrderDocument } from "./document.builder.js";
 import { renderPurchaseOrderPdf } from "./document.renderer.js";
@@ -12,15 +17,26 @@ import { resolveSignatureBlock } from "./document.signature.js";
 import { fetchImageBuffer, getDocumentFileName, joinAddressLines, pdfSafeImageUrl } from "./document.utils.js";
 import type { DocumentContext, DocumentMeta, RenderedDocument } from "./document.types.js";
 
+// A document type's own letterhead branding, where it has one. Absent = the app branding.
+interface LetterheadOverrides {
+  logoUrl?: string;
+  brandColor?: string;
+}
+
 // Resolve the shared letterhead (company identity + regional + branding + fetched logo) from the
 // single-source-of-truth readers. Reused by every document type — never read the raw Settings row.
-async function resolveLetterhead(): Promise<Omit<DocumentContext, "signature" | "meta" | "people">> {
+// `overrides` lets ONE document type print its own logo/colour without every other type inheriting
+// it: the purchase order passes its Settings → Purchase Orders values; nothing else passes any.
+async function resolveLetterhead(
+  overrides: LetterheadOverrides = {},
+): Promise<Omit<DocumentContext, "signature" | "meta" | "people">> {
   const [company, regional, branding] = await Promise.all([
     getCompanyProfile(),
     getRegionalSettings(),
     getBranding(),
   ]);
-  const logo = await fetchImageBuffer(pdfSafeImageUrl(company.logoUrl));
+  const logoUrl = overrides.logoUrl ?? company.logoUrl;
+  const logo = await fetchImageBuffer(pdfSafeImageUrl(logoUrl));
   return {
     company: {
       legalName: company.legalName,
@@ -37,14 +53,14 @@ async function resolveLetterhead(): Promise<Omit<DocumentContext, "signature" | 
       phone: company.phone,
       email: company.email,
       website: company.website,
-      logoUrl: company.logoUrl,
+      logoUrl,
     },
     regional: {
       timezone: regional.timezone,
       dateFormat: regional.dateFormat,
       timeFormat: regional.timeFormat,
     },
-    branding: { brandName: branding.brandName, brandColor: branding.brandColor },
+    branding: { brandName: branding.brandName, brandColor: overrides.brandColor ?? branding.brandColor },
     logo,
   };
 }
@@ -56,7 +72,11 @@ export async function generatePurchaseOrderPdf(
   po: PurchaseOrderWithRelations,
   generatedBy?: string | null,
 ): Promise<RenderedDocument> {
-  const base = await resolveLetterhead();
+  // The PO document's own logo + accent (Settings → Purchase Orders), which fall back to the app
+  // branding when unset. Resolved here, at the PO layer — every PO render goes through this function
+  // (download, supplier email, issued archive), and no other document type sees the override.
+  const poBranding = await getPurchaseOrderDocumentBranding();
+  const base = await resolveLetterhead({ logoUrl: poBranding.logoUrl, brandColor: poBranding.accentColor });
   // ONE lookup for every person this document names — its raiser, its approver and its signer.
   const people = await getDisplayNamesForEmails([po.createdBy, po.approvedBy, po.sentBy]);
   const signature = await resolveSignatureBlock(po.sentBy, people);

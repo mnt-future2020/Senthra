@@ -68,6 +68,7 @@ function data(over: Partial<PurchaseOrderDocumentData> = {}): PurchaseOrderDocum
     },
     lines: [line()],
     totals: { subtotal: "1.00", vat: "0.20", vatLabel: "VAT (20%)", grandTotal: "1.20" },
+    customFields: [],
     notes: "",
     ...over,
   };
@@ -160,6 +161,64 @@ describe("renderPurchaseOrderPdf — supplier notes", () => {
     const isFooter = (r: PdfTextRun) => r.text.includes("Page ") || r.text.startsWith("Electra Networks Ltd   ");
     expect(runs.filter((r) => r.y < 68 && !isFooter(r))).toEqual([]);
     expect(runs.some((r) => r.text.startsWith("Please book in"))).toBe(true); // and it is still printed
+  });
+});
+
+describe("renderPurchaseOrderPdf — additional information", () => {
+  const isFooter = (r: PdfTextRun) => r.text.includes("Page ") || r.text.startsWith("Electra Networks Ltd   ");
+
+  it("draws the section after the terms and before the notes", async () => {
+    const buf = await renderPurchaseOrderPdf(
+      data({ customFields: [{ label: "Cost centre", value: "CC-42" }], notes: "Deliver to the rear gate." }),
+      regional,
+    );
+    const runs = pdfTextRuns(buf);
+    const terms = find(runs, "TERMS & AUTHORISATION");
+    const heading = find(runs, "ADDITIONAL INFORMATION");
+    const notes = find(runs, "NOTES");
+    expect(heading).toBeDefined();
+    expect(find(runs, "COST CENTRE")).toBeDefined();
+    expect(find(runs, "CC-42")).toBeDefined();
+    // PDF y grows upward: terms above the section, the section above the notes.
+    expect(terms!.y).toBeGreaterThan(heading!.y);
+    expect(heading!.y).toBeGreaterThan(notes!.y);
+  });
+
+  it("leaves everything above it exactly where it was", async () => {
+    const without = pdfTextRuns(await renderPurchaseOrderPdf(data(), regional));
+    const withSection = pdfTextRuns(
+      await renderPurchaseOrderPdf(data({ customFields: [{ label: "Cost centre", value: "CC-42" }] }), regional),
+    );
+    // Every run of the original document that is not the footer is still drawn, at the same place.
+    const body = without.filter((r) => !isFooter(r));
+    expect(withSection.filter((r) => !isFooter(r)).slice(0, body.length)).toEqual(body);
+  });
+
+  it("draws no heading at all when there are no rows", async () => {
+    const runs = pdfTextRuns(await renderPurchaseOrderPdf(data({ customFields: [] }), regional));
+    expect(find(runs, "ADDITIONAL INFORMATION")).toBeUndefined();
+  });
+
+  it("keeps a long block off the footer, its heading with its first row, and emits no blank pages", async () => {
+    const rows = Array.from({ length: 20 }, (_, i) => ({
+      label: `Field ${String(i + 1).padStart(2, "0")}`,
+      value: `VALUE-${String(i + 1).padStart(2, "0")} ${"lorem ipsum dolor sit amet ".repeat(12)}`,
+    }));
+    const buf = await renderPurchaseOrderPdf(data({ lines: Array.from({ length: 8 }, () => line()), customFields: rows }), regional);
+    const runs = pdfTextRuns(buf);
+
+    expect(runs.filter((r) => r.y < 68 && !isFooter(r))).toEqual([]);
+    for (let p = 1; p <= pdfPageCount(buf); p++) {
+      expect(runs.filter((r) => r.page === p && r.y > 68).length, `page ${p} is blank`).toBeGreaterThan(0);
+    }
+    const heading = find(runs, "ADDITIONAL INFORMATION");
+    const first = runs.find((r) => r.text.startsWith("VALUE-01"));
+    expect(heading).toBeDefined();
+    expect(first!.page).toBe(heading!.page);
+    // Every value is still printed.
+    for (let i = 1; i <= 20; i++) {
+      expect(runs.some((r) => r.text.startsWith(`VALUE-${String(i).padStart(2, "0")}`)), `value ${i}`).toBe(true);
+    }
   });
 });
 

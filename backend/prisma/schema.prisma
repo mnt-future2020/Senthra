@@ -81,6 +81,14 @@ model Settings {
   // printed and stuck to hired kit valid: the label encodes the code, and the code never moves.
   rentalCodePrefix   String?
 
+  // --- Purchase Order document branding (the PO PDF ONLY) ---
+  // Optional overrides for the purchase order document. Null = the PDF falls back to the app branding
+  // above (logoUrl / brandColor) at READ time — see getPurchaseOrderDocumentBranding — so an install
+  // that never sets them renders exactly as before. Never part of the public branding payload and never
+  // read by the app shell or emails: changing them restyles the PO document and nothing else.
+  poDocLogoUrl     String? // Cloudinary URL, written only by the branding upload (type "po_logo")
+  poDocAccentColor String? // #RGB or #RRGGBB — pdfkit cannot parse the alpha forms brandColor accepts
+
   // --- Company profile (legal identity for official documents — PO PDF letterhead etc.) ---
   // Pure reference data, surfaced via getCompanyProfile(). Distinct from the display brand above
   // (brandName) and from the app logo (logoUrl, which stays the single logo source of truth).
@@ -946,6 +954,15 @@ model PurchaseOrder {
   internalNotes String? // never leaves the company
   supplierNotes String? // appears on the issued PO
 
+  // Additional information — the PO custom fields configured in Settings → Purchase Orders.
+  // INFORMATIONAL ONLY: nothing reads it for totals, VAT, approval, the PRF fast-path comparison,
+  // receiving, status or reporting. A list of { fieldId, label, value, printOnPdf } where the label and
+  // print flag are SNAPSHOTS of the definition — refreshed while the order is a draft, frozen with it
+  // after — so a renamed or deactivated field never leaves an old order unreadable. Absent on every
+  // order raised before the feature, and on PRF-born ones until someone fills a field in. Always read
+  // through readStoredCustomFields (poCustomField.values.ts), never raw: it is a Json column.
+  customFields Json?
+
   // Approval workflow — actor email snapshots + timestamps.
   createdBy       String?
   submittedBy     String?
@@ -1279,6 +1296,27 @@ model PurchaseOrderAttachment {
 
   @@index([purchaseOrderId])
   @@index([resourceType, publicId])
+}
+
+// A custom field definition for purchase orders (Settings → Purchase Orders). PO-specific on purpose —
+// not a generic custom-field framework. TEXT only in this phase; `type` is stored so another kind could
+// be added later without reshaping existing rows. Never deleted, only deactivated: orders already carry
+// values keyed by its id, and those stay readable through the label snapshotted onto each order.
+model PurchaseOrderCustomField {
+  id         String  @id @default(auto()) @map("_id") @db.ObjectId
+  label      String
+  // Lower-cased mirror of `label`, derived in the repository — the case-insensitive uniqueness guard,
+  // the same pattern as WarehouseType.nameLower. A new, empty collection, so the index builds cleanly.
+  labelLower String  @unique
+  type       String  @default("text") // "text" only (phase 1)
+  active     Boolean @default(true)
+  printOnPdf Boolean @default(true)
+  sortOrder  Int     @default(0)
+  createdBy  String?
+  updatedBy  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // A file attached to a Job — the job-pack documents, drawings and site photos.

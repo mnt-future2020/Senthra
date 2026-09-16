@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import * as poController from "./purchase-order.controller.js";
+import * as customFieldController from "./poCustomField.controller.js";
 import { requireAnyPermission, requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
 import { HIRE_SETTLE_PERMISSIONS } from "#modules/role/permissions.js";
 import { writeLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
@@ -21,6 +22,11 @@ import {
   recoverHireLossSchema,
   dismissCustodyExitSchema,
 } from "./purchase-order.validation.js";
+import {
+  createPoCustomFieldSchema,
+  reorderPoCustomFieldsSchema,
+  updatePoCustomFieldSchema,
+} from "./poCustomField.validation.js";
 
 const router = Router();
 
@@ -36,6 +42,38 @@ router.get("/items/:irmItemId", requirePermission("purchase_orders.view"), poCon
 router.get("/pm-candidates", requirePermission("purchase_orders.assign_pm"), poController.listPmCandidates);
 // Supplier procurement summary — counts + spend for the supplier detail "Procurement" tab.
 router.get("/suppliers/:supplierId/summary", requirePermission("purchase_orders.view"), poController.getSupplierProcurementSummary);
+
+// PO custom-field DEFINITIONS (Settings → Purchase Orders). Declared before every "/:id" route so
+// "custom-fields" is never read as an order id. READ by anyone who works with orders (the form needs the
+// active ones to offer, the detail page and Settings viewers the labels); CHANGED only by Settings
+// managers — configuring the PO document is Settings authority, never a PO creator's.
+router.get(
+  "/custom-fields",
+  requireAnyPermission("purchase_orders.view", "purchase_orders.create", "purchase_orders.edit", "settings.view"),
+  customFieldController.listCustomFields,
+);
+router.post(
+  "/custom-fields",
+  requirePermission("settings.manage"),
+  writeLimiter,
+  validateBody(createPoCustomFieldSchema),
+  customFieldController.createCustomField,
+);
+router.put(
+  "/custom-fields/order",
+  requirePermission("settings.manage"),
+  writeLimiter,
+  validateBody(reorderPoCustomFieldsSchema),
+  customFieldController.reorderCustomFields,
+);
+router.patch(
+  "/custom-fields/:fieldId",
+  requirePermission("settings.manage"),
+  writeLimiter,
+  validateBody(updatePoCustomFieldSchema),
+  customFieldController.updateCustomField,
+);
+
 router.get("/:id", requirePermission("purchase_orders.view"), poController.getPurchaseOrder);
 // Preview / download the generated PO document (PDF). PDF render is heavy (synchronous
 // pdfkit render + remote logo fetch), so throttle it like the CSV export — otherwise an

@@ -44,6 +44,43 @@ describe("createPurchaseOrderSchema — required fields", () => {
   );
 });
 
+// Additional information (PO custom fields) is additive: optional on every body, and it never relaxes
+// or adds a requirement to any existing field.
+describe("additional information (customFields) — optional, never a new requirement", () => {
+  const CF = "1".repeat(24);
+
+  it("still accepts an order with no custom fields at all", () => {
+    expect(createPurchaseOrderSchema.safeParse(valid()).success).toBe(true);
+  });
+
+  it("accepts values keyed by field id on create, split create and draft edit", () => {
+    expect(createPurchaseOrderSchema.parse(valid({ customFields: { [CF]: "CC-42" } })).customFields).toEqual({ [CF]: "CC-42" });
+    expect(
+      createPurchaseOrdersSplitSchema.safeParse({
+        supplierId: SUP_ID,
+        orderDate: "2026-06-01",
+        expectedDeliveryDate: "2026-06-10",
+        items: [{ irmItemId: IRM_ID, quantity: 1, unitPricePence: 100, warehouseId: WH_ID }],
+        customFields: { [CF]: "x" },
+      }).success,
+    ).toBe(true);
+    expect(updatePurchaseOrderSchema.safeParse({ customFields: { [CF]: "" } }).success).toBe(true);
+  });
+
+  it.each([{ costCentre: "x" }, { [CF]: 7 }, { [CF]: "x".repeat(501) }, "text"])("rejects the malformed body %j", (customFields) => {
+    expect(createPurchaseOrderSchema.safeParse(valid({ customFields })).success).toBe(false);
+  });
+
+  it.each(["supplierId", "warehouseId", "orderDate", "expectedDeliveryDate", "items"])(
+    "still rejects a missing %s when custom fields are present",
+    (field) => {
+      const payload = valid({ customFields: { [CF]: "CC-42" } });
+      delete (payload as Record<string, unknown>)[field];
+      expect(createPurchaseOrderSchema.safeParse(payload).success).toBe(false);
+    },
+  );
+});
+
 describe("createPurchaseOrderSchema — lines", () => {
   it("rejects an empty items array", () => {
     expect(createPurchaseOrderSchema.safeParse(valid({ items: [] })).success).toBe(false);

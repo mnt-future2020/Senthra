@@ -10,9 +10,14 @@ export function joinAddressLines(parts: (string | null | undefined)[]): string[]
 
 // Force a pdfkit-safe raster (PNG) + bounded height for a Cloudinary asset — pdfkit embeds only
 // PNG/JPEG, so a webp/avif/svg logo or signature would otherwise fail to draw. No-op otherwise.
+//
+// `fl_png32` is load-bearing: plain `f_png` lets Cloudinary answer a few-colour image (a flat logo, a
+// two-tone signature) with a 1-, 2- or 4-bit PALETTE PNG, and pdfkit draws those as a scrambled strip
+// of blocks. Forcing 32-bit RGBA gives pdfkit the one PNG shape it always draws exactly — alpha kept, so
+// a transparent logo still sits cleanly on the accent band.
 export function pdfSafeImageUrl(url: string): string {
   if (url.includes("res.cloudinary.com/") && url.includes("/upload/") && !url.includes("/upload/f_")) {
-    return url.replace("/upload/", "/upload/f_png,h_400,c_limit/");
+    return url.replace("/upload/", "/upload/f_png,fl_png32,h_400,c_limit/");
   }
   return url;
 }

@@ -7,6 +7,7 @@ export type Section =
   | "email"
   | "email-templates"
   | "operations"
+  | "purchase-orders"
   | "legal";
 
 // Props the dashboard passes down so the Appearance section can edit personal

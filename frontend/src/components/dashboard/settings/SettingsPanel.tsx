@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ShieldCheck, Palette, Plug, Mail, MailCheck, Paintbrush, Building2, ArrowRightLeft, FileText } from "lucide-react";
+import { ShieldCheck, Palette, Plug, Mail, MailCheck, Paintbrush, Building2, ArrowRightLeft, FileText, ClipboardList } from "lucide-react";
 
 import { AccountSection } from "./account/AccountSection";
 import { SecuritySection } from "./account/SecuritySection";
@@ -15,6 +15,8 @@ import { EmailSection } from "./email/EmailSection";
 import { EmailTemplatesSection } from "./email/EmailTemplatesSection";
 import { OperationsSection } from "./operations/OperationsSection";
 import { LegalSection } from "./legal/LegalSection";
+import { PoDocumentBrandingCard } from "./purchase-orders/PoDocumentBrandingCard";
+import { PoCustomFieldsCard } from "./purchase-orders/PoCustomFieldsCard";
 import { useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { useAuth } from "@/hooks/useAuth";
 import { SessionsCard } from "@/components/account/SessionsCard";
@@ -41,6 +43,7 @@ const NAV: {
   { id: "email", label: "Email", icon: Mail, desc: "SMTP & delivery", requires: "settings.view" },
   { id: "email-templates", label: "Email Templates", icon: MailCheck, desc: "Customize sent emails", requires: "email_templates.view" },
   { id: "operations", label: "Operations", icon: ArrowRightLeft, desc: "Transfers & workflow", requires: "settings.view" },
+  { id: "purchase-orders", label: "Purchase Orders", icon: ClipboardList, desc: "PO document & custom fields", requires: "settings.view" },
   { id: "legal", label: "Privacy Policy", icon: FileText, desc: "Draft, publish & history", requires: "policy.view" },
 ];
 
@@ -147,6 +150,12 @@ export function SettingsPanel(appearance: AppearanceProps) {
           {activeSection === "email" && <EmailSection />}
           {activeSection === "email-templates" && <EmailTemplatesSection />}
           {activeSection === "operations" && <OperationsSection />}
+          {activeSection === "purchase-orders" && (
+            <>
+              <PoDocumentBrandingCard />
+              <PoCustomFieldsCard />
+            </>
+          )}
           {activeSection === "legal" && <LegalSection />}
         </div>
       </div>

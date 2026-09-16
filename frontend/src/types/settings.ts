@@ -41,6 +41,10 @@ export interface Settings extends Branding {
   // Effective value (default-filled by the backend). Only affects new items — an existing code, and
   // therefore the barcode printed from it, never changes.
   rentalCodePrefix: string;
+  // PO document branding — the PO PDF's OWN logo / accent colour, "" when unset (the PDF then uses the
+  // app's logoUrl / brandColor above). Never applied to the app itself or to emails.
+  poDocLogoUrl: string;
+  poDocAccentColor: string;
   // Company profile (legal identity for official documents) + regional formatting.
   // Default-filled by the backend (country/timezone/dateFormat/timeFormat).
   companyLegalName: string;

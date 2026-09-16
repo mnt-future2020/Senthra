@@ -13,6 +13,8 @@ import type { PoLineRow, PoRentalLineRow, PurchaseOrderWithRelations } from "./p
 import { buildRentalLineRows, committedHireRow, hireLineUntouched } from "./rentalLine.rows.js";
 import { rentalLineIdentity } from "./rentalLine.validation.js";
 import * as poEmail from "./purchase-order.email.js";
+import * as customFieldService from "./poCustomField.service.js";
+import { readStoredCustomFields, type StoredPoCustomField } from "./poCustomField.values.js";
 import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
 import * as jobRepo from "#modules/job/job.repository.js";
 import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
@@ -292,6 +294,9 @@ export interface PublicPurchaseOrder {
   paymentTerms: string | null;
   internalNotes: string | null;
   supplierNotes: string | null;
+  // Additional information (PO custom fields): label + print-flag snapshots with each value. `[]` for
+  // an order that has none. Informational only — nothing reads it but the screen and the PDF.
+  customFields: StoredPoCustomField[];
   items: PublicPoItem[];
   rentalItems: PublicPoRentalLine[];
   attachments: PublicPoAttachment[];
@@ -427,6 +432,7 @@ function toPublic(po: PurchaseOrderWithRelations): PublicPurchaseOrder {
     paymentTerms: po.paymentTerms,
     internalNotes: po.internalNotes,
     supplierNotes: po.supplierNotes,
+    customFields: readStoredCustomFields(po.customFields),
     items: po.items.map((i) => ({
       id: i.id,
       irmItemId: i.irmItemId,
@@ -900,6 +906,10 @@ export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor
   // BOTH kinds of line — a hire-only order's total is its hires.
   const totals = computeTotals([...lineRows, ...rentalRows]);
   const actorLabel = actor?.email ?? null;
+  // Additional information (PO custom fields) — informational only: resolved after every commercial
+  // input above and fed into nothing but the stored snapshot. Omitted from the row when there are none,
+  // so an order raised without them is stored exactly as it always was.
+  const customFields = input.customFields ? await customFieldService.resolveCustomFieldValues([], input.customFields) : [];
 
   const created = await poRepo.createWithCode(
     {
@@ -923,6 +933,7 @@ export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor
       paymentTerms: trimToNull(input.paymentTerms) ?? supplierDefaultPaymentTerms(supplier),
       internalNotes: trimToNull(input.internalNotes),
       supplierNotes: trimToNull(input.supplierNotes),
+      ...(customFields.length ? { customFields } : {}),
       createdBy: actorLabel,
       updatedBy: actorLabel,
     },
@@ -977,6 +988,9 @@ export async function createPurchaseOrdersBySplit(
   // splits into — through the shared builder, so a hire raised here is the row conversion would
   // have produced from a request. An inactive item fails everything before a single write.
   const rentalRows = await buildRentalLineRows(rentalItems);
+  // Additional information is a SHARED header field, like the notes: resolved once and carried onto
+  // every order the split produces. Informational only — see createPurchaseOrder.
+  const customFields = input.customFields ? await customFieldService.resolveCustomFieldValues([], input.customFields) : [];
 
   // Pre-validate EVERY group and build its header + lines BEFORE any write, so an invalid group
   // (inaccessible / inactive warehouse, inactive item) fails the whole request with zero side effects.
@@ -1013,6 +1027,7 @@ export async function createPurchaseOrdersBySplit(
         paymentTerms: trimToNull(input.paymentTerms) ?? supplierDefaultPaymentTerms(supplier),
         internalNotes: trimToNull(input.internalNotes),
         supplierNotes: trimToNull(input.supplierNotes),
+        ...(customFields.length ? { customFields } : {}),
         createdBy: actorLabel,
         updatedBy: actorLabel,
       },
@@ -1068,6 +1083,15 @@ export async function updatePurchaseOrder(id: string, input: UpdatePurchaseOrder
   if (input.paymentTerms !== undefined) headerPatch.paymentTerms = trimToNull(input.paymentTerms);
   if (input.internalNotes !== undefined) headerPatch.internalNotes = trimToNull(input.internalNotes);
   if (input.supplierNotes !== undefined) headerPatch.supplierNotes = trimToNull(input.supplierNotes);
+  // Additional information, merged onto what the draft already stores (see mergeCustomFieldValues) —
+  // under the SAME draft-only rule as every field above, enforced at the top of this function. Omitted
+  // from the body = left exactly as stored.
+  if (input.customFields !== undefined) {
+    headerPatch.customFields = await customFieldService.resolveCustomFieldValues(
+      readStoredCustomFields(existing.customFields),
+      input.customFields,
+    );
+  }
 
   let result: PurchaseOrderWithRelations;
   const linesTouched = input.items !== undefined || input.rentalItems !== undefined;
