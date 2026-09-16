@@ -90,6 +90,29 @@ function po(over: Record<string, unknown> = {}): PurchaseOrderWithRelations {
   } as unknown as PurchaseOrderWithRelations;
 }
 
+describe("buildPurchaseOrderDocument — additional information", () => {
+  it("carries only the printable, non-empty custom fields, in stored order", () => {
+    const d = buildPurchaseOrderDocument(
+      po({
+        customFields: [
+          { fieldId: "1".repeat(24), label: "Cost centre", value: "CC-42", printOnPdf: true },
+          { fieldId: "2".repeat(24), label: "Internal ref", value: "SECRET", printOnPdf: false },
+          { fieldId: "3".repeat(24), label: "Site contact", value: "Dana, 0800", printOnPdf: true },
+        ],
+      }),
+      ctx(),
+    );
+    expect(d.customFields).toEqual([
+      { label: "Cost centre", value: "CC-42" },
+      { label: "Site contact", value: "Dana, 0800" },
+    ]);
+  });
+
+  it("is empty for an order without custom fields (every order raised before them)", () => {
+    expect(buildPurchaseOrderDocument(po(), ctx()).customFields).toEqual([]);
+  });
+});
+
 describe("buildPurchaseOrderDocument", () => {
   it("maps the company header + order meta", () => {
     const d = buildPurchaseOrderDocument(po(), ctx());

@@ -2,7 +2,7 @@ import { api, apiBlob } from "@/lib/api";
 import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
 import { downloadBlob } from "@/lib/download";
-import type { PoPriority, PurchaseOrder } from "@/types/purchase-order";
+import type { PoCustomFieldDefinition, PoPriority, PurchaseOrder } from "@/types/purchase-order";
 import type { RentalLinePayload } from "@/components/dashboard/purchase-requests/rentalLineRows";
 import type { SplitRentalLinePayload } from "@/components/dashboard/purchase-orders/poRentalLines";
 
@@ -85,6 +85,9 @@ export interface PurchaseOrderPayload {
   paymentTerms?: string | null;
   internalNotes?: string;
   supplierNotes?: string;
+  // Additional information: `{ [definitionId]: text }`. A present key sets (blank = clears) that field;
+  // an omitted key — or the whole object omitted — leaves the stored value as it is.
+  customFields?: Record<string, string>;
   items?: PoLinePayload[];
   // Hired equipment on the order — the SAME line a purchase request carries. On an edit: sent →
   // the order's hires are replaced by these; omitted → left exactly as stored.
@@ -116,6 +119,8 @@ export interface PurchaseOrderSplitPayload {
   paymentTerms?: string | null;
   internalNotes?: string;
   supplierNotes?: string;
+  // Additional information — copied onto every order the split produces, like the notes.
+  customFields?: Record<string, string>;
   // Both arrays are optional INDIVIDUALLY — a hire-only order is legitimate — but the backend
   // refuses a body with no line of either kind.
   items?: SplitPoLinePayload[];
@@ -331,4 +336,24 @@ export function getSupplierProcurementSummary(supplierId: string): Promise<Suppl
 
 export function removeAttachment(id: string, attachmentId: string): Promise<PurchaseOrder> {
   return mutate(api<{ purchaseOrder: PurchaseOrder }>(`/purchase-orders/${id}/attachments/${attachmentId}`, { method: "DELETE" }));
+}
+
+// --- PO custom fields (Settings → Purchase Orders) ---------------------------
+// Definitions are READ by anyone working with orders (the form offers the active ones) and CHANGED only
+// with settings.manage. The values themselves travel on the ordinary create / draft-edit payloads.
+export function listPoCustomFields(): Promise<PoCustomFieldDefinition[]> {
+  return api<{ fields: PoCustomFieldDefinition[] }>("/purchase-orders/custom-fields").then((r) => r.fields);
+}
+export function createPoCustomField(payload: { label: string; printOnPdf?: boolean }): Promise<PoCustomFieldDefinition> {
+  return api<{ field: PoCustomFieldDefinition }>("/purchase-orders/custom-fields", { method: "POST", body: payload }).then((r) => r.field);
+}
+export function updatePoCustomField(
+  id: string,
+  payload: { label?: string; active?: boolean; printOnPdf?: boolean },
+): Promise<PoCustomFieldDefinition> {
+  return api<{ field: PoCustomFieldDefinition }>(`/purchase-orders/custom-fields/${id}`, { method: "PATCH", body: payload }).then((r) => r.field);
+}
+// The COMPLETE list of ids in their new order.
+export function reorderPoCustomFields(ids: string[]): Promise<PoCustomFieldDefinition[]> {
+  return api<{ fields: PoCustomFieldDefinition[] }>("/purchase-orders/custom-fields/order", { method: "PUT", body: { ids } }).then((r) => r.fields);
 }

@@ -505,6 +505,14 @@ describe("convert — generate the PO from an approved PRF (one per PRF, transac
     expect(auditActions()).toEqual(expect.arrayContaining(["purchase_request.converted", "purchase_order.created"]));
   });
 
+  // PO custom fields are a PO-only, additive feature: the PRF has none and conversion is unchanged, so
+  // the draft is minted with no `customFields` at all — its values are filled in while it is a draft.
+  it("mints the draft with no additional-information values (custom fields are not carried from the PRF)", async () => {
+    await convertPurchaseRequest(PRF_ID, { type: "user", id: "u1", email: "fin@x.co", permissions: [] });
+    const [, header] = mockCreatePoTx.mock.calls[0];
+    expect(header).not.toHaveProperty("customFields");
+  });
+
   // THE CONCURRENCY PROOF DEPENDS ON THIS. Removing a PRF attachment destroys its Cloudinary file
   // only after re-reading the PRF and finding it still `draft`. That is safe because a Reopen
   // (approved → draft) — the one transition that could make the re-read say `draft` while a

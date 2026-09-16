@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Hired kit on a job: scanned out to an engineer, scanned back to the warehouse, and NEVER consumed,
 // NEVER written off as lost, and NEVER posted to an owned-stock ledger.
@@ -147,8 +147,12 @@ beforeEach(() => {
     await apply({}, "m1", "GM-0001");
     return { id: "m1", code: "GM-0001", items: [] };
   }) as never);
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-01T12:00:00Z"));
 });
 
+
+afterEach(() => vi.useRealTimers());
 describe("scanLookup — a rental label resolves to a specific hire", () => {
   it("binds the scan to the hire whose deadline is soonest", async () => {
     // Two live hires of the same tester. The one ending in September must be the one that goes out:
@@ -162,6 +166,7 @@ describe("scanLookup — a rental label resolves to a specific hire", () => {
 
     expect(m).toMatchObject({ source: "rental", rentalItemId: RENTAL_ID, purchaseOrderRentalLineId: HIRE_ID, jobKitLineId: "k1" });
     expect(m.hire).toMatchObject({ poCode: "PO-0042" });
+
     // The BOUND hire's figure, not the depot's 6. postIssue commits against this one row, so a
     // cross-hire total here advertised headroom the post would then refuse.
     expect(m.available).toBe(3);

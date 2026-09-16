@@ -8,6 +8,7 @@ import { incotermLabel } from "#modules/purchase-order/purchase-order.validation
 import { formatDate, formatMoney } from "./document.formatter.js";
 import { joinAddressLines } from "./document.utils.js";
 import { returnLocationLine } from "#modules/purchase-order/rentalReturn.js";
+import { printableCustomFields } from "#modules/purchase-order/poCustomField.values.js";
 import { billablePeriods, rateBasisLabel, type RatePeriod } from "../../utils/rental-pricing.js";
 import type { DocumentPerson } from "#modules/user/user.service.js";
 import type { DocumentContext, PurchaseOrderDocumentData } from "./document.types.js";
@@ -171,6 +172,9 @@ export function buildPurchaseOrderDocument(
       vatLabel: singleVatRate(po) ?? "VAT",
       grandTotal: formatMoney(po.grandTotalPence, currency),
     },
+    // Additional information: only the custom-field values set to print, never an empty row. Read
+    // defensively — a malformed Json entry is dropped rather than failing the whole document.
+    customFields: printableCustomFields(po.customFields),
     notes: po.supplierNotes?.trim() ?? "",
   };
 }

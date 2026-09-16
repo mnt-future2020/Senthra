@@ -37,6 +37,7 @@ import { returnLegSummary } from "@/lib/rentalReturn";
 import { hireDeliveryWarning } from "@/lib/hireDelivery";
 import { Notice } from "@/components/ui/Notice";
 import { issueEligibility, markSentPayload } from "./issueActions";
+import { visibleCustomFieldValues } from "./poCustomFields";
 import { HireDeliveries, HireDeliveriesHeading } from "./HireDeliveries";
 import { HireCustodyTimeline } from "./HireCustodyTimeline";
 
@@ -705,6 +706,27 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <p className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">{label}</p>
       <div className="mt-0.5 text-sm wrap-break-word text-[var(--ink)]">{children || "—"}</div>
     </div>
+  );
+}
+
+/**
+ * Additional information — the order's PO custom-field values (Settings → Purchase Orders). Renders
+ * nothing unless the order holds at least one, so an order without any looks exactly as it always did.
+ * Each value carries the label it was saved under, so a renamed or deactivated field still reads.
+ */
+export function AdditionalInformationCard({ po }: { po: Pick<PurchaseOrder, "customFields"> }) {
+  const values = visibleCustomFieldValues(po);
+  if (values.length === 0) return null;
+  return (
+    <Card title="Additional information">
+      <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2">
+        {values.map((v) => (
+          <Field key={v.fieldId} label={v.label}>
+            {v.value}
+          </Field>
+        ))}
+      </div>
+    </Card>
   );
 }
 
@@ -1519,6 +1541,7 @@ function Overview({
             </div>
           </Card>
         )}
+        <AdditionalInformationCard po={po} />
       </div>
     </div>
   );

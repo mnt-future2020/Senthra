@@ -14,7 +14,7 @@ import {
   storedLoginSubtext,
 } from "./branding.defaults.js";
 import { decryptSecret, encryptSecret } from "../../utils/crypto.js";
-import { safeBrandColor } from "../../utils/email-html.js";
+import { DEFAULT_BRAND_COLOR, safeBrandColor } from "../../utils/email-html.js";
 import { badRequest } from "../../utils/http-error.js";
 
 // Resolve Cloudinary credentials: UI-configured (DB) takes precedence, then env.
@@ -79,6 +79,23 @@ export const DEFAULT_OVERDUE_AFTER_DAYS = 14;
 // "3650" quietly turning the overdue list into "every job we have ever run".
 export const MIN_OVERDUE_AFTER_DAYS = 1;
 export const MAX_OVERDUE_AFTER_DAYS = 365;
+
+// The colours the PO document accepts: #RGB or #RRGGBB. Narrower than brandColor on purpose — pdfkit's
+// colour parser mis-reads the 4- and 8-digit (alpha) forms, so they are refused rather than mis-drawn.
+export const PO_ACCENT_COLOR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+// The global branding colour permits CSS alpha forms for the dashboard and email. A PO PDF cannot
+// consume them, so strip alpha here at the document-specific boundary without changing global branding.
+function pdfSafeBrandColor(value: string | null | undefined): string {
+  const color = safeBrandColor(value);
+  if (PO_ACCENT_COLOR_RE.test(color)) return color;
+  if (/^#[0-9a-fA-F]{4}$/.test(color)) {
+    return `#${[...color.slice(1, 4)].map((channel) => channel + channel).join("")}`;
+  }
+  if (/^#[0-9a-fA-F]{8}$/.test(color)) return color.slice(0, 7);
+  // Unreachable in practice — safeBrandColor already replaced anything malformed with this default.
+  return DEFAULT_BRAND_COLOR;
+}
 
 // Clean a stored/configured prefix into a usable code: uppercase, letters only,
 // 2–5 chars. Anything shorter/invalid falls back to the default, so employee-ID
@@ -228,6 +245,29 @@ export async function getRegionalSettings(): Promise<RegionalSettings> {
   };
 }
 
+export interface PurchaseOrderDocumentBranding {
+  logoUrl: string;
+  accentColor: string;
+}
+
+/**
+ * The logo and accent colour the PURCHASE ORDER PDF prints with: the PO-specific overrides from
+ * Settings → Purchase Orders when set, otherwise the app branding — exactly the values every PO PDF
+ * used before the overrides existed, so an install that never sets them renders unchanged.
+ *
+ * Read on every render (download, supplier email, issued archive) and snapshotted onto nothing: the
+ * archived issued copy is the frozen record, as it already is for every other letterhead detail. The PO
+ * document is its only reader — the app shell, emails and any other document never see these values.
+ */
+export async function getPurchaseOrderDocumentBranding(): Promise<PurchaseOrderDocumentBranding> {
+  const s = await settingsRepo.getOrCreate();
+  const accent = s.poDocAccentColor?.trim();
+  return {
+    logoUrl: s.poDocLogoUrl || s.logoUrl || "",
+    accentColor: accent && PO_ACCENT_COLOR_RE.test(accent) ? accent : pdfSafeBrandColor(s.brandColor),
+  };
+}
+
 // Never send secrets (Google client secret, SMTP password) to the browser —
 // only whether one is set.
 export interface PublicSettings extends PublicBranding {
@@ -250,6 +290,10 @@ export interface PublicSettings extends PublicBranding {
   stockCodePrefix: string;
   irmCodePrefix: string;
   rentalCodePrefix: string;
+  // PO document branding — the STORED overrides, "" when unset (the PO PDF then uses the app logo /
+  // brand colour above; the Settings screen shows that fallback itself).
+  poDocLogoUrl: string;
+  poDocAccentColor: string;
   // Company profile (legal identity for documents) + regional formatting. Default-filled on read.
   companyLegalName: string;
   companyRegNumber: string;
@@ -306,6 +350,10 @@ function publicSettings(s: Settings): PublicSettings {
 
     // Rental item-code prefix (effective value, default-filled).
     rentalCodePrefix: normalizeRentalCodePrefix(s.rentalCodePrefix),
+
+    // PO document branding overrides (raw; "" when unset).
+    poDocLogoUrl: s.poDocLogoUrl || "",
+    poDocAccentColor: s.poDocAccentColor || "",
 
     // Company profile (text fields empty when unset; country/regional default-filled).
     companyLegalName: s.companyLegalName || "",
@@ -386,6 +434,9 @@ export interface UpdateSettingsParams {
   stockCodePrefix?: string;
   irmCodePrefix?: string;
   rentalCodePrefix?: string;
+  // PO document branding. The logo can only be CLEARED here ("") — it is set by the upload.
+  poDocLogoUrl?: string;
+  poDocAccentColor?: string;
   // Company profile + regional (all optional; empty string clears back to null → default on read).
   companyLegalName?: string;
   companyRegNumber?: string;
@@ -501,6 +552,14 @@ export async function updateSettings(input: UpdateSettingsParams): Promise<Publi
     data.rentalCodePrefix = input.rentalCodePrefix.trim().toUpperCase() || null;
   }
 
+  // --- PO document branding (the PO PDF only). Empty clears back to the app branding. The logo is only
+  // ever cleared here (validation accepts "" alone); a colour is stored only when pdfkit can draw it.
+  if (typeof input.poDocLogoUrl === "string") data.poDocLogoUrl = input.poDocLogoUrl.trim() || null;
+  if (typeof input.poDocAccentColor === "string") {
+    const c = input.poDocAccentColor.trim();
+    data.poDocAccentColor = c && PO_ACCENT_COLOR_RE.test(c) ? c : null;
+  }
+
   // --- Company profile + regional (trim; empty string clears to null → default applies on read) ---
   if (typeof input.companyLegalName === "string") data.companyLegalName = input.companyLegalName.trim() || null;
   if (typeof input.companyRegNumber === "string") data.companyRegNumber = input.companyRegNumber.trim() || null;
@@ -529,9 +588,11 @@ export async function updateSettings(input: UpdateSettingsParams): Promise<Publi
   return publicSettings(updated);
 }
 
-// Upload a logo/favicon image to Cloudinary and save its URL on the settings row.
+// Upload a logo/favicon image to Cloudinary and save its URL on the settings row. "po_logo" is the
+// PURCHASE ORDER document's own logo: it lands on `poDocLogoUrl` and changes nothing about the app's
+// branding.
 export async function uploadBrandingImage(
-  type: "logo" | "favicon",
+  type: "logo" | "favicon" | "po_logo",
   image: string,
 ): Promise<{ url: string; settings: PublicSettings }> {
   const s = await settingsRepo.getOrCreate();
@@ -543,9 +604,9 @@ export async function uploadBrandingImage(
   }
   // Deterministic public id (`logo` / `favicon`) with overwrite — a replacement lands on the same
   // asset, so there is never an older file to clean up and no identity worth storing.
-  const { url } = await uploadToCloudinary(image, type, creds);
+  const { url } = await uploadToCloudinary(image, type === "po_logo" ? "po-logo" : type, creds);
   const data: Prisma.SettingsUpdateInput =
-    type === "logo" ? { logoUrl: url } : { faviconUrl: url };
+    type === "logo" ? { logoUrl: url } : type === "favicon" ? { faviconUrl: url } : { poDocLogoUrl: url };
   const updated = await settingsRepo.update(s.id, data);
   return { url, settings: publicSettings(updated) };
 }

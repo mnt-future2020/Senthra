@@ -32,7 +32,14 @@ import { resolveSupplierPaymentTerms } from "@/lib/paymentTerms";
 import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { Notice } from "@/components/ui/Notice";
 import { formatDate, formatMoney, PoStatusBadge } from "./poStatus";
-import type { PoPriority, PurchaseOrder } from "@/types/purchase-order";
+import {
+  activeCustomFieldDefinitions,
+  customFieldsPayload,
+  initialCustomFieldValues,
+  PO_CUSTOM_FIELD_VALUE_MAX,
+  retainedCustomFieldValues,
+} from "./poCustomFields";
+import type { PoCustomFieldDefinition, PoPriority, PurchaseOrder } from "@/types/purchase-order";
 import type { RentalItem } from "@/types/rental";
 import type { Supplier } from "@/types/supplier";
 import type { IrmItem } from "@/types/irm";
@@ -99,6 +106,12 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
   const [overrideAddress, setOverrideAddress] = React.useState(Boolean(o?.deliveryAddress));
   const [internalNotes, setInternalNotes] = React.useState(o?.internalNotes ?? "");
   const [supplierNotes, setSupplierNotes] = React.useState(o?.supplierNotes ?? "");
+  // Additional information (PO custom fields — Settings → Purchase Orders). Informational only. The
+  // definitions load on their own: if they fail, the section stays hidden and no values are sent, so
+  // the server keeps whatever the order already stores.
+  const [customFieldValues, setCustomFieldValues] = React.useState<Record<string, string>>(() => initialCustomFieldValues(o));
+  // `null` until the definitions arrive: an empty list would mean "every stored value is retired".
+  const [customFieldDefs, setCustomFieldDefs] = React.useState<PoCustomFieldDefinition[] | null>(null);
   const [lineRows, setLineRows] = React.useState<LineRow[]>(() => {
     if (o && o.items.length) {
       return o.items.map((i) => ({ _key: crypto.randomUUID(), irmItemId: i.irmItemId, warehouseId: o.warehouseId ?? "", quantity: String(i.quantity), unitPrice: i.unitPrice.toFixed(2), vatRate: String(i.vatRate), notes: i.notes ?? "" }));
@@ -158,6 +171,26 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
     ],
     [mode, canSeeRentals],
   );
+
+  React.useEffect(() => {
+    let live = true;
+    poService.listPoCustomFields().then(
+      (defs) => {
+        if (live) setCustomFieldDefs(defs);
+      },
+      () => {
+        // No section — see the state above.
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+  // The section exists only while at least one field is active — otherwise the form is exactly as it was.
+  // Both stay empty until the definitions load: before that nothing can tell a LIVE field from a
+  // retired one, and guessing would label the order's own values "no longer in use".
+  const activeCustomFields = activeCustomFieldDefinitions(customFieldDefs ?? []);
+  const retainedCustomFields = customFieldDefs ? retainedCustomFieldValues(o, customFieldDefs) : [];
 
   /**
    * A saved rental line can name an item outside the page loaded at mount, and the saved line
@@ -380,6 +413,9 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
     paymentTerms: paymentTerms.trim() || null,
     internalNotes: internalNotes.trim(),
     supplierNotes: supplierNotes.trim(),
+    // Sent only when an ACTIVE field exists. The section can also be on screen for retained values
+    // alone — those are never re-sent — and an omitted key leaves everything stored untouched.
+    ...(activeCustomFields.length ? { customFields: customFieldsPayload(activeCustomFields, customFieldValues) } : {}),
   });
   const lineCore = (r: LineRow) => ({
     irmItemId: r.irmItemId,
@@ -857,6 +893,44 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
               </div>
             </div>
           </FormSection>
+
+          {(activeCustomFields.length > 0 || retainedCustomFields.length > 0) && (
+            <FormSection title="Additional information" description="Extra details recorded on this order. They don't affect totals, approval or receiving.">
+              <div className="grid gap-4 sm:grid-cols-2">
+                {activeCustomFields.map((d) => (
+                  <div key={d.id}>
+                    <label className={labelCls}>{d.label}</label>
+                    <input
+                      className={inputCls}
+                      value={customFieldValues[d.id] ?? ""}
+                      onChange={(e) => {
+                        setCustomFieldValues((v) => ({ ...v, [d.id]: e.target.value }));
+                        touch();
+                      }}
+                      maxLength={PO_CUSTOM_FIELD_VALUE_MAX}
+                      aria-label={d.label}
+                    />
+                    <p className="mt-1.5 text-[11px] text-[var(--faint)]">
+                      {d.printOnPdf ? "Printed on the purchase order." : "Internal — not printed on the purchase order."}
+                    </p>
+                  </div>
+                ))}
+              </div>
+              {retainedCustomFields.length > 0 && (
+                <div className="mt-4 rounded-xl border border-dashed border-[var(--border)] px-3 py-2.5">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">No longer in use — kept on this order</p>
+                  <dl className="mt-1.5 space-y-1 text-sm">
+                    {retainedCustomFields.map((v) => (
+                      <div key={v.fieldId} className="flex flex-wrap gap-x-2">
+                        <dt className="font-semibold text-[var(--muted)]">{v.label}:</dt>
+                        <dd className="wrap-break-word text-[var(--ink)]">{v.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              )}
+            </FormSection>
+          )}
         </div>
 
         <aside className="lg:sticky lg:top-6 lg:self-start">

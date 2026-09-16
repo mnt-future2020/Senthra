@@ -68,6 +68,30 @@ export interface PoAttachment {
   createdAt: string;
 }
 
+/**
+ * One additional-information value on an order (a PO custom field). `label` and `printOnPdf` are
+ * SNAPSHOTS of the field's definition taken while the order was a draft, so a later rename or
+ * deactivation never leaves an existing order unreadable.
+ */
+export interface PoCustomFieldValue {
+  fieldId: string;
+  label: string;
+  value: string;
+  printOnPdf: boolean;
+}
+
+/** A PO custom-field definition (Settings → Purchase Orders). Text only, informational only. */
+export interface PoCustomFieldDefinition {
+  id: string;
+  label: string;
+  type: "text";
+  active: boolean;
+  printOnPdf: boolean;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 import type { PoRentalLine } from "./rental";
 
 export interface PurchaseOrder {
@@ -123,6 +147,9 @@ export interface PurchaseOrder {
   paymentTerms: string | null;
   internalNotes: string | null;
   supplierNotes: string | null;
+  // Additional information (PO custom fields). Optional only so a response cached from before the
+  // feature still type-checks — the server always sends it (`[]` when the order has none).
+  customFields?: PoCustomFieldValue[];
   items: PoItem[];
   /** Committed hires on this order — the rows the deadline badges count. */
   rentalItems: PoRentalLine[];

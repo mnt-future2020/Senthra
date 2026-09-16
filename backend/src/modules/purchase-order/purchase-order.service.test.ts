@@ -59,8 +59,11 @@ vi.mock("./purchase-order.email.js", () => ({
   notifyApproversPoSubmitted: vi.fn(() => Promise.resolve()),
   notifyPmAssigned: vi.fn(() => Promise.resolve()),
 }));
+// PO custom-field DEFINITIONS — read only when a body carries additional-information values.
+vi.mock("./poCustomField.repository.js", () => ({ findMany: vi.fn() }));
 
 import * as poRepo from "./purchase-order.repository.js";
+import * as customFieldRepo from "./poCustomField.repository.js";
 import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as documentService from "#modules/document/document.service.js";
@@ -234,6 +237,165 @@ describe("createPurchaseOrder — financials (server-calculated pence)", () => {
     expect(header.status).toBe("draft");
     expect(lines[0]).toMatchObject({ irmItemId: IRM_ID, itemName: "CAT6", lineTotalPence: 5000, vatRate: 20 });
     expect(auditActions()).toContain("purchase_order.created");
+  });
+});
+
+// ── Additional information (PO custom fields) ─────────────────────────────────────────────────
+// Informational only: stored as a label snapshot on the order, editable under the SAME draft-only rule
+// as every other header field, and read by nothing commercial.
+describe("additional information (PO custom fields) — informational only", () => {
+  const CF1 = "1".repeat(24);
+  const CF2 = "2".repeat(24);
+  const mockDefs = customFieldRepo.findMany as ReturnType<typeof vi.fn>;
+  const defRow = (id: string, over: Record<string, unknown> = {}) => ({
+    id,
+    label: `Field ${id[0]}`,
+    labelLower: `field ${id[0]}`,
+    type: "text",
+    active: true,
+    printOnPdf: true,
+    sortOrder: Number(id[0]),
+    createdBy: null,
+    updatedBy: null,
+    createdAt: new Date("2026-09-01T00:00:00Z"),
+    updatedAt: new Date("2026-09-01T00:00:00Z"),
+    ...over,
+  });
+  const baseCreate = {
+    supplierId: SUP_ID,
+    warehouseId: WH_ID,
+    orderDate: "2026-06-01",
+    expectedDeliveryDate: "2026-06-10",
+    items: [{ irmItemId: IRM_ID, quantity: 10, unitPricePence: 500, vatRate: 20 }],
+  };
+  type CreateInput = Parameters<typeof createPurchaseOrder>[0];
+  const stored = (over: Record<string, unknown> = {}) => ({ fieldId: CF1, label: "Cost centre", value: "CC-1", printOnPdf: true, ...over });
+
+  beforeEach(() => {
+    mockDefs.mockResolvedValue([defRow(CF1, { label: "Cost centre" }), defRow(CF2, { label: "Site contact", printOnPdf: false })]);
+    mockCreateWithCode.mockImplementation((header: Record<string, unknown>) => Promise.resolve(poRow({ ...header, items: [] })));
+  });
+
+  it("stores a label snapshot with each value on create — and every other header field exactly as without it", async () => {
+    await createPurchaseOrder(baseCreate as CreateInput);
+    await createPurchaseOrder({ ...baseCreate, customFields: { [CF1]: " CC-42 ", [CF2]: "Dana" } } as CreateInput);
+    const [plain, withFields] = mockCreateWithCode.mock.calls.map((c) => ({ ...(c[0] as Record<string, unknown>) }));
+    expect(withFields.customFields).toEqual([
+      { fieldId: CF1, label: "Cost centre", value: "CC-42", printOnPdf: true },
+      { fieldId: CF2, label: "Site contact", value: "Dana", printOnPdf: false },
+    ]);
+    // Totals, VAT, status, dates, notes — nothing else on the header moved.
+    delete withFields.customFields;
+    expect(withFields).toEqual(plain);
+    expect(plain).toMatchObject({ subtotalPence: 5000, vatPence: 1000, grandTotalPence: 6000, status: "draft" });
+  });
+
+  it("stores nothing — and reads no definitions — when a create carries no custom fields", async () => {
+    await createPurchaseOrder(baseCreate as CreateInput);
+    expect(mockCreateWithCode.mock.calls[0]![0]).not.toHaveProperty("customFields");
+    expect(mockDefs).not.toHaveBeenCalled();
+  });
+
+  it("stores no empty rows when every value is sent blank", async () => {
+    await createPurchaseOrder({ ...baseCreate, customFields: { [CF1]: "  ", [CF2]: "" } } as CreateInput);
+    expect(mockCreateWithCode.mock.calls[0]![0]).not.toHaveProperty("customFields");
+  });
+
+  it("carries the same values onto every order a split create produces", async () => {
+    mockCreateMany.mockImplementation((groups: { header: Record<string, unknown> }[]) =>
+      Promise.resolve(groups.map((g, i) => poRow({ ...g.header, id: String(i).repeat(24), code: `PO-000${i}` }))),
+    );
+    await createPurchaseOrdersBySplit({
+      supplierId: SUP_ID,
+      orderDate: "2026-06-01",
+      expectedDeliveryDate: "2026-06-10",
+      items: [
+        { irmItemId: IRM_ID, quantity: 1, unitPricePence: 100, warehouseId: WH_ID },
+        { irmItemId: IRM_ID, quantity: 1, unitPricePence: 100, warehouseId: WH_ID_2 },
+      ],
+      customFields: { [CF1]: "CC-42" },
+    } as Parameters<typeof createPurchaseOrdersBySplit>[0]);
+    const groups = mockCreateMany.mock.calls[0]![0] as { header: Record<string, unknown> }[];
+    expect(groups).toHaveLength(2);
+    for (const g of groups) {
+      expect(g.header.customFields).toEqual([{ fieldId: CF1, label: "Cost centre", value: "CC-42", printOnPdf: true }]);
+    }
+    expect(mockDefs).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an unknown custom field before anything is written", async () => {
+    await expect(
+      createPurchaseOrder({ ...baseCreate, customFields: { ["9".repeat(24)]: "x" } } as CreateInput),
+    ).rejects.toThrow(/no longer exists/);
+    expect(mockCreateWithCode).not.toHaveBeenCalled();
+  });
+
+  it("merges a draft edit onto what the order already stores, refreshing a renamed label", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "draft", customFields: [stored({ label: "Cost center" })] }));
+    await updatePurchaseOrder(PO_ID, { customFields: { [CF2]: "Dana" } });
+    expect(mockUpdate.mock.calls[0]![1].customFields).toEqual([
+      { fieldId: CF1, label: "Cost centre", value: "CC-1", printOnPdf: true },
+      { fieldId: CF2, label: "Site contact", value: "Dana", printOnPdf: false },
+    ]);
+  });
+
+  it("keeps a deactivated field's value on the order when the draft is saved again", async () => {
+    mockDefs.mockResolvedValue([defRow(CF1, { label: "Cost centre", active: false }), defRow(CF2, { label: "Site contact" })]);
+    mockFindById.mockResolvedValue(poRow({ status: "draft", customFields: [stored()] }));
+    await updatePurchaseOrder(PO_ID, { customFields: { [CF2]: "Dana" } });
+    expect(mockUpdate.mock.calls[0]![1].customFields).toContainEqual(stored());
+  });
+
+  it("refuses a new value for a deactivated field", async () => {
+    mockDefs.mockResolvedValue([defRow(CF1, { active: false })]);
+    mockFindById.mockResolvedValue(poRow({ status: "draft" }));
+    await expect(updatePurchaseOrder(PO_ID, { customFields: { [CF1]: "new" } })).rejects.toThrow(/no longer in use/);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("leaves stored values untouched when an edit does not mention them", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "draft", customFields: [stored()] }));
+    await updatePurchaseOrder(PO_ID, { description: "x" });
+    expect(mockUpdate.mock.calls[0]![1]).not.toHaveProperty("customFields");
+    expect(mockDefs).not.toHaveBeenCalled();
+  });
+
+  it("locks the values with the rest of the order once it has left draft", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "pending_approval", customFields: [stored()] }));
+    await expect(updatePurchaseOrder(PO_ID, { customFields: { [CF1]: "late" } })).rejects.toThrow(/only draft/i);
+    expect(mockDefs).not.toHaveBeenCalled();
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("returns [] for an order saved before the feature, and survives a malformed stored value", async () => {
+    mockFindById.mockResolvedValue(poRow());
+    await expect(getPurchaseOrder(PO_ID)).resolves.toMatchObject({ customFields: [] });
+    mockFindById.mockResolvedValue(poRow({ customFields: "garbage" }));
+    await expect(getPurchaseOrder(PO_ID)).resolves.toMatchObject({ customFields: [] });
+    mockFindById.mockResolvedValue(poRow({ customFields: [stored()] }));
+    await expect(getPurchaseOrder(PO_ID)).resolves.toMatchObject({ customFields: [stored()] });
+  });
+
+  it("never touches the PRF fast path: a matching PRF-born draft with custom fields still fast-approves", async () => {
+    mockFindById.mockResolvedValue(
+      poRow({
+        status: "draft",
+        purchaseRequestId: PRF_ID,
+        items: [{ id: "l1", irmItemId: IRM_ID, itemName: "CAT6", sku: null, baseUnit: null, quantity: 10, unitPricePence: 500, vatRate: 20, lineTotalPence: 5000, receivedQuantity: 0, notes: null, irmItem: null }],
+        customFields: [stored()],
+      }),
+    );
+    (prfRepo.findById as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: PRF_ID,
+      code: "PRF-0001",
+      supplierId: SUP_ID,
+      warehouseId: WH_ID,
+      currency: "GBP",
+      items: [{ irmItemId: IRM_ID, quantity: 10, unitPricePence: 500, vatRate: 20 }],
+    });
+    const r = await approvePurchaseOrder(PO_ID);
+    expect(r.divertedToReview).toBe(false);
+    expect(r.purchaseOrder.status).toBe("approved");
   });
 });
 

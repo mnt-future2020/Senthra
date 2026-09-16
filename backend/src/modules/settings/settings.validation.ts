@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { postcodeField as ukPostcode } from "../../utils/postcode.js";
-import { MAX_OVERDUE_AFTER_DAYS, MIN_OVERDUE_AFTER_DAYS } from "./settings.service.js";
+import { MAX_OVERDUE_AFTER_DAYS, MIN_OVERDUE_AFTER_DAYS, PO_ACCENT_COLOR_RE } from "./settings.service.js";
 
 // A network port is empty (clear it), or an integer 1–65535. Accepts the value
 // as a string (from a form input) or a number. Used by both the settings patch
@@ -91,6 +91,19 @@ export const updateSettingsSchema = z.object({
     .or(z.literal(""))
     .optional(),
 
+  // --- PO document branding (the PO PDF only; see getPurchaseOrderDocumentBranding) ---
+  // #RGB or #RRGGBB only: pdfkit mis-reads the alpha forms the app's brandColor accepts, so an 8-digit
+  // colour would print as the wrong colour on the supplier's document. Empty clears it → app colour.
+  poDocAccentColor: z
+    .string()
+    .trim()
+    .regex(PO_ACCENT_COLOR_RE, "PO accent colour must be a hex value like #1f3a8a.")
+    .or(z.literal(""))
+    .optional(),
+  // CLEAR ONLY. The PO logo is set by the branding upload (type "po_logo"), never typed in — the server
+  // fetches this image on every PO render, so it must only ever point at an asset we uploaded.
+  poDocLogoUrl: z.literal("", { error: "Upload the PO logo instead of entering a URL." }).optional(),
+
   // --- Company profile (legal identity for official documents). All optional;
   // empty string clears the field back to null (default applied on read). ---
   companyLegalName: z.string().max(200).optional(),
@@ -138,7 +151,8 @@ export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 // the binary at roughly 2.2 MB — comfortably above the 2 MB the UI allows.
 const MAX_IMAGE_DATA_URI_CHARS = 3 * 1024 * 1024;
 export const uploadBrandingSchema = z.object({
-  type: z.enum(["logo", "favicon"]),
+  // "po_logo" = the PURCHASE ORDER document's own logo (Settings → Purchase Orders), not the app's.
+  type: z.enum(["logo", "favicon", "po_logo"]),
   image: z
     .string()
     .max(MAX_IMAGE_DATA_URI_CHARS, "Image is too large (max ~2 MB).")

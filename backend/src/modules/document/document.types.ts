@@ -73,6 +73,13 @@ export interface PoDocLine {
   lineTotal: string;
 }
 
+// One ADDITIONAL INFORMATION row — a PO custom-field value set to print. Already filtered by the builder:
+// printable and non-empty only.
+export interface PoDocCustomField {
+  label: string;
+  value: string;
+}
+
 export interface PurchaseOrderDocumentData {
   meta: DocumentMeta;
   company: DocumentCompany;
@@ -106,6 +113,8 @@ export interface PurchaseOrderDocumentData {
   // `vatLabel` qualifies the VAT total with the rate ("VAT (20%)") when every line shares one, and
   // stays a plain "VAT" when they differ — there the per-line column is what explains the figure.
   totals: { subtotal: string; vat: string; vatLabel: string; grandTotal: string };
+  // The order's custom-field values that are set to print, in order. Empty = no section is drawn.
+  customFields: PoDocCustomField[];
   notes: string;
 }
 

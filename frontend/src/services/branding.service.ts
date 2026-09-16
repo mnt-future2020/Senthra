@@ -6,9 +6,10 @@ export function getBranding(): Promise<Branding> {
   return api<{ branding: Branding }>("/settings/branding").then((r) => r.branding);
 }
 
-// Upload a logo/favicon (data URI) → Cloudinary; returns the URL + updated settings.
+// Upload a logo/favicon (data URI) → Cloudinary; returns the URL + updated settings. "po_logo" is the
+// purchase order document's own logo (Settings → Purchase Orders) — it leaves the app branding alone.
 export function uploadBrandingImage(
-  type: "logo" | "favicon",
+  type: "logo" | "favicon" | "po_logo",
   image: string,
 ): Promise<{ url: string; settings: Settings }> {
   return api<{ url: string; settings: Settings }>("/settings/branding/upload", {
