@@ -9,6 +9,18 @@ export const REFRESH_COOKIE = "senthra_refresh";
 // on normal API calls (limits its exposure).
 const REFRESH_PATH = "/auth/refresh";
 
+export const TWO_FACTOR_COOKIE = "senthra_2fa";
+
+// Scoped to the 2FA endpoints only, exactly like REFRESH_PATH above — the challenge cookie is never
+// sent on a normal API call. It authenticates NOTHING: requireAuth reads ACCESS_COOKIE only, so a
+// browser holding just this cookie can reach no protected route.
+const TWO_FACTOR_PATH = "/auth/2fa";
+
+// The challenge TTL is 10 minutes and a resend re-bases it, so the cookie gets one TTL plus a
+// clock-skew buffer. The DB `expiresAt` is the authority: a cookie outliving its row simply yields
+// a 401 that clears it, never an extension.
+const TWO_FACTOR_MAX_AGE = 11 * 60 * 1000;
+
 const ACCESS_MAX_AGE = 60 * 60 * 1000; // 1h (slightly longer than the token, harmless)
 const REFRESH_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7d
 
@@ -50,4 +62,19 @@ export function setAuthCookies(
 export function clearAuthCookies(res: Response): void {
   res.clearCookie(ACCESS_COOKIE, { ...baseOptions(), path: "/" });
   res.clearCookie(REFRESH_COOKIE, { ...baseOptions(), path: REFRESH_PATH });
+}
+
+// Set (or refresh) the pending-2FA-challenge cookie. Called when a challenge opens, and AGAIN on
+// resend — a resend re-bases the challenge's expiry, so the cookie's lifetime has to move with it
+// or the cookie could die while the challenge is still live.
+export function setTwoFactorCookie(res: Response, token: string): void {
+  res.cookie(TWO_FACTOR_COOKIE, token, {
+    ...baseOptions(),
+    path: TWO_FACTOR_PATH,
+    maxAge: TWO_FACTOR_MAX_AGE,
+  });
+}
+
+export function clearTwoFactorCookie(res: Response): void {
+  res.clearCookie(TWO_FACTOR_COOKIE, { ...baseOptions(), path: TWO_FACTOR_PATH });
 }

@@ -12,6 +12,7 @@ import type {
   AdminPrincipal,
   CustomerPrincipal,
   Principal,
+  LoginResult,
   UserPrincipal,
 } from "@/types/auth";
 
@@ -25,8 +26,12 @@ export interface AuthState {
   // Permission check (admin holds everything; user checks their role permissions).
   can: (permission: string) => boolean;
   loading: boolean;
-  login: (email: string, password: string, remember?: boolean) => Promise<Principal>;
-  loginWithGoogle: (credential: string) => Promise<Principal>;
+  // Resolves to the principal, OR to a pending 2FA challenge — in which case NO session exists yet
+  // and `principal` deliberately stays null until completeTwoFactor succeeds.
+  login: (email: string, password: string, remember?: boolean) => Promise<LoginResult>;
+  loginWithGoogle: (credential: string, remember?: boolean) => Promise<LoginResult>;
+  /** Finish an email-2FA sign-in. The ONLY client path that turns a challenge into a session. */
+  completeTwoFactor: (code: string) => Promise<Principal>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
 }
@@ -85,22 +90,44 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const login = React.useCallback(
-    async (email: string, password: string, remember = true) => {
-      const next = await authService.login(email, password, remember);
+    async (email: string, password: string, remember = true): Promise<LoginResult> => {
+      const result = await authService.login(email, password, remember);
+      // A pending 2FA challenge is NOT a session. Leaving `principal` null is what keeps AuthGuard
+      // showing the neutral loader instead of the app chrome while the code is outstanding.
+      if (result.twoFactorRequired) return result;
       // A new session on this tab: whatever the last sign-out was, it is over.
       selfSignOut.current = false;
-      setPrincipal(next);
-      return next;
+      setPrincipal(result.principal);
+      return result;
     },
     [],
   );
 
-  const loginWithGoogle = React.useCallback(async (credential: string) => {
-    const next = await authService.loginWithGoogle(credential);
+  /**
+   * Finish an email-2FA sign-in.
+   *
+   * Authenticated state is centralised here rather than in the OTP component: this is the moment
+   * the session becomes real, so it is the moment `selfSignOut` resets and the principal lands.
+   */
+  const completeTwoFactor = React.useCallback(async (code: string): Promise<Principal> => {
+    const next = await authService.verifyTwoFactor(code);
     selfSignOut.current = false;
     setPrincipal(next);
     return next;
   }, []);
+
+  const loginWithGoogle = React.useCallback(
+    async (credential: string, remember = true): Promise<LoginResult> => {
+      const result = await authService.loginWithGoogle(credential, remember);
+      // Same rule as the password path: a pending challenge is NOT a session, so `principal` stays
+      // null until completeTwoFactor succeeds.
+      if (result.twoFactorRequired) return result;
+      selfSignOut.current = false;
+      setPrincipal(result.principal);
+      return result;
+    },
+    [],
+  );
 
   const logout = React.useCallback(async () => {
     // Before the request, not after: this is what the revoke handler reads when the server's push
@@ -154,7 +181,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ principal, admin, user, customer, can, loading, login, loginWithGoogle, logout, refresh }}
+      value={{ principal, admin, user, customer, can, loading, login, loginWithGoogle, completeTwoFactor, logout, refresh }}
     >
       {children}
     </AuthContext.Provider>

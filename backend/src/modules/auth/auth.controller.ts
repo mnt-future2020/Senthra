@@ -3,8 +3,15 @@ import type { Request } from "express";
 import * as authService from "./auth.service.js";
 import type { AuthMeta } from "./auth.service.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { clearAuthCookies, REFRESH_COOKIE, setAuthCookies } from "../../utils/cookies.js";
-import { forbidden, unauthorized } from "../../utils/http-error.js";
+import {
+  clearAuthCookies,
+  clearTwoFactorCookie,
+  REFRESH_COOKIE,
+  setAuthCookies,
+  setTwoFactorCookie,
+  TWO_FACTOR_COOKIE,
+} from "../../utils/cookies.js";
+import { forbidden, HttpError, unauthorized } from "../../utils/http-error.js";
 import type {
   ChangeCredentialsInput,
   ChangePasswordInput,
@@ -12,6 +19,7 @@ import type {
   GoogleLoginInput,
   LoginInput,
   ResetPasswordInput,
+  TwoFactorVerifyInput,
 } from "./auth.validation.js";
 
 // IP + user-agent snapshot recorded with a login (audit trail).
@@ -19,16 +27,110 @@ function authMeta(req: Request): AuthMeta {
   return { ip: req.ip, userAgent: req.get("user-agent") ?? undefined };
 }
 
-// POST /auth/login — unified: super-admin account or an active staff user.
+// POST /auth/login — unified: super-admin account, active staff user, or customer portal user.
+// With 2FA on this answers 202 and sets ONLY the challenge cookie: no session exists yet, so the
+// account's existing device is untouched until the emailed code is proven.
 export const login = asyncHandler(async (req, res) => {
   const { email, password, remember } = req.body as LoginInput;
-  const { principal, accessToken, refreshToken } = await authService.login(
-    email,
-    password,
-    authMeta(req),
-  );
-  setAuthCookies(res, accessToken, refreshToken, remember !== false);
-  res.json({ token: accessToken, principal });
+  const outcome = await authService.login(email, password, remember !== false, authMeta(req));
+
+  if (outcome.twoFactorRequired) {
+    setTwoFactorCookie(res, outcome.challengeToken);
+    res.status(202).json(publicChallenge(outcome));
+    return;
+  }
+
+  setAuthCookies(res, outcome.accessToken, outcome.refreshToken, remember !== false);
+  res.json({ token: outcome.accessToken, principal: outcome.principal });
+});
+
+// The browser-safe view of a pending challenge: masked email, expiry and resend state. Never the
+// code, the challenge token, the principal id or its type.
+function publicChallenge(c: {
+  email: string;
+  expiresInSeconds: number;
+  resendInSeconds: number;
+  resendsRemaining: number;
+}) {
+  return {
+    twoFactorRequired: true as const,
+    email: c.email,
+    // DURATIONS, not instants: the page counts them down against its own elapsed time, so a browser
+    // whose clock is wrong still sees the cooldown and the expiry the server is actually enforcing.
+    // Server-derived, so a page refresh resumes the REAL remainder instead of restarting a fresh 60s.
+    expiresInSeconds: c.expiresInSeconds,
+    resendInSeconds: c.resendInSeconds,
+    resendsRemaining: c.resendsRemaining,
+  };
+}
+
+// Raw challenge token from the httpOnly cookie. NEVER read from the body — a body-supplied token
+// would let another origin drive someone else's pending challenge.
+function challengeToken(req: Request): string {
+  return (req.cookies?.[TWO_FACTOR_COOKIE] as string | undefined) ?? "";
+}
+
+// GET /auth/2fa/challenge — is a challenge pending for this browser?
+// The login page calls this on mount; the cookie is httpOnly, so the page cannot look for itself.
+// Does not count as an attempt and does not extend the expiry.
+export const twoFactorChallenge = asyncHandler(async (req, res) => {
+  const pending = await authService.readTwoFactorChallenge(challengeToken(req));
+  if (!pending) {
+    clearTwoFactorCookie(res);
+    res.status(401).json({ error: "No pending verification." });
+    return;
+  }
+  res.json(publicChallenge(pending));
+});
+
+// A 410 means the challenge no longer exists (burned by too many wrong codes, expired, used). Drop
+// the stale cookie with it, so a refresh lands on the credential form instead of a dead OTP step.
+// Same shape as the /auth/refresh handler below, which clears its cookies on failure for the same
+// reason: the client must not keep presenting a credential the server has already thrown away.
+function clearChallengeIfEnded(res: Parameters<typeof clearTwoFactorCookie>[0], err: unknown): void {
+  if (err instanceof HttpError && err.status === 410) clearTwoFactorCookie(res);
+}
+
+// POST /auth/2fa/verify — the ONLY place a session is created when 2FA is on.
+export const twoFactorVerify = asyncHandler(async (req, res) => {
+  const { code } = req.body as TwoFactorVerifyInput;
+
+  let result;
+  try {
+    result = await authService.completeTwoFactorLogin(challengeToken(req), code, authMeta(req));
+  } catch (err) {
+    clearChallengeIfEnded(res, err);
+    throw err;
+  }
+
+  clearTwoFactorCookie(res);
+  setAuthCookies(res, result.accessToken, result.refreshToken, result.remember);
+  res.json({ token: result.accessToken, principal: result.principal });
+});
+
+// POST /auth/2fa/resend — a resend re-bases the challenge's expiry, so the cookie's lifetime is
+// refreshed alongside it or the cookie could lapse while the challenge is still live.
+export const twoFactorResend = asyncHandler(async (req, res) => {
+  const token = challengeToken(req);
+
+  let pending;
+  try {
+    pending = await authService.resendTwoFactorCode(token);
+  } catch (err) {
+    clearChallengeIfEnded(res, err);
+    throw err;
+  }
+
+  setTwoFactorCookie(res, token);
+  res.json(publicChallenge(pending));
+});
+
+// POST /auth/2fa/cancel — "Back to sign in". Deletes the challenge; touches NO session, because the
+// caller has never been authenticated. Idempotent.
+export const twoFactorCancel = asyncHandler(async (req, res) => {
+  await authService.cancelTwoFactorChallenge(challengeToken(req));
+  clearTwoFactorCookie(res);
+  res.status(204).end();
 });
 
 // GET /auth/me  (protected) — the resolved principal (admin, staff user, or customer).
@@ -132,13 +234,19 @@ export const googleConfig = asyncHandler(async (_req, res) => {
   res.json(await authService.getGoogleConfig());
 });
 
-// POST /auth/google — verify the Google ID token and start a session.
+// POST /auth/google — verify the Google ID token, then the SAME branch the password login takes:
+// with 2FA on this answers 202 with a challenge instead of a session, so Google is not a way around
+// the second factor.
 export const googleLogin = asyncHandler(async (req, res) => {
   const { credential, remember } = req.body as GoogleLoginInput;
-  const { principal, accessToken, refreshToken } = await authService.googleLogin(
-    credential,
-    authMeta(req),
-  );
-  setAuthCookies(res, accessToken, refreshToken, remember !== false);
-  res.json({ token: accessToken, principal });
+  const outcome = await authService.googleLogin(credential, remember !== false, authMeta(req));
+
+  if (outcome.twoFactorRequired) {
+    setTwoFactorCookie(res, outcome.challengeToken);
+    res.status(202).json(publicChallenge(outcome));
+    return;
+  }
+
+  setAuthCookies(res, outcome.accessToken, outcome.refreshToken, remember !== false);
+  res.json({ token: outcome.accessToken, principal: outcome.principal });
 });

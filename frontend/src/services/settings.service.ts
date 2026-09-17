@@ -51,6 +51,7 @@ export interface SettingsUpdate {
   timeFormat?: string;
   engineerTransferRequireSignature?: boolean;
   overdueAfterDays?: number;
+  emailTwoFactorEnabled?: boolean;
 }
 
 // Stale-while-revalidate cache (module-level, survives route navigation): switching

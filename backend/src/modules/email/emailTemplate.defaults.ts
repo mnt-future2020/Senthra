@@ -386,6 +386,26 @@ If you made this change, no action is needed. If you did NOT change your passwor
 
 — {{brandName}}`,
   },
+  {
+    key: "auth.two_factor_code",
+    name: "Two-Factor Sign-In Code",
+    category: "security",
+    subject: "Your {{brandName}} sign-in code",
+    variables: ["firstName", "code", "expiryMinutes", "brandName", "currentYear"],
+    // Without the code the email is useless and locks the user out of their own account.
+    requiredVariables: ["code"],
+    body: `Hi {{firstName}},
+
+Your {{brandName}} sign-in code is:
+
+{{code}}
+
+It expires in {{expiryMinutes}} minutes and can only be used once.
+
+If you didn't try to sign in, someone may know your password — change it as soon as you can.
+
+— {{brandName}}`,
+  },
 ];
 
 export function findDefaultTemplate(key: string): EmailTemplateDefault | undefined {

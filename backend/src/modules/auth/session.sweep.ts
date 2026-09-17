@@ -1,4 +1,5 @@
 import { purgeExpiredSessions } from "./session.service.js";
+import { purgeExpiredChallenges } from "./twoFactor.service.js";
 
 /**
  * Remove session rows whose lifetime has already elapsed.
@@ -31,6 +32,18 @@ export function startExpiredSessionSweep(intervalMs = 6 * 60 * 60 * 1000): () =>
       })
       .catch((e: unknown) =>
         console.error("[session-sweep] pass failed:", e instanceof Error ? e.message : e),
+      );
+    // Same reasoning, same timer: a 2FA challenge is unusable the moment it expires (findLive
+    // refuses it), so this only stops dead rows — and the IP addresses on them — accumulating.
+    void purgeExpiredChallenges()
+      .then((count) => {
+        if (count > 0) console.info(`[session-sweep] removed ${count} expired 2FA challenge(s)`);
+      })
+      .catch((e: unknown) =>
+        console.error(
+          "[session-sweep] challenge pass failed:",
+          e instanceof Error ? e.message : e,
+        ),
       );
   };
   const timer = setInterval(tick, intervalMs);

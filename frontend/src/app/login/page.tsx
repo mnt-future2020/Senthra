@@ -10,6 +10,9 @@ import * as authService from "@/services/auth.service";
 import { homeFor } from "@/lib/auth";
 import { takeSignedOutNotice, type SignedOutNotice } from "@/lib/signedOutNotice";
 import { AuthLayout } from "@/components/auth/AuthLayout";
+import { authInputCls } from "@/components/auth/styles";
+import { TwoFactorStep } from "@/components/auth/TwoFactorStep";
+import type { TwoFactorPending } from "@/types/auth";
 
 // Minimal typing for the Google Identity Services global.
 type GoogleId = {
@@ -28,9 +31,6 @@ declare global {
     google?: GoogleId;
   }
 }
-
-const inputCls =
-  "w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 py-2.5 text-sm text-[var(--ink)] outline-none transition-all placeholder:text-[var(--faint)] focus:border-[var(--accent)]";
 
 // One-tap login shortcuts. Credentials come from NEXT_PUBLIC_QUICK_* env vars and are NEVER
 // hardcoded in source — a password in a file is a password in git history, permanently, however
@@ -79,11 +79,38 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = React.useState(false);
   const [remember, setRemember] = React.useState(true);
   const [submitting, setSubmitting] = React.useState(false);
+  /**
+   * Google sign-in in flight.
+   *
+   * Its round trip is NOT quick — the server verifies the token with Google, then waits on the SMTP
+   * send before it can answer (measured at several seconds on Gmail). The password path covers that
+   * gap with "Signing in…" on its own button; Google's button is rendered inside Google's iframe and
+   * cannot be relabelled, so without this the page sat visually dead and looked broken.
+   */
+  const [googleBusy, setGoogleBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   // Why the user landed back here, if they didn't arrive under their own steam — set by
   // AuthProvider when the server revokes this device's session (the one-device cap, "sign out
   // other devices", a password change). Read once and consumed, so a refresh clears it.
   const [signedOutNotice, setSignedOutNoticeState] = React.useState<SignedOutNotice | null>(null);
+  /**
+   * The pending 2FA challenge, or null on the credential step.
+   *
+   * Stamped with the instant it ARRIVED, because the server describes its clocks as durations
+   * ("resend in 45s") rather than as instants — a browser whose clock is wrong could not otherwise
+   * be told what is really left. The stamp is taken here, in the code that received the response,
+   * so the OTP step stays a pure function of its props.
+   */
+  const [pending2fa, setPending2fa] = React.useState<{
+    challenge: TwoFactorPending;
+    receivedAtMs: number;
+  } | null>(null);
+
+  /** Adopt a challenge the server just described, anchoring its countdowns to this moment. */
+  const adoptChallenge = React.useCallback(
+    (challenge: TwoFactorPending) => setPending2fa({ challenge, receivedAtMs: Date.now() }),
+    [],
+  );
 
   const [googleEnabled, setGoogleEnabled] = React.useState(false);
   const [googleClientId, setGoogleClientId] = React.useState<string | null>(null);
@@ -91,7 +118,17 @@ export default function LoginPage() {
   // Whether the /auth/google/config check has finished. Until it has, we reserve
   // the Google section's space with a skeleton so it doesn't blink/jump in.
   const [googleChecked, setGoogleChecked] = React.useState(false);
-  const googleBtnRef = React.useRef<HTMLDivElement>(null);
+  /**
+   * The Google button is drawn IMPERATIVELY into this node by the effect below, so the effect has to
+   * run whenever the node appears — not just when the Google config changes.
+   *
+   * Held in state, as a callback ref, rather than in a useRef: a ref object's `.current` is not a
+   * dependency, so React cannot re-run the effect when it is filled. That is exactly what broke —
+   * switching to the OTP step unmounts this div, coming back mounts a fresh EMPTY one, and with no
+   * dependency changed the button was never re-rendered into it. The same hole existed on first
+   * load whenever the cached GIS script resolved before the resume check finished.
+   */
+  const [googleBtnEl, setGoogleBtnEl] = React.useState<HTMLDivElement | null>(null);
 
   // Already logged in → go to the right home for the account type.
   React.useEffect(() => {
@@ -110,6 +147,24 @@ export default function LoginPage() {
     });
   }, []);
 
+  // The challenge cookie is httpOnly, so this page cannot look for itself — ask the server. A 401
+  // is the NORMAL answer for an ordinary visit and must never surface as an error banner.
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const pending = await authService.getTwoFactorChallenge();
+        if (!cancelled) adoptChallenge(pending);
+      } catch {
+        // No pending challenge — the credential form already on screen is the right one, and a 401
+        // here is the NORMAL answer for an ordinary visit, so nothing is surfaced.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [adoptChallenge]);
+
   // Dev quick-login: fill the creds + submit (used only by the dev-gated buttons below).
   const quickLogin = (em: string, pw: string) => {
     setEmail(em);
@@ -117,14 +172,24 @@ export default function LoginPage() {
     setTimeout(() => document.querySelector<HTMLFormElement>("form")?.requestSubmit(), 50);
   };
 
+  // Any sign-in in flight — used to lock every other way in, so a slow Google round trip cannot be
+  // raced by a password submit or a quick-login click.
+  const busy = submitting || googleBusy;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setSignedOutNoticeState(null);
     setSubmitting(true);
     try {
-      const next = await login(email, password, remember);
-      router.replace(homeFor(next));
+      const result = await login(email, password, remember);
+      // 2FA on: the password was proven but NO session exists yet. Swap to the code step.
+      if (result.twoFactorRequired) {
+        adoptChallenge(result);
+        setPassword("");
+        return;
+      }
+      router.replace(homeFor(result.principal));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed.");
     } finally {
@@ -180,31 +245,78 @@ export default function LoginPage() {
   // 2. Render the button once it's enabled, the script is ready, AND the
   //    container <div> is mounted. This effect runs after that render.
   React.useEffect(() => {
-    if (!googleEnabled || !gsiLoaded || !googleClientId) return;
-    if (!window.google?.accounts?.id || !googleBtnRef.current) return;
+    if (!googleEnabled || !gsiLoaded || !googleClientId || !googleBtnEl) return;
+    if (!window.google?.accounts?.id) return;
     window.google.accounts.id.initialize({
       client_id: googleClientId,
       callback: async (resp) => {
         setError(null);
+        setGoogleBusy(true);
         try {
-          const next = await loginWithGoogle(resp.credential);
-          router.replace(homeFor(next));
+          const result = await loginWithGoogle(resp.credential, remember);
+          // 2FA on: Google proved the identity, but the emailed code is still required.
+          if (result.twoFactorRequired) {
+            adoptChallenge(result);
+            return;
+          }
+          router.replace(homeFor(result.principal));
         } catch (err) {
           setError(
             err instanceof Error ? err.message : "Google sign-in failed.",
           );
+        } finally {
+          // Must run on the challenge path too: that keeps this component mounted, so coming back
+          // via "Back to sign in" would otherwise land on a permanently spinning button.
+          setGoogleBusy(false);
         }
       },
     });
-    googleBtnRef.current.replaceChildren();
-    window.google.accounts.id.renderButton(googleBtnRef.current, {
+    // Idempotent: clear first, so a re-run (a remount, or the script arriving late) replaces the
+    // button rather than stacking a second one beside it.
+    googleBtnEl.replaceChildren();
+    window.google.accounts.id.renderButton(googleBtnEl, {
       theme: "outline",
       size: "large",
       width: 340,
       text: "signin_with",
     });
-  }, [googleEnabled, gsiLoaded, googleClientId, loginWithGoogle, router]);
+  }, [
+    googleEnabled,
+    gsiLoaded,
+    googleClientId,
+    googleBtnEl,
+    loginWithGoogle,
+    remember,
+    router,
+    adoptChallenge,
+  ]);
 
+  // The OTP step replaces the credential form in place — same card, no separate route, so there is
+  // no URL that can be opened without a challenge behind it.
+  if (pending2fa) {
+    return (
+      <AuthLayout>
+        <TwoFactorStep
+          pending={pending2fa.challenge}
+          receivedAtMs={pending2fa.receivedAtMs}
+          onPendingChange={adoptChallenge}
+          onVerified={(p) => router.replace(homeFor(p))}
+          // `reason` is set when the server ended the challenge (too many wrong codes, expired);
+          // plain "Back to sign in" passes nothing and clears the banner.
+          onBack={(reason) => {
+            setPending2fa(null);
+            setError(reason ?? null);
+          }}
+        />
+      </AuthLayout>
+    );
+  }
+
+  // The credential form renders IMMEDIATELY and the challenge probe runs beside it. It used to be
+  // held back until the probe answered, to spare a mid-OTP refresh a glimpse of the wrong step —
+  // but that put a blank card in front of EVERY visitor on EVERY visit, for as long as the backend
+  // took to answer, including everyone with 2FA switched off. The cost landed on the common case to
+  // tidy the rare one. If a challenge does come back, the effect above swaps to the OTP step.
   return (
     <AuthLayout>
       <h2 className="text-center text-2xl font-extrabold tracking-tight text-[var(--ink)]">
@@ -253,7 +365,7 @@ export default function LoginPage() {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="user@company.com"
-            className={inputCls}
+            className={authInputCls}
           />
         </div>
 
@@ -269,7 +381,7 @@ export default function LoginPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Enter password"
-              className={`${inputCls} pr-10`}
+              className={`${authInputCls} pr-10`}
             />
             <button
               type="button"
@@ -306,7 +418,7 @@ export default function LoginPage() {
 
         <button
           type="submit"
-          disabled={submitting}
+          disabled={busy}
           className="flex w-full items-center justify-center gap-2 rounded-xl bg-[var(--accent)] py-3 text-sm font-bold text-white transition-all hover:opacity-90 disabled:opacity-60"
         >
           {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -330,7 +442,7 @@ export default function LoginPage() {
               <button
                 key={q.label}
                 type="button"
-                disabled={submitting}
+                disabled={busy}
                 onClick={() => quickLogin(q.email!, q.password!)}
                 className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
               >
@@ -350,13 +462,32 @@ export default function LoginPage() {
             </span>
             <div className="h-px flex-1 bg-[var(--border)]" />
           </div>
-          <div className="flex min-h-[40px] justify-center">
+          {/* The Google button lives inside Google's own iframe, so its label cannot be changed to
+              show progress. Dim it, stop further clicks, and put the progress line underneath. */}
+          <div
+            className={`flex min-h-[40px] justify-center transition-opacity ${
+              googleBusy ? "pointer-events-none opacity-50" : ""
+            }`}
+          >
             {googleEnabled && gsiLoaded ? (
-              <div ref={googleBtnRef} />
+              <div ref={setGoogleBtnEl} />
             ) : (
               <div className="h-[40px] w-full max-w-[340px] animate-pulse rounded-lg bg-[var(--surface-2)]" />
             )}
           </div>
+
+          {/* Says what is happening AND roughly how long, because the wait is genuinely seconds: the
+              server verifies the Google token and then waits on the email send before it can answer.
+              `role="status"` so a screen reader is told too, rather than sitting in silence. */}
+          {googleBusy && (
+            <div
+              role="status"
+              className="mt-3 flex items-center justify-center gap-2 text-sm font-semibold text-[var(--muted)]"
+            >
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Signing you in — this can take a few seconds…
+            </div>
+          )}
         </>
       )}
     </AuthLayout>

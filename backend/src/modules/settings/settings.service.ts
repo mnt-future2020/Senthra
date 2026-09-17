@@ -16,6 +16,8 @@ import {
 import { decryptSecret, encryptSecret } from "../../utils/crypto.js";
 import { DEFAULT_BRAND_COLOR, safeBrandColor } from "../../utils/email-html.js";
 import { badRequest } from "../../utils/http-error.js";
+import * as auditService from "#modules/audit/audit.service.js";
+import type { AuditActor } from "#modules/audit/audit.service.js";
 
 // Resolve Cloudinary credentials: UI-configured (DB) takes precedence, then env.
 // Returns null when neither is fully configured.
@@ -312,6 +314,8 @@ export interface PublicSettings extends PublicBranding {
   timeFormat: string;
   // Engineer-to-engineer transfer feature flags.
   engineerTransferRequireSignature: boolean;
+  /** Global email 2FA. Off by default; suppresses Google sign-in while on. */
+  emailTwoFactorEnabled: boolean;
   /** Overdue window in days, default already applied — never null to the client. */
   overdueAfterDays: number;
 }
@@ -380,6 +384,9 @@ function publicSettings(s: Settings): PublicSettings {
 
     // Goods management
     overdueAfterDays: s.overdueAfterDays ?? DEFAULT_OVERDUE_AFTER_DAYS,
+
+    // Security / authentication
+    emailTwoFactorEnabled: s.emailTwoFactorEnabled ?? false,
   };
 }
 
@@ -455,13 +462,28 @@ export interface UpdateSettingsParams {
   timeFormat?: string;
   // Engineer-to-engineer transfer feature flags.
   engineerTransferRequireSignature?: boolean;
+  emailTwoFactorEnabled?: boolean;
   // Goods management: the overdue window, in days. `""` clears it back to the read-time default.
   overdueAfterDays?: number | "";
 }
 
-export async function updateSettings(input: UpdateSettingsParams): Promise<PublicSettings> {
+export async function updateSettings(
+  input: UpdateSettingsParams,
+  actor?: AuditActor,
+): Promise<PublicSettings> {
   const s = await settingsRepo.getOrCreate();
   const data: Prisma.SettingsUpdateInput = {};
+
+  // --- Security / authentication ---
+  // There is deliberately no "customers without a password" guard here. Google sign-in stays
+  // available while 2FA is on (and is itself subject to it), so an account that signs in with
+  // Google keeps working and simply receives the code — nobody is locked out by enabling this.
+  //
+  // The SMTP lockout guard lives BELOW, after the SMTP fields are computed: it has to judge the
+  // configuration this save LEAVES BEHIND, not the one it started with.
+  if (typeof input.emailTwoFactorEnabled === "boolean") {
+    data.emailTwoFactorEnabled = input.emailTwoFactorEnabled;
+  }
 
   // --- Google Sign-In ---
   if (typeof input.googleEnabled === "boolean") data.googleEnabled = input.googleEnabled;
@@ -498,6 +520,41 @@ export async function updateSettings(input: UpdateSettingsParams): Promise<Publi
   // encrypted before storage — consistent with the other secrets above.
   if (typeof input.smtpPassword === "string" && input.smtpPassword.trim()) {
     data.smtpPassword = encryptSecret(input.smtpPassword.trim());
+  }
+
+  /**
+   * THE LOCKOUT GUARD. With 2FA on and SMTP broken, nobody can complete a login — including the
+   * administrator who would need to turn 2FA back off. Recovery is editing the database by hand.
+   *
+   * It deliberately judges the state this save LEAVES BEHIND, which closes both doors with one
+   * rule: turning 2FA on while SMTP is incomplete, AND clearing SMTP while 2FA is already on. An
+   * enable-time-only check caught the first and missed the second entirely.
+   *
+   * `undefined` means the field was not sent, so the stored value survives; an explicit `null` means
+   * CLEARED, which is exactly what this guard exists to catch — `??` would treat the two the same
+   * and let a clear through.
+   */
+  const leftBehind = <T,>(next: T | null | undefined, saved: T | null): T | null =>
+    next === undefined ? saved : next;
+
+  // Disabling always wins: `false` short-circuits before the stored value is consulted, so a broken
+  // mail server can never trap the company behind a factor nobody can receive.
+  const twoFactorAfterSave = input.emailTwoFactorEnabled ?? s.emailTwoFactorEnabled;
+  if (twoFactorAfterSave) {
+    // The same completeness test sendConfiguredEmail applies, so the two can never disagree.
+    const smtpComplete =
+      leftBehind(data.smtpHost as string | null | undefined, s.smtpHost) &&
+      leftBehind(data.smtpPort as number | null | undefined, s.smtpPort) &&
+      leftBehind(data.smtpFromEmail as string | null | undefined, s.smtpFromEmail) &&
+      leftBehind(data.smtpPassword as string | null | undefined, s.smtpPassword);
+
+    if (!smtpComplete) {
+      throw badRequest(
+        s.emailTwoFactorEnabled
+          ? "Two-factor authentication is on, so a working SMTP configuration is required — without it nobody could receive a sign-in code. Complete the SMTP host, port, from-address and password, or turn two-factor authentication off first."
+          : "Configure SMTP under Settings → Email before turning on two-factor authentication. Without it, nobody would be able to receive a sign-in code.",
+      );
+    }
   }
 
   // --- Cloudinary (cloud name + key plaintext; secret encrypted, blank-to-keep) ---
@@ -585,6 +642,20 @@ export async function updateSettings(input: UpdateSettingsParams): Promise<Publi
   else if (input.overdueAfterDays === "") data.overdueAfterDays = null;
 
   const updated = await settingsRepo.update(s.id, data);
+
+  // Ordinary settings edits are not audited in this app, but a change to the SIGN-IN POLICY is the
+  // archetypal audit target — it changes how every account authenticates.
+  if (
+    typeof input.emailTwoFactorEnabled === "boolean" &&
+    input.emailTwoFactorEnabled !== s.emailTwoFactorEnabled
+  ) {
+    auditService.record({
+      actor,
+      action: input.emailTwoFactorEnabled ? "settings.2fa_enabled" : "settings.2fa_disabled",
+      targetType: "settings",
+    });
+  }
+
   return publicSettings(updated);
 }
 

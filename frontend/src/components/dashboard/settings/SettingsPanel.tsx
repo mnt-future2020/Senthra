@@ -2,10 +2,11 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ShieldCheck, Palette, Plug, Mail, MailCheck, Paintbrush, Building2, ArrowRightLeft, FileText, ClipboardList } from "lucide-react";
+import { ShieldCheck, KeyRound, Palette, Plug, Mail, MailCheck, Paintbrush, Building2, ArrowRightLeft, FileText, ClipboardList } from "lucide-react";
 
 import { AccountSection } from "./account/AccountSection";
 import { SecuritySection } from "./account/SecuritySection";
+import { SecurityPolicySection } from "./security/SecurityPolicySection";
 import { BrandingSection } from "./branding/BrandingSection";
 import { CompanyProfileSection } from "./company/CompanyProfileSection";
 import { AppearanceSection } from "./appearance/AppearanceSection";
@@ -35,7 +36,12 @@ const NAV: {
     | "email_templates.view"
     | "policy.view";
 }[] = [
-  { id: "account", label: "Account & Security", icon: ShieldCheck, desc: "Email & password", requires: "admin" },
+  // Renamed from "Account & Security": this card is the super-admin's OWN login, whereas the
+  // Security section below is an app-wide policy. Two sections both called "Security" would be
+  // indistinguishable in the nav — and the distinction matters, because one is admin-only and
+  // personal while the other changes how every account signs in.
+  { id: "account", label: "My Account", icon: ShieldCheck, desc: "Email & password", requires: "admin" },
+  { id: "security", label: "Security", icon: KeyRound, desc: "Sign-in policy", requires: "settings.view" },
   { id: "company", label: "Company", icon: Building2, desc: "Legal details & regional", requires: "settings.view" },
   { id: "branding", label: "Branding", icon: Paintbrush, desc: "Logo, name & theme text", requires: "settings.view" },
   { id: "appearance", label: "Appearance", icon: Palette, desc: "Theme & layout", requires: "settings.view" },
@@ -138,6 +144,7 @@ export function SettingsPanel(appearance: AppearanceProps) {
               <SessionsCard />
             </>
           )}
+          {activeSection === "security" && <SecurityPolicySection />}
           {activeSection === "company" && <CompanyProfileSection />}
           {activeSection === "branding" && <BrandingSection />}
           {activeSection === "appearance" && <AppearanceSection {...appearance} />}

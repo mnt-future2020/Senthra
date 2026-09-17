@@ -6,6 +6,7 @@ import type { Prisma } from "@prisma/client";
 import { env } from "../../config/env.js";
 import * as adminRepo from "./admin.repository.js";
 import * as sessionService from "./session.service.js";
+import * as twoFactorService from "./twoFactor.service.js";
 import { assertEmailNamespaceFree } from "./email-namespace.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as customerRepo from "#modules/customer/customer.repository.js";
@@ -88,21 +89,142 @@ async function startAndIssue(
   return issueTokens(sub, actor, sid);
 }
 
+/**
+ * What a password login produced.
+ *
+ * With 2FA off this is the session, exactly as before. With 2FA on it is a PENDING CHALLENGE and
+ * nothing else — no session row, no tokens, no cookies — so a proven password alone never
+ * authenticates and, critically at MAX_DEVICES = 1, never evicts the account's existing device.
+ */
+export type LoginOutcome =
+  | ({ twoFactorRequired: false } & AuthResult)
+  | ({ twoFactorRequired: true } & twoFactorService.PendingChallenge);
+
+/**
+ * The tail shared by all three account branches of `login`.
+ *
+ * This is the ONLY place that chooses between "session now" and "challenge first", so no branch —
+ * admin, staff or customer — can forget the second factor.
+ */
+async function finishLogin(
+  principal: Principal,
+  id: string,
+  actor: Actor,
+  firstName: string,
+  remember: boolean,
+  meta?: AuthMeta,
+): Promise<LoginOutcome> {
+  const settings = await settingsRepo.findFirst();
+  if (settings?.emailTwoFactorEnabled) {
+    const pending = await twoFactorService.createChallenge({
+      principalId: id,
+      principalType: actor,
+      email: principal.email,
+      firstName,
+      remember,
+      ip: meta?.ip,
+      userAgent: meta?.userAgent,
+    });
+    auditService.record({
+      actor: { id: principal.id, email: principal.email, type: principal.type },
+      action: "auth.2fa_challenged",
+      metadata: { ip: meta?.ip ?? null, userAgent: meta?.userAgent ?? null },
+    });
+    return { twoFactorRequired: true, ...pending };
+  }
+
+  // 2FA off — the original path, unchanged.
+  recordAuth("auth.login", principal, meta);
+  return { twoFactorRequired: false, principal, ...(await startAndIssue(id, actor, meta)) };
+}
+
+/**
+ * Finish a 2FA login. This — not `login` — is where the session is born when 2FA is on.
+ *
+ * The account is re-resolved and re-checked here rather than trusted from the challenge: minutes
+ * may have passed since the password was proven, and an account deactivated in the meantime must
+ * not be able to complete a sign-in.
+ */
+export async function completeTwoFactorLogin(
+  token: string,
+  code: string,
+  meta?: AuthMeta,
+): Promise<AuthResult & { remember: boolean }> {
+  const { principalId, principalType, remember } = await twoFactorService.verifyChallenge(
+    token,
+    code,
+  );
+
+  let principal: Principal;
+  if (principalType === "user") {
+    const user = await userRepo.findById(principalId);
+    if (!user) throw unauthorized("Unauthorized.");
+    if (user.status !== "active") {
+      throw forbidden("Your account is not active. Contact an administrator.");
+    }
+    principal = userPrincipal(user);
+  } else if (principalType === "customer") {
+    const cu = await customerRepo.findLoginById(principalId);
+    if (!cu) throw unauthorized("Unauthorized.");
+    if (cu.status !== "active" || cu.customer.deletedAt || cu.customer.status !== "active") {
+      throw forbidden("Your account is not active. Contact your administrator.");
+    }
+    principal = customerPrincipal(cu, cu.customer);
+  } else {
+    const admin = await adminRepo.findById(principalId);
+    if (!admin) throw unauthorized("Unauthorized.");
+    principal = adminPrincipal(admin);
+  }
+
+  auditService.record({
+    actor: { id: principal.id, email: principal.email, type: principal.type },
+    action: "auth.2fa_verified",
+    metadata: { ip: meta?.ip ?? null, userAgent: meta?.userAgent ?? null },
+  });
+  // Only NOW is the login real, so only now is it logged as one.
+  recordAuth("auth.login", principal, meta);
+  return { principal, ...(await startAndIssue(principalId, principalType, meta)), remember };
+}
+
+/** The pending challenge for this browser — masked email, expiry and resend state only. */
+export function readTwoFactorChallenge(
+  token: string,
+): Promise<twoFactorService.PublicChallenge | null> {
+  return twoFactorService.readChallenge(token);
+}
+
+/** Abandon a pending challenge. Touches no session — the caller was never authenticated. */
+export function cancelTwoFactorChallenge(token: string): Promise<void> {
+  return twoFactorService.cancelChallenge(token);
+}
+
+/** Re-send the code on the SAME challenge, greeting the user with the snapshotted name. */
+export function resendTwoFactorCode(token: string): Promise<twoFactorService.PublicChallenge> {
+  return twoFactorService.resendChallenge(token);
+}
+
 // Unified login: the super-admin account first, then an active staff user. An
 // unknown email and a wrong password return the same generic error (no account
 // enumeration); a correct password on a non-active user gets a specific message.
 export async function login(
   email: string,
   password: string,
+  remember: boolean,
   meta?: AuthMeta,
-): Promise<AuthResult> {
+): Promise<LoginOutcome> {
   const normalized = email.trim().toLowerCase();
 
   const admin = await adminRepo.findByEmail(normalized);
   if (admin && (await verifyPassword(password, admin.passwordHash))) {
     const principal = adminPrincipal(admin);
-    recordAuth("auth.login", principal, meta);
-    return { principal, ...(await startAndIssue(admin.id, "admin", meta)) };
+    return finishLogin(
+      principal,
+      admin.id,
+      "admin",
+      admin.name?.trim().split(/\s+/)[0] || "there",
+      remember,
+      meta,
+    );
   }
 
   const user = await userRepo.findByEmailWithRole(normalized);
@@ -111,8 +233,7 @@ export async function login(
       throw forbidden("Your account is not active. Contact an administrator.");
     }
     const principal = userPrincipal(user);
-    recordAuth("auth.login", principal, meta);
-    return { principal, ...(await startAndIssue(user.id, "user", meta)) };
+    return finishLogin(principal, user.id, "user", user.firstName, remember, meta);
   }
 
   // Finally, an external customer portal user (read-only). Email namespaces are kept
@@ -123,8 +244,14 @@ export async function login(
       throw forbidden("Your account is not active. Contact your administrator.");
     }
     const principal = customerPrincipal(cu, cu.customer);
-    recordAuth("auth.login", principal, meta);
-    return { principal, ...(await startAndIssue(cu.id, "customer", meta)) };
+    return finishLogin(
+      principal,
+      cu.id,
+      "customer",
+      cu.fullName.trim().split(/\s+/)[0] || cu.fullName,
+      remember,
+      meta,
+    );
   }
 
   throw unauthorized("Invalid email or password.");
@@ -497,7 +624,19 @@ export async function getGoogleConfig(): Promise<{
 // customer (read-only portal) whose account/login email is the verified Google email.
 // Mirrors the password login's order (admin → user → customer), so Google sign-in
 // works for everyone the system already knows — not just the admin.
-export async function googleLogin(credential: string, meta?: AuthMeta): Promise<AuthResult> {
+/**
+ * Google sign-in. Stays available when 2FA is on, and is subject to it.
+ *
+ * Every branch below ends at `finishLogin`, the same tail the password path uses, so a verified
+ * Google identity opens an OTP challenge exactly as a correct password does. That is what stops
+ * Google being a way around the second factor: leaving it exempt would mean "2FA is on" protected
+ * only the accounts that happen not to have a matching Google account.
+ */
+export async function googleLogin(
+  credential: string,
+  remember: boolean,
+  meta?: AuthMeta,
+): Promise<LoginOutcome> {
   const settings = await settingsRepo.findFirst();
   if (!settings?.googleEnabled || !settings.googleClientId) {
     throw badRequest("Google sign-in is not enabled.");
@@ -524,8 +663,14 @@ export async function googleLogin(credential: string, meta?: AuthMeta): Promise<
   const admin = await adminRepo.findFirst();
   if (admin && googleEmail === (admin.googleEmail ?? admin.email).toLowerCase()) {
     const principal = adminPrincipal(admin);
-    recordAuth("auth.login", principal, meta);
-    return { principal, ...(await startAndIssue(admin.id, "admin", meta)) };
+    return finishLogin(
+      principal,
+      admin.id,
+      "admin",
+      admin.name?.trim().split(/\s+/)[0] || "there",
+      remember,
+      meta,
+    );
   }
 
   // 2) A registered staff user whose account email is the verified Google email.
@@ -543,8 +688,7 @@ export async function googleLogin(credential: string, meta?: AuthMeta): Promise<
       ? await userRepo.update(user.id, { mustResetPassword: false })
       : user;
     const principal = userPrincipal(account);
-    recordAuth("auth.login", principal, meta);
-    return { principal, ...(await startAndIssue(account.id, "user", meta)) };
+    return finishLogin(principal, account.id, "user", account.firstName, remember, meta);
   }
 
   // 3) A customer (read-only portal) whose login email is the verified Google email.
@@ -561,8 +705,14 @@ export async function googleLogin(credential: string, meta?: AuthMeta): Promise<
       ? await customerRepo.updateLoginUser(cu.id, { mustResetPassword: false })
       : cu;
     const principal = customerPrincipal(account, account.customer);
-    recordAuth("auth.login", principal, meta);
-    return { principal, ...(await startAndIssue(account.id, "customer", meta)) };
+    return finishLogin(
+      principal,
+      account.id,
+      "customer",
+      account.fullName.trim().split(/\s+/)[0] || account.fullName,
+      remember,
+      meta,
+    );
   }
 
   // 4) The verified email belongs to no admin, staff user, or customer.

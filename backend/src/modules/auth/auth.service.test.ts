@@ -6,8 +6,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // mappers (types/principal) run for real so the returned shape is exercised end-to-end.
 
 vi.mock("../../config/env.js", () => ({ env: { nodeEnv: "test" } }));
-vi.mock("google-auth-library", () => ({ OAuth2Client: class {} }));
-vi.mock("./admin.repository.js", () => ({ findByEmail: vi.fn(), findById: vi.fn(), update: vi.fn() }));
+const { mockVerifyIdToken } = vi.hoisted(() => ({ mockVerifyIdToken: vi.fn() }));
+vi.mock("google-auth-library", () => ({
+  OAuth2Client: class {
+    verifyIdToken = mockVerifyIdToken;
+  },
+}));
+vi.mock("./admin.repository.js", () => ({ findByEmail: vi.fn(), findById: vi.fn(), findFirst: vi.fn(), update: vi.fn() }));
 vi.mock("./session.service.js", () => ({
   startSession: vi.fn(),
   findActive: vi.fn(),
@@ -20,7 +25,8 @@ vi.mock("./session.service.js", () => ({
 vi.mock("./email-namespace.js", () => ({ assertEmailNamespaceFree: vi.fn() }));
 vi.mock("#modules/user/user.repository.js", () => ({ findByEmailWithRole: vi.fn(), findById: vi.fn() }));
 vi.mock("#modules/customer/customer.repository.js", () => ({ findLoginByEmail: vi.fn(), findLoginById: vi.fn() }));
-vi.mock("#modules/settings/settings.repository.js", () => ({ getSettings: vi.fn() }));
+vi.mock("#modules/settings/settings.repository.js", () => ({ getSettings: vi.fn(), findFirst: vi.fn() }));
+vi.mock("./twoFactor.service.js", () => ({ createChallenge: vi.fn(), verifyChallenge: vi.fn(), readChallenge: vi.fn(), resendChallenge: vi.fn(), cancelChallenge: vi.fn(), purgeExpiredChallenges: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/email/email.service.js", () => ({ sendTemplatedEmail: vi.fn() }));
 vi.mock("../../utils/password.js", () => ({ hashPassword: vi.fn(), verifyPassword: vi.fn() }));
@@ -35,9 +41,20 @@ import * as sessionService from "./session.service.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as customerRepo from "#modules/customer/customer.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
+import * as settingsRepo from "#modules/settings/settings.repository.js";
+import * as twoFactorService from "./twoFactor.service.js";
 import { verifyPassword } from "../../utils/password.js";
 import { verifyRefreshToken } from "../../utils/jwt.js";
-import { changeCredentials, login, refreshSession, logout } from "./auth.service.js";
+import {
+  changeCredentials,
+  completeTwoFactorLogin,
+  getGoogleConfig,
+  googleLogin,
+  login,
+  refreshSession,
+  logout,
+} from "./auth.service.js";
+import type { AuthResult } from "./auth.service.js";
 
 const mockVerifyPassword = verifyPassword as ReturnType<typeof vi.fn>;
 const mockVerifyRefresh = verifyRefreshToken as ReturnType<typeof vi.fn>;
@@ -66,14 +83,28 @@ beforeEach(() => {
   (adminRepo.findByEmail as ReturnType<typeof vi.fn>).mockResolvedValue(null);
   (userRepo.findByEmailWithRole as ReturnType<typeof vi.fn>).mockResolvedValue(null);
   (customerRepo.findLoginByEmail as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+  // 2FA OFF by default, so every pre-existing assertion below exercises the ORIGINAL login path.
+  (settingsRepo.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
+    emailTwoFactorEnabled: false,
+    googleEnabled: true,
+    googleClientId: "gid",
+  });
 });
+
+// login() now returns a union. These helpers narrow it so a test that expects a completed sign-in
+// fails loudly if a challenge was opened instead (and vice versa).
+async function loginOk(email: string, password: string, remember = true): Promise<AuthResult> {
+  const res = await login(email, password, remember);
+  if (res.twoFactorRequired) throw new Error("expected a completed login, got a 2FA challenge");
+  return res;
+}
 
 describe("login", () => {
   it("resolves the super-admin when the password verifies", async () => {
     (adminRepo.findByEmail as ReturnType<typeof vi.fn>).mockResolvedValue(adminRow());
     mockVerifyPassword.mockResolvedValue(true);
 
-    const res = await login("Admin@X.com", "pw");
+    const res = await loginOk("Admin@X.com", "pw");
 
     expect(res.principal.type).toBe("admin");
     expect(res.principal.id).toBe("a".repeat(24));
@@ -85,25 +116,25 @@ describe("login", () => {
   it("normalises the email before lookup (trim + lowercase)", async () => {
     (adminRepo.findByEmail as ReturnType<typeof vi.fn>).mockResolvedValue(adminRow());
     mockVerifyPassword.mockResolvedValue(true);
-    await login("  Admin@X.com  ", "pw");
+    await loginOk("  Admin@X.com  ", "pw");
     expect(adminRepo.findByEmail).toHaveBeenCalledWith("admin@x.com");
   });
 
   it("rejects an unknown email with a generic error", async () => {
-    await expect(login("nobody@x.com", "pw")).rejects.toThrow(/invalid email or password/i);
+    await expect(loginOk("nobody@x.com", "pw")).rejects.toThrow(/invalid email or password/i);
   });
 
   it("rejects a wrong password with the same generic error (no enumeration)", async () => {
     (adminRepo.findByEmail as ReturnType<typeof vi.fn>).mockResolvedValue(adminRow());
     mockVerifyPassword.mockResolvedValue(false);
-    await expect(login("admin@x.com", "bad")).rejects.toThrow(/invalid email or password/i);
+    await expect(loginOk("admin@x.com", "bad")).rejects.toThrow(/invalid email or password/i);
     expect(mockStartSession).not.toHaveBeenCalled();
   });
 
   it("resolves an active staff user", async () => {
     (userRepo.findByEmailWithRole as ReturnType<typeof vi.fn>).mockResolvedValue(userRow());
     mockVerifyPassword.mockResolvedValue(true);
-    const res = await login("user@x.com", "pw");
+    const res = await loginOk("user@x.com", "pw");
     expect(res.principal.type).toBe("user");
     expect(mockStartSession).toHaveBeenCalledWith("u".repeat(24), "user", expect.anything());
   });
@@ -111,14 +142,14 @@ describe("login", () => {
   it("blocks a correct-password login on a non-active staff user", async () => {
     (userRepo.findByEmailWithRole as ReturnType<typeof vi.fn>).mockResolvedValue(userRow({ status: "suspended" }));
     mockVerifyPassword.mockResolvedValue(true);
-    await expect(login("user@x.com", "pw")).rejects.toThrow(/not active/i);
+    await expect(loginOk("user@x.com", "pw")).rejects.toThrow(/not active/i);
     expect(mockStartSession).not.toHaveBeenCalled();
   });
 
   it("resolves an active customer portal user last", async () => {
     (customerRepo.findLoginByEmail as ReturnType<typeof vi.fn>).mockResolvedValue(customerRow());
     mockVerifyPassword.mockResolvedValue(true);
-    const res = await login("cust@x.com", "pw");
+    const res = await loginOk("cust@x.com", "pw");
     expect(res.principal.type).toBe("customer");
   });
 
@@ -127,7 +158,7 @@ describe("login", () => {
       customerRow({ customer: { id: "d".repeat(24), name: "Acme", customerCode: "CUST-0001", logoUrl: null, status: "active", deletedAt: new Date() } }),
     );
     mockVerifyPassword.mockResolvedValue(true);
-    await expect(login("cust@x.com", "pw")).rejects.toThrow(/not active/i);
+    await expect(loginOk("cust@x.com", "pw")).rejects.toThrow(/not active/i);
   });
 });
 
@@ -215,5 +246,194 @@ describe("changeCredentials — the super admin's own name", () => {
   it("does not end other sessions for a name change", async () => {
     await changeCredentials(ADMIN_ID, { currentPassword: "pw", name: "Ada Boss" }, "sid");
     expect(sessionService.endOthers).not.toHaveBeenCalled();
+  });
+});
+
+// --- Email 2FA -------------------------------------------------------------------------------
+// The invariant these protect: with 2FA ON, proving the password must produce NO session. At
+// MAX_DEVICES = 1 a premature session would evict the account's real device, so a stolen password
+// alone — or a user who simply abandons the OTP step — would sign the legitimate user out.
+
+describe("login with 2FA enabled", () => {
+  beforeEach(() => {
+    (settingsRepo.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
+      emailTwoFactorEnabled: true,
+      googleEnabled: true,
+      googleClientId: "gid",
+    });
+    (twoFactorService.createChallenge as ReturnType<typeof vi.fn>).mockResolvedValue({
+      challengeToken: "raw-token",
+      email: "u•••@x.com",
+      expiresAt: new Date("2026-01-01T00:10:00Z"),
+      resendAvailableAt: new Date("2026-01-01T00:01:00Z"),
+      resendsRemaining: 3,
+    });
+  });
+
+  it("creates NO session and NO tokens for a staff user", async () => {
+    (userRepo.findByEmailWithRole as ReturnType<typeof vi.fn>).mockResolvedValue(userRow());
+    mockVerifyPassword.mockResolvedValue(true);
+
+    const res = await login("user@x.com", "pw", true);
+
+    expect(res.twoFactorRequired).toBe(true);
+    expect(mockStartSession).not.toHaveBeenCalled();
+    expect(res).not.toHaveProperty("accessToken");
+    expect(res).not.toHaveProperty("principal");
+  });
+
+  it("challenges the admin and the customer too — all three principal types", async () => {
+    (adminRepo.findByEmail as ReturnType<typeof vi.fn>).mockResolvedValue(adminRow());
+    mockVerifyPassword.mockResolvedValue(true);
+    expect((await login("admin@x.com", "pw", true)).twoFactorRequired).toBe(true);
+
+    vi.clearAllMocks();
+    (settingsRepo.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ emailTwoFactorEnabled: true });
+    (twoFactorService.createChallenge as ReturnType<typeof vi.fn>).mockResolvedValue({
+      challengeToken: "t", email: "c•••@x.com", expiresAt: new Date(),
+      resendAvailableAt: new Date(), resendsRemaining: 3,
+    });
+    (adminRepo.findByEmail as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    (userRepo.findByEmailWithRole as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    (customerRepo.findLoginByEmail as ReturnType<typeof vi.fn>).mockResolvedValue(customerRow());
+    mockVerifyPassword.mockResolvedValue(true);
+    expect((await login("cust@x.com", "pw", true)).twoFactorRequired).toBe(true);
+    expect(mockStartSession).not.toHaveBeenCalled();
+  });
+
+  it("does NOT record auth.login until the code is verified", async () => {
+    (userRepo.findByEmailWithRole as ReturnType<typeof vi.fn>).mockResolvedValue(userRow());
+    mockVerifyPassword.mockResolvedValue(true);
+    await login("user@x.com", "pw", true);
+
+    const actions = (audit.record as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0].action);
+    expect(actions).not.toContain("auth.login");
+    expect(actions).toContain("auth.2fa_challenged");
+  });
+
+  it("carries the remember flag onto the challenge so the eventual session honours it", async () => {
+    (userRepo.findByEmailWithRole as ReturnType<typeof vi.fn>).mockResolvedValue(userRow());
+    mockVerifyPassword.mockResolvedValue(true);
+    await login("user@x.com", "pw", false);
+    expect(twoFactorService.createChallenge).toHaveBeenCalledWith(
+      expect.objectContaining({ remember: false, firstName: "Ada", email: "user@x.com" }),
+    );
+  });
+
+  it("still rejects a wrong password BEFORE any challenge is opened", async () => {
+    (userRepo.findByEmailWithRole as ReturnType<typeof vi.fn>).mockResolvedValue(userRow());
+    mockVerifyPassword.mockResolvedValue(false);
+    await expect(login("user@x.com", "bad", true)).rejects.toThrow(/invalid email or password/i);
+    expect(twoFactorService.createChallenge).not.toHaveBeenCalled();
+  });
+
+  it("still blocks an inactive account BEFORE any challenge is opened", async () => {
+    (userRepo.findByEmailWithRole as ReturnType<typeof vi.fn>).mockResolvedValue(userRow({ status: "suspended" }));
+    mockVerifyPassword.mockResolvedValue(true);
+    await expect(login("user@x.com", "pw", true)).rejects.toThrow(/not active/i);
+    expect(twoFactorService.createChallenge).not.toHaveBeenCalled();
+  });
+});
+
+describe("completeTwoFactorLogin", () => {
+  beforeEach(() => {
+    (twoFactorService.verifyChallenge as ReturnType<typeof vi.fn>).mockResolvedValue({
+      principalId: "u".repeat(24),
+      principalType: "user",
+      remember: false,
+    });
+  });
+
+  it("creates exactly one session and returns the principal", async () => {
+    (userRepo.findById as ReturnType<typeof vi.fn>).mockResolvedValue(userRow());
+    const res = await completeTwoFactorLogin("tok", "123456");
+
+    expect(res.principal.type).toBe("user");
+    expect(res.accessToken).toBe("access-token");
+    expect(res.remember).toBe(false);
+    expect(mockStartSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("records auth.2fa_verified and THEN auth.login", async () => {
+    (userRepo.findById as ReturnType<typeof vi.fn>).mockResolvedValue(userRow());
+    await completeTwoFactorLogin("tok", "123456");
+
+    const actions = (audit.record as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0].action);
+    expect(actions.indexOf("auth.2fa_verified")).toBeGreaterThanOrEqual(0);
+    expect(actions.indexOf("auth.login")).toBeGreaterThan(actions.indexOf("auth.2fa_verified"));
+  });
+
+  // Minutes can pass between proving the password and entering the code.
+  it("re-checks that the account is still active before opening a session", async () => {
+    (userRepo.findById as ReturnType<typeof vi.fn>).mockResolvedValue(userRow({ status: "inactive" }));
+    await expect(completeTwoFactorLogin("tok", "123456")).rejects.toThrow(/not active/i);
+    expect(mockStartSession).not.toHaveBeenCalled();
+  });
+
+  it("refuses a deleted account", async () => {
+    (userRepo.findById as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    await expect(completeTwoFactorLogin("tok", "123456")).rejects.toThrow(/unauthorized/i);
+    expect(mockStartSession).not.toHaveBeenCalled();
+  });
+
+  it("opens no session when the code is rejected", async () => {
+    (twoFactorService.verifyChallenge as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("That code is incorrect or has expired."),
+    );
+    await expect(completeTwoFactorLogin("tok", "000000")).rejects.toThrow();
+    expect(mockStartSession).not.toHaveBeenCalled();
+  });
+});
+
+describe("Google sign-in under 2FA", () => {
+  // The button STAYS visible when 2FA is on — and Google is subject to the second factor, so it is
+  // not a way around it. Exempting Google would mean "2FA is on" protected only the accounts that
+  // happen not to have a matching Google account.
+  it("still reports the stored Google configuration while 2FA is on", async () => {
+    (settingsRepo.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
+      emailTwoFactorEnabled: true,
+      googleEnabled: true,
+      googleClientId: "gid",
+    });
+    await expect(getGoogleConfig()).resolves.toEqual({ enabled: true, clientId: "gid" });
+  });
+
+  it("reports Google as off only when it is actually off", async () => {
+    (settingsRepo.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
+      emailTwoFactorEnabled: true,
+      googleEnabled: false,
+      googleClientId: "gid",
+    });
+    await expect(getGoogleConfig()).resolves.toEqual({ enabled: false, clientId: null });
+  });
+
+  it("opens a 2FA challenge for a Google sign-in, creating NO session", async () => {
+    (settingsRepo.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
+      emailTwoFactorEnabled: true,
+      googleEnabled: true,
+      googleClientId: "gid",
+    });
+    (twoFactorService.createChallenge as ReturnType<typeof vi.fn>).mockResolvedValue({
+      challengeToken: "t", email: "u•••@x.com", expiresAt: new Date(),
+      resendAvailableAt: new Date(), resendsRemaining: 3,
+    });
+    (adminRepo.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(adminRow({ googleEmail: "admin@x.com" }));
+    mockVerifyIdToken.mockResolvedValue({ getPayload: () => ({ email: "admin@x.com", email_verified: true }) });
+
+    const res = await googleLogin("valid-credential", true);
+
+    expect(res.twoFactorRequired).toBe(true);
+    expect(mockStartSession).not.toHaveBeenCalled();
+    expect(res).not.toHaveProperty("accessToken");
+  });
+
+  it("signs in directly through Google when 2FA is off", async () => {
+    (adminRepo.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(adminRow({ googleEmail: "admin@x.com" }));
+    mockVerifyIdToken.mockResolvedValue({ getPayload: () => ({ email: "admin@x.com", email_verified: true }) });
+
+    const res = await googleLogin("valid-credential", true);
+
+    expect(res.twoFactorRequired).toBe(false);
+    expect(mockStartSession).toHaveBeenCalledTimes(1);
   });
 });
