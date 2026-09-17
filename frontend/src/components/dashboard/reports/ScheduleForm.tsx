@@ -305,14 +305,17 @@ export function ScheduleForm({
 
       {/* A <div> with a SIBLING label, never a wrapping <label> — this is what made the recipient
           picker unselectable.
-          
-          MultiSelect renders its option list INLINE, so inside a <label> every option is a label
-          descendant. Clicking one makes the browser forward the activation to the label's control —
-          MultiSelect's own search input — so `toggle` ran for the real click and again for the
-          forwarded one: selected, then immediately deselected, and nothing ever stuck.
-          
-          The <Select>s above survive the same wrapper only because their popup is portalled out of
-          the label. UserForm, the only other MultiSelect in the app, already uses this shape. */}
+
+          MultiSelect used to render its option list INLINE, so inside a <label> every option was a
+          label descendant. Clicking one made the browser forward the activation to the label's
+          control — MultiSelect's own search input — so `toggle` ran for the real click and again for
+          the forwarded one: selected, then immediately deselected, and nothing ever stuck.
+
+          The list is portalled now (see AnchoredPanel), which is the same thing that always kept the
+          <Select>s above safe inside a wrapping label. This shape is kept regardless: the control
+          itself is a composite of chips and a text input rather than one labellable field, so a
+          wrapping <label> would be wrong here on its own terms, and UserForm — the only other
+          MultiSelect in the app — is written the same way. */}
       <div className="block">
         <span className={labelCls}>Recipients</span>
         <MultiSelect

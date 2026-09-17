@@ -22,6 +22,8 @@ import { AttentionMenu } from "@/components/dashboard/shell/AttentionMenu";
 import { GRN_STATUS_LABELS, GrnStatusBadge, formatDate } from "./grnStatus";
 import { lineSummary } from "./acceptedWording";
 import type { GoodsReceipt, GrnStatus } from "@/types/goods-in";
+import { dropdownRadius, dropdownSurfaceCls } from "@/components/ui/styles";
+import { viewportBox } from "@/components/ui/popoverPlacement";
 
 const PAGE_SIZE = 20;
 
@@ -48,9 +50,13 @@ function RowActions({ grn, canEdit, canDelete, onEdit, onDelete }: { grn: GoodsR
   const openMenu = () => {
     const rect = btnRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const right = Math.max(8, window.innerWidth - rect.right);
-    const spaceBelow = window.innerHeight - rect.bottom;
-    setPos(spaceBelow < 140 ? { bottom: window.innerHeight - rect.top + 4, right } : { top: rect.bottom + 4, right });
+    // The ICB, not `window.innerWidth`/`innerHeight`: the two differ by a scrollbar's width, and
+    // these numbers become the CSS `right`/`bottom` of a fixed element, which CSS resolves against
+    // the ICB. The menu came out 6px shy of the button it hangs from. See viewportBox.
+    const view = viewportBox();
+    const right = Math.max(8, view.width - rect.right);
+    const spaceBelow = view.height - rect.bottom;
+    setPos(spaceBelow < 140 ? { bottom: view.height - rect.top + 4, right } : { top: rect.bottom + 4, right });
     setOpen(true);
   };
   React.useEffect(() => {
@@ -77,7 +83,7 @@ function RowActions({ grn, canEdit, canDelete, onEdit, onDelete }: { grn: GoodsR
       {open && pos && createPortal(
         <>
           <div className="fixed inset-0 z-[55]" onClick={close} />
-          <div ref={menuRef} role="menu" className="anim-fade-in fixed z-[60] w-44 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-2xl" style={{ top: pos.top, bottom: pos.bottom, right: pos.right }}>
+          <div ref={menuRef} role="menu" className={`anim-fade-in fixed z-[60] w-44 py-1 ${dropdownSurfaceCls}`} style={{ ...dropdownRadius, top: pos.top, bottom: pos.bottom, right: pos.right }}>
             {canEdit && <MenuItem icon={Pencil} onClick={() => { close(); onEdit(); }}>Edit draft</MenuItem>}
             {canDelete && <MenuItem icon={Trash2} danger onClick={() => { close(); onDelete(); }}>Delete draft</MenuItem>}
           </div>

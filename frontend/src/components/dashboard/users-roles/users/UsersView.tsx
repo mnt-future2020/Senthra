@@ -34,6 +34,8 @@ import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
 import { usersHasFilters, usersPopoverFilterCount } from "./usersFilters";
+import { dropdownRadius, dropdownSurfaceCls } from "@/components/ui/styles";
+import { viewportBox } from "@/components/ui/popoverPlacement";
 
 const PAGE_SIZE = 20;
 
@@ -96,11 +98,15 @@ function RowActions({
   const openMenu = () => {
     const rect = btnRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const right = Math.max(8, window.innerWidth - rect.right);
-    const spaceBelow = window.innerHeight - rect.bottom;
+    // The ICB, not `window.innerWidth`/`innerHeight`: the two differ by a scrollbar's width, and
+    // these numbers become the CSS `right`/`bottom` of a fixed element, which CSS resolves against
+    // the ICB. The menu came out 6px shy of the button it hangs from. See viewportBox.
+    const view = viewportBox();
+    const right = Math.max(8, view.width - rect.right);
+    const spaceBelow = view.height - rect.bottom;
     setPos(
       spaceBelow < 220
-        ? { bottom: window.innerHeight - rect.top + 4, right }
+        ? { bottom: view.height - rect.top + 4, right }
         : { top: rect.bottom + 4, right },
     );
     setOpen(true);
@@ -134,8 +140,8 @@ function RowActions({
           <>
             <div className="fixed inset-0 z-[55]" onClick={close} />
             <div
-              className="anim-fade-in fixed z-[60] w-44 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-2xl"
-              style={{ top: pos.top, bottom: pos.bottom, right: pos.right }}
+              className={`anim-fade-in fixed z-[60] w-44 py-1 ${dropdownSurfaceCls}`}
+              style={{ ...dropdownRadius, top: pos.top, bottom: pos.bottom, right: pos.right }}
             >
               <MenuItem icon={Eye} onClick={() => { close(); onView(); }}>
                 View

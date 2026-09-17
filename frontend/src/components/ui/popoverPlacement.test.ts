@@ -228,3 +228,58 @@ describe("shouldReposition — a resize is not a scroll", () => {
     expect(short.maxHeight!).toBeLessThanOrEqual(420);
   });
 });
+
+// The menus that used to be written `absolute right-0`: a filter pill in a card header, the mobile
+// "+ New" button. Handing those to the default rule would have opened a 208px menu rightward from a
+// 90px pill — on screen, but pointing the wrong way, which is a redesign rather than a fix. So the
+// caller states the edge it means.
+describe("popoverPlacement — align: end, for a menu on a button", () => {
+  const MENU = { width: 208, height: 260 };
+
+  it("pins the panel to the trigger's RIGHT edge", () => {
+    const p = popoverPlacement(at(800, 200), MENU, VIEW, "end");
+    expect(p.right).toBe(VIEW.width - 890); // 134 — the trigger's right edge
+    expect(p.left).toBeUndefined();
+  });
+
+  // The default rule would have left-aligned this one, since there is plenty of room rightward.
+  it("still right-aligns a trigger in the middle of the screen, where 'start' would not", () => {
+    expect(popoverPlacement(at(500, 200), MENU, VIEW, "end").right).toBe(VIEW.width - 590);
+    expect(popoverPlacement(at(500, 200), MENU, VIEW).left).toBe(500);
+  });
+
+  // A trigger hard against the left: there is no room to hang the menu leftward, so it opens the
+  // other way rather than off the edge of the window.
+  it("opens rightward when there is no room to the left", () => {
+    const p = popoverPlacement(at(10, 200), MENU, VIEW, "end");
+    expect(p.left).toBe(10);
+    expect(p.right).toBeUndefined();
+  });
+
+  it("clamps to the window when neither side fits", () => {
+    const p = popoverPlacement(at(100, 200), MENU, { width: 220, height: 700 }, "end");
+    expect(p.right).toBe(8);
+  });
+
+  it("never returns both edges", () => {
+    for (const x of [0, 100, 500, 800, 1000]) {
+      const p = popoverPlacement(at(x, 200), MENU, VIEW, "end");
+      expect(p.left === undefined || p.right === undefined).toBe(true);
+    }
+  });
+
+  // Alignment is horizontal only. The flip, the cap and the "stay on screen" promise are the same
+  // for a menu as for a field's dropdown.
+  it("leaves the vertical rules untouched", () => {
+    const low = popoverPlacement(at(700, 700), MENU, VIEW, "end");
+    expect(low.bottom).toBe(VIEW.height - 700 + 6);
+    expect(low.top).toBeUndefined();
+    const high = popoverPlacement(at(700, 200), MENU, VIEW, "end");
+    expect(high.top).toBe(200 + 38 + 6);
+    expect(high.maxHeight).toBe(MENU.height);
+  });
+
+  it("defaults to 'start', so every existing caller is unchanged", () => {
+    expect(popoverPlacement(at(500, 200), MENU, VIEW)).toEqual(popoverPlacement(at(500, 200), MENU, VIEW, "start"));
+  });
+});

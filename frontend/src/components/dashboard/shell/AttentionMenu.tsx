@@ -6,8 +6,9 @@ import { Check, ChevronDown, TriangleAlert, X } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { useAttention } from "@/hooks/useAttention";
-import { countPillCls } from "@/components/ui/styles";
+import { countPillCls, dropdownRadius, dropdownSurfaceCls } from "@/components/ui/styles";
 import {
+  viewportBox,
   anchorVisible,
   popoverPlacement,
   shouldReposition,
@@ -168,7 +169,7 @@ export function AttentionMenu({
     const rect = btnRef.current?.getBoundingClientRect();
     if (!rect) return;
     anchorRef.current = rect;
-    setPos(popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, { width: window.innerWidth, height: window.innerHeight }));
+    setPos(popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, viewportBox()));
     setOpen(true);
   };
 
@@ -186,7 +187,7 @@ export function AttentionMenu({
       }
       if (!shouldReposition(cause, anchorRef.current, rect)) return;
       anchorRef.current = rect;
-      setPos(popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, { width: window.innerWidth, height: window.innerHeight }));
+      setPos(popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, viewportBox()));
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") close();
@@ -289,8 +290,8 @@ export function AttentionMenu({
               /* No `max-h-…` class: the cap rides in on `pos` as the room this side actually had,
                  which is never more than PANEL_H. A class here would be a second copy of that number
                  — the copy that goes stale, and the one an inline style silently overrules anyway. */
-              className="anim-fade-in fixed z-[60] w-80 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] p-2 shadow-2xl"
-              style={pos}
+              className={`anim-fade-in fixed z-[60] w-80 overflow-y-auto p-2 ${dropdownSurfaceCls}`}
+              style={{ ...dropdownRadius, ...pos }}
             >
               <div className="mb-1 flex items-center justify-between px-1 pt-1">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Needs attention</span>

@@ -2,7 +2,8 @@
 
 import * as React from "react";
 
-import { dropdownRadius, dropdownSurfaceCls, inputCls } from "./styles";
+import { AnchoredPanel } from "./AnchoredPanel";
+import { inputCls } from "./styles";
 import { listScrollTop, suggestInputKey, suggestMatches } from "./suggestInputKeys";
 
 /**
@@ -50,22 +51,14 @@ export function SuggestInput({
 }: SuggestInputProps) {
   const [open, setOpen] = React.useState(false);
   const [active, setActive] = React.useState(-1);
-  const wrapRef = React.useRef<HTMLDivElement>(null);
+  // The list is placed against the INPUT, which is also the trigger — see AnchoredPanel.
+  const inputRef = React.useRef<HTMLInputElement>(null);
   const listRef = React.useRef<HTMLDivElement>(null);
   const listboxId = React.useId();
 
   const matches = React.useMemo(() => suggestMatches(suggestions, value), [suggestions, value]);
 
   const showList = open && !disabled && matches.length > 0;
-
-  React.useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [open]);
 
   // Keep the highlighted row on screen. Scrolls the LIST and nothing else — see `listScrollTop` for
   // why `scrollIntoView` is the wrong tool inside a dialog.
@@ -107,17 +100,19 @@ export function SuggestInput({
 
   return (
     <div
-      className="relative"
-      ref={wrapRef}
-      // Focus leaving the component closes the list. Without it, tabbing on from the field left the
+      // Focus leaving the field closes the list. Without it, tabbing on from the field left the
       // popup hanging over the controls below it, where a click aimed at the next one landed on a
-      // suggestion instead. React's onBlur is focusout, so this fires for the input and the rows
-      // alike; a null relatedTarget (window blur, click on nothing) counts as leaving.
+      // suggestion instead. A null relatedTarget (window blur, click on nothing) counts as leaving.
+      //
+      // The rows used to be inside this element too, and no longer are — the list is portalled now.
+      // Nothing is lost: they are `tabIndex={-1}` and swallow their own mousedown, so focus never
+      // reached them anyway, and this still sees every way out of the field.
       onBlur={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOpen(false);
       }}
     >
       <input
+        ref={inputRef}
         id={id}
         role="combobox"
         aria-expanded={showList}
@@ -142,7 +137,13 @@ export function SuggestInput({
         onKeyDown={onKeyDown}
       />
 
-      {showList && (
+      <AnchoredPanel
+        anchorRef={inputRef}
+        open={showList}
+        onDismiss={() => setOpen(false)}
+        /* 224px of list (`max-h-56`) plus the shell's padding. */
+        panelHeight={232}
+      >
         <div
           id={listboxId}
           ref={listRef}
@@ -156,8 +157,7 @@ export function SuggestInput({
           tabIndex={-1}
           // Same popup shell as `Select` — surface, border, shadow, and the radius token so it
           // follows Appearance → Corner radius like every other dropdown.
-          className={`absolute z-50 mt-1 max-h-56 w-full overflow-y-auto p-1 ${dropdownSurfaceCls}`}
-          style={dropdownRadius}
+          className="min-h-0 max-h-56 flex-1 overflow-y-auto p-1"
         >
           {matches.map((s, i) => (
             <button
@@ -183,7 +183,7 @@ export function SuggestInput({
             </button>
           ))}
         </div>
-      )}
+      </AnchoredPanel>
     </div>
   );
 }

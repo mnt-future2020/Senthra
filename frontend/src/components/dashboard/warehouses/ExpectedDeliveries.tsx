@@ -13,7 +13,7 @@ import { listSupplierOptions } from "@/services/supplier.service";
 import { Select } from "@/components/ui/Select";
 import { FilterPopover } from "@/components/ui/FilterPopover";
 import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
-import { dropdownRadius, dropdownSurfaceCls } from "@/components/ui/styles";
+import { AnchoredPanel } from "@/components/ui/AnchoredPanel";
 import { useAuth } from "@/hooks/useAuth";
 import { PO_PRIORITY_LABELS, PoStatusBadge, formatDate } from "@/components/dashboard/purchase-orders/poStatus";
 import type { PurchaseOrder } from "@/types/purchase-order";
@@ -188,7 +188,8 @@ function FilterMenu({
 }) {
   const [open, setOpen] = React.useState(false);
   const [activeIndex, setActiveIndex] = React.useState(0);
-  const containerRef = React.useRef<HTMLDivElement>(null);
+  // The menu is placed against the trigger BUTTON; AnchoredPanel owns the click-outside.
+  const btnRef = React.useRef<HTMLButtonElement>(null);
   const listRef = React.useRef<HTMLDivElement>(null);
   const listId = React.useId();
 
@@ -196,15 +197,6 @@ function FilterMenu({
   const current = options[selectedIndex] ?? options[0];
   // Clamp at render — `options` shrinks as buckets empty out, so a stored index can outlive its option.
   const active = Math.min(activeIndex, Math.max(0, options.length - 1));
-
-  React.useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [open]);
 
   const openMenu = () => {
     setActiveIndex(selectedIndex); // highlight starts on the current filter, not the top
@@ -242,8 +234,9 @@ function FilterMenu({
   };
 
   return (
-    <div ref={containerRef} className="relative">
+    <div>
       <button
+        ref={btnRef}
         type="button"
         onClick={() => (open ? setOpen(false) : openMenu())}
         onKeyDown={onKeyDown}
@@ -261,7 +254,17 @@ function FilterMenu({
         <ChevronDown className={`h-3.5 w-3.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
-      {open && (
+      {/* A MENU, so it keeps its own width and stays pinned to the button's right edge — see
+          AnchoredPanel's `width` and `align`. Portalled and placed like every other popup. */}
+      <AnchoredPanel
+        anchorRef={btnRef}
+        open={open}
+        onDismiss={() => setOpen(false)}
+        width="content"
+        align="end"
+        className="min-w-[13rem]"
+        panelHeight={280}
+      >
         <div
           ref={listRef}
           id={listId}
@@ -269,8 +272,7 @@ function FilterMenu({
           tabIndex={-1}
           aria-label="Filter deliveries"
           onKeyDown={onKeyDown}
-          className={`absolute right-0 z-50 mt-1.5 min-w-[13rem] p-1 outline-none ${dropdownSurfaceCls}`}
-          style={dropdownRadius}
+          className="min-h-0 flex-1 overflow-y-auto p-1 outline-none"
         >
           {options.map((c, i) => {
             const isSelected = c.key === value;
@@ -294,7 +296,7 @@ function FilterMenu({
             );
           })}
         </div>
-      )}
+      </AnchoredPanel>
     </div>
   );
 }
