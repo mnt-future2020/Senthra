@@ -67,4 +67,6 @@ export interface Settings extends Branding {
   // After how many days engineer-held stock counts as overdue. The server applies the default, so
   // this is always a number — never null.
   overdueAfterDays: number;
+  /** Global email 2FA. Off by default; Google Sign-In keeps working and is subject to it too. */
+  emailTwoFactorEnabled: boolean;
 }

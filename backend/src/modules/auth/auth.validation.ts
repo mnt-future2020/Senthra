@@ -58,3 +58,13 @@ export const resetPasswordSchema = z.object({
     .min(8, "New password must be at least 8 characters."),
 });
 export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
+
+// The emailed 2FA code: exactly six digits. Trimmed first, so a code pasted out of an email client
+// with stray whitespace still verifies instead of failing for a reason the user cannot see.
+export const twoFactorVerifySchema = z.object({
+  code: z
+    .string({ error: "Enter the 6-digit code from your email." })
+    .trim()
+    .regex(/^\d{6}$/, "Enter the 6-digit code from your email."),
+});
+export type TwoFactorVerifyInput = z.infer<typeof twoFactorVerifySchema>;

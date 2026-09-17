@@ -87,7 +87,11 @@ const client = axios.create({
 });
 
 // Endpoints that must NOT trigger a silent refresh-and-retry on a 401.
-const NO_REFRESH = ["/auth/refresh", "/auth/login", "/auth/google"];
+//
+// `/auth/2fa` is here because a 401 from those routes is a NORMAL answer meaning "no pending
+// challenge" — not an expired access token. Without it, every ordinary visit to the login page
+// would fire a pointless /auth/refresh and replay the request.
+const NO_REFRESH = ["/auth/refresh", "/auth/login", "/auth/google", "/auth/2fa"];
 
 // De-duped silent refresh: many concurrent 401s share one /auth/refresh call.
 let refreshInFlight: Promise<boolean> | null = null;

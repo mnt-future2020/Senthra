@@ -48,9 +48,16 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   // Never leak internal details for 500s; surface them server-side for diagnosis.
   if (status >= 500) console.error(err);
   const message =
-    status >= 500
-      ? "Internal Server Error"
-      : bodyTooLarge(err)
+    // An HttpError's message is one WE wrote — a curated sentence for the user, never a raw
+    // exception — so it is safe to surface even at 5xx, and the masking below still catches every
+    // uncaught error, which is what that rule actually protects against. Without this exception, a
+    // deliberate 502 ("Couldn't send your verification code") reached the user as "Internal Server
+    // Error", which reads as "the app is broken" rather than "try again".
+    err instanceof HttpError
+      ? err.message
+      : status >= 500
+        ? "Internal Server Error"
+        : bodyTooLarge(err)
         ? "That file is too large to upload."
         : mapped
           ? mapped.message

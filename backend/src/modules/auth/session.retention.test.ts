@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { deleteMany } = vi.hoisted(() => ({ deleteMany: vi.fn() }));
-vi.mock("../../lib/prisma.js", () => ({ prisma: { session: { deleteMany } } }));
+const { deleteMany, challengeDeleteMany } = vi.hoisted(() => ({
+  deleteMany: vi.fn(),
+  challengeDeleteMany: vi.fn(),
+}));
+// The sweep now makes TWO passes per tick — expired sessions and expired 2FA challenges — so the
+// challenge collection needs its own mock. Kept as a separate spy so the session assertions below
+// still count only session deletes.
+vi.mock("../../lib/prisma.js", () => ({
+  prisma: { session: { deleteMany }, loginChallenge: { deleteMany: challengeDeleteMany } },
+}));
 // session.service reaches for realtime to hang up on revoked devices; this suite is about the
 // expiry sweep, which touches no live socket. Stubbed so it doesn't drag socket.io + env in.
 vi.mock("../../lib/realtime.js", () => ({
@@ -17,6 +25,7 @@ const NOW = new Date("2026-08-21T12:00:00.000Z");
 
 beforeEach(() => {
   deleteMany.mockReset().mockResolvedValue({ count: 0 });
+  challengeDeleteMany.mockReset().mockResolvedValue({ count: 0 });
 });
 
 describe("session retention — expired-row cleanup", () => {
@@ -87,8 +96,34 @@ describe("startExpiredSessionSweep", () => {
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(deleteMany).toHaveBeenCalledTimes(2);
+    // Only the SESSION pass failed; the challenge pass succeeded both ticks, so exactly one error.
     expect(errors).toHaveLength(1);
     stop();
     spy.mockRestore();
+  });
+});
+
+describe("expired 2FA challenge cleanup", () => {
+  it("sweeps expired challenges alongside sessions on every tick", async () => {
+    vi.useFakeTimers();
+    const stop = startExpiredSessionSweep(1000);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(challengeDeleteMany).toHaveBeenCalledWith({
+      where: { expiresAt: { lt: expect.any(Date) } },
+    });
+    stop();
+    vi.useRealTimers();
+  });
+
+  it("a failing challenge pass does not stop the session pass", async () => {
+    vi.useFakeTimers();
+    challengeDeleteMany.mockRejectedValue(new Error("mongo down"));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const stop = startExpiredSessionSweep(1000);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(deleteMany).toHaveBeenCalledTimes(1);
+    stop();
+    spy.mockRestore();
+    vi.useRealTimers();
   });
 });

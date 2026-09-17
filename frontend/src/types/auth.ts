@@ -62,3 +62,29 @@ export interface DeviceSession {
   createdAt: string;
   lastUsedAt: string;
 }
+
+/**
+ * Returned by POST /auth/login (202) when the account must still complete an emailed OTP.
+ *
+ * Carries no principal and no token, because at this point NO session exists on the server. The
+ * challenge itself lives in an httpOnly cookie the page cannot read.
+ */
+export interface TwoFactorPending {
+  twoFactorRequired: true;
+  /** Already masked by the server, e.g. "j•••@acme.com". */
+  email: string;
+  /**
+   * DURATIONS in seconds, not instants — the page counts them down against its own elapsed time.
+   *
+   * An absolute timestamp would only be meaningful to a browser whose clock agrees with the
+   * server's: a device running slow kept "Resend" locked past the challenge's own expiry, leaving
+   * no way to obtain a working code. Both are server-derived, so a refresh resumes the REAL
+   * remainder rather than restarting a fresh 60s.
+   */
+  expiresInSeconds: number;
+  resendInSeconds: number;
+  resendsRemaining: number;
+}
+
+/** Either a completed sign-in or a pending second factor. */
+export type LoginResult = { twoFactorRequired: false; principal: Principal } | TwoFactorPending;

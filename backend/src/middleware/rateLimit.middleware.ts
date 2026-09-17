@@ -40,10 +40,25 @@ const makeLimiter = (opts: Pick<Options, "windowMs" | "limit" | "message">) =>
     ...opts,
   });
 
+/**
+ * The auth IP budgets, as data.
+ *
+ * Exported so the relationships BETWEEN them can be asserted rather than eyeballed — a verify
+ * budget tighter than the login budget, for instance, lets an IP start more sign-ins than it can
+ * finish, which reads as an outage to everyone behind one office NAT. Windows differ, so compare
+ * them normalised (see rateLimit.twoFactor.test.ts), never by `limit` alone.
+ */
+export const AUTH_RATE_LIMITS = {
+  login: { windowMs: 5 * 60 * 1000, limit: 10 },
+  twoFactorVerify: { windowMs: 15 * 60 * 1000, limit: 30 },
+  twoFactorResend: { windowMs: 15 * 60 * 1000, limit: 10 },
+  twoFactorStatus: { windowMs: 15 * 60 * 1000, limit: 300 },
+  twoFactorCancel: { windowMs: 15 * 60 * 1000, limit: 60 },
+} as const;
+
 // Brute-force protection on the auth-sensitive endpoints.
 export const loginLimiter = makeLimiter({
-  windowMs: 5 * 60 * 1000,
-  limit: 10,
+  ...AUTH_RATE_LIMITS.login,
   message: json("Too many attempts. Please try again in a few minutes."),
 });
 
@@ -73,6 +88,52 @@ export const passwordChangeLimiter = makeLimiter({
   windowMs: 15 * 60 * 1000,
   limit: 15,
   message: json("Too many attempts. Please try again later."),
+});
+
+// --- Email 2FA ---
+// The PER-CHALLENGE counters (MAX_ATTEMPTS = 5, MAX_RESENDS = 3) are the primary brute-force
+// defence; these IP limiters are the secondary one, because an attacker can rotate addresses but
+// cannot rotate the challenge row. They are sized for SHARED EGRESS — an office NAT or a mobile
+// carrier puts many legitimate users behind one address.
+//
+// At least as permissive as loginLimiter (10 / 5 min = 30 / 15 min). A tighter budget here let an
+// IP start more logins than it could finish, so a user behind shared NAT could be emailed a code
+// and then blocked from ever submitting it — locked out by a limiter rather than by anything they
+// did. Per-challenge attempts stay capped at 5 regardless.
+export const twoFactorVerifyLimiter = makeLimiter({
+  ...AUTH_RATE_LIMITS.twoFactorVerify,
+  message: json("Too many attempts. Please try again later."),
+});
+
+// Above two users' full per-challenge allowance (3 each), so two colleagues on one office
+// connection cannot exhaust the bucket for everyone behind it. Still well under what an abuser
+// would need for mail-bombing, and the 60s per-challenge cooldown is untouched.
+export const twoFactorResendLimiter = makeLimiter({
+  ...AUTH_RATE_LIMITS.twoFactorResend,
+  message: json("Too many code requests. Please wait a few minutes."),
+});
+
+// DELIBERATELY SEPARATE from twoFactorVerifyLimiter, and deliberately generous. The login page calls
+// GET /auth/2fa/challenge on EVERY mount to decide which step to draw, so sharing a bucket with
+// verify would let ordinary page refreshes exhaust the verification budget and lock a legitimate
+// user out of their own OTP step. It is a cheap indexed read that returns no secret.
+//
+// Sized per BUILDING, not per person, because that mount happens on every visit by everyone behind
+// the address — signed-in users bouncing off /login included, none of whom are doing 2FA at all. An
+// earlier 60 was a single busy morning for one office: once spent, a user mid-verification who
+// refreshed was dropped back to the credential form and had to start a second sign-in.
+export const twoFactorStatusLimiter = makeLimiter({
+  ...AUTH_RATE_LIMITS.twoFactorStatus,
+  message: json("Too many requests. Please try again later."),
+});
+
+// "Back to sign in". Its own bucket rather than the status one: they are both cheap, but sharing
+// meant the page's automatic on-mount probes could spend the budget for a DELIBERATE user action,
+// and a refused cancel leaves the challenge alive — so the next visit to /login puts the user back
+// on the OTP step they just tried to leave.
+export const twoFactorCancelLimiter = makeLimiter({
+  ...AUTH_RATE_LIMITS.twoFactorCancel,
+  message: json("Too many requests. Please try again later."),
 });
 
 // Throttle the test-email endpoint so it can't be used to spam.

@@ -8,6 +8,10 @@ import {
   passwordChangeLimiter,
   refreshLimiter,
   resetPasswordLimiter,
+  twoFactorCancelLimiter,
+  twoFactorResendLimiter,
+  twoFactorStatusLimiter,
+  twoFactorVerifyLimiter,
 } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
@@ -17,11 +21,24 @@ import {
   googleLoginSchema,
   loginSchema,
   resetPasswordSchema,
+  twoFactorVerifySchema,
 } from "./auth.validation.js";
 
 const router = Router();
 
 router.post("/login", loginLimiter, validateBody(loginSchema), authController.login);
+
+// Email 2FA. NONE of these use requireAuth: the caller is mid-login and holds no session, and the
+// challenge cookie authenticates nothing (requireAuth reads the access cookie only).
+router.get("/2fa/challenge", twoFactorStatusLimiter, authController.twoFactorChallenge);
+router.post(
+  "/2fa/verify",
+  twoFactorVerifyLimiter,
+  validateBody(twoFactorVerifySchema),
+  authController.twoFactorVerify,
+);
+router.post("/2fa/resend", twoFactorResendLimiter, authController.twoFactorResend);
+router.post("/2fa/cancel", twoFactorCancelLimiter, authController.twoFactorCancel);
 router.post("/google", loginLimiter, validateBody(googleLoginSchema), authController.googleLogin);
 router.get("/google/config", authController.googleConfig);
 router.post("/refresh", refreshLimiter, authController.refresh);

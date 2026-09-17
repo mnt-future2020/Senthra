@@ -27,7 +27,12 @@ export const uploadBrandingImage = asyncHandler(async (req, res) => {
 
 // PUT /settings  (protected)
 export const updateSettings = asyncHandler(async (req, res) => {
-  const settings = await settingsService.updateSettings(req.body as UpdateSettingsInput);
+  // The acting principal is passed through so a change to the sign-in policy is attributable.
+  const settings = await settingsService.updateSettings(req.body as UpdateSettingsInput, {
+    id: req.principal?.id,
+    email: req.principal?.email,
+    type: req.principal?.type,
+  });
   res.json({ settings });
 });
 

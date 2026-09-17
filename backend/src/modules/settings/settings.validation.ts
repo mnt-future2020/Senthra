@@ -130,6 +130,8 @@ export const updateSettingsSchema = z.object({
 
   // --- Engineer transfer feature flags ---
   engineerTransferRequireSignature: z.boolean().optional(),
+  // --- Security / authentication ---
+  emailTwoFactorEnabled: z.boolean().optional(),
   // Whole days. Coerced because a number input posts a string. Bounded so a slip like "3650" can't
   // turn the overdue list into every job the business has ever run. `""` clears it back to the
   // read-time default, the same escape hatch every other nullable setting here offers — without it,

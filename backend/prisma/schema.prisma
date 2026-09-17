@@ -126,6 +126,12 @@ model Settings {
   // 14 days suits a same-week install job; a business running month-long projects will want more.
   overdueAfterDays Int?
 
+  // --- Security / authentication ---
+  // When true, EVERY sign-in also requires a 6-digit code emailed to the account address — password
+  // logins and Google sign-in alike. Google stays available and is itself subject to the code
+  // (see googleLogin), so it is not a way around the second factor.
+  emailTwoFactorEnabled Boolean @default(false)
+
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 }
@@ -3290,6 +3296,37 @@ model Session {
   expiresAt     DateTime // matches the refresh token's expiry
 
   @@index([principalId, principalType])
+}
+
+// A password that has been proven but NOT yet completed by its emailed OTP.
+//
+// Deliberately NOT stored on the account rows: an OTP placed in `resetTokenHash` would be accepted
+// by the unauthenticated /auth/reset-password endpoint, turning the second factor into a
+// password-change primitive — and that field pair has nowhere to count attempts.
+//
+// Holds no session and grants no access. Only /auth/2fa/verify turns one of these into a Session.
+model LoginChallenge {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  tokenHash     String   @unique // SHA-256 of the senthra_2fa cookie value (never the raw token)
+  principalId   String // the admin, user, or customer id (no FK — points at any collection)
+  principalType String // "admin" | "user" | "customer"
+  // Snapshotted at issue time so a later account email change can never redirect a live code.
+  email         String
+  // Greeting for the OTP email. Snapshotted for the same reason, and so a RESEND addresses the user
+  // by the same name the first code did without re-reading the account.
+  firstName     String
+  codeHash      String // bcrypt of the 6-digit OTP — never the code itself
+  attempts      Int      @default(0)
+  resendCount   Int      @default(0)
+  lastSentAt    DateTime @default(now())
+  remember      Boolean  @default(true) // carried from the login request to the eventual session
+  ip            String?
+  userAgent     String?
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+
+  @@index([principalId, principalType])
+  @@index([expiresAt])
 }
 
 // A named, atomically-incrementing sequence. Used to hand out gap-free, collision-free
