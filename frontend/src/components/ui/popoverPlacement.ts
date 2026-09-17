@@ -115,13 +115,110 @@ export function anchorVisible(rect: Rect, viewport: { height: number }): boolean
 }
 
 /**
+ * The point to hit-test to ask whether the trigger is still uncovered: the middle of its BOTTOM edge,
+ * pulled 2px inside so a rect ending exactly on a border doesn't test the pixel next door.
+ *
+ * The bottom edge and no other, because that is the edge the panel hangs from. A trigger whose bottom
+ * is hidden has nowhere to hang a panel that isn't already behind something.
+ */
+export function anchorProbePoint(rect: Rect): { x: number; y: number } {
+  return { x: Math.round((rect.left + rect.right) / 2), y: Math.round(rect.bottom) - 2 };
+}
+
+/**
+ * Is the trigger COVERED by something, even though it is inside the viewport?
+ *
+ * `anchorVisible` asks about the window, and that was the whole test — which is why a dropdown on the
+ * purchase-order form could end up floating over the form's own header bar. The page that scrolls is
+ * not the window: it is a container inside the shell, and the form's sticky header sits INSIDE that
+ * container, pinned over its top ~77px. Scroll an item row up behind that bar and its trigger is
+ * still "visible" by the window test — `top: 70, bottom: 112`, comfortably on screen — so the panel
+ * followed it up and painted across the header, because an inline panel at `z-30` outranks a header
+ * at `z-20`. The search box then vanished under the topbar and the list hung there attached to
+ * nothing. (It reproduced on Purchase Orders and not on Purchase Requests for no better reason than
+ * form length: the shorter form runs out of scroll before its item rows can reach the bar.)
+ *
+ * Asking the browser what is actually painted at the trigger answers this without the panel needing
+ * to know that a sticky header exists, what it is called, or how tall it is today — and it covers
+ * being clipped by a scroll container's overflow just as well, since nothing of the trigger is
+ * painted there either.
+ *
+ * @param anchor the trigger element
+ * @param topmost what `document.elementFromPoint(anchorProbePoint(rect))` returned — null when the
+ *        point is outside the viewport, which counts as covered
+ */
+export function anchorObscured(anchor: Element, topmost: Element | null): boolean {
+  if (!topmost) return true;
+  // A hit on the trigger's own label/chevron is a hit on the trigger; so is one on a wrapper that
+  // contains it, which is what a fractional rect at the trigger's edge can return.
+  return !(anchor.contains(topmost) || topmost.contains(anchor));
+}
+
+/**
+ * `anchorObscured` against the live document — the two halves joined, and the only part that needs a
+ * browser.
+ *
+ * Answers FALSE when the environment cannot be asked. jsdom does not implement `elementFromPoint` at
+ * all (it is not a function there, so calling it throws), and this runs from a scroll handler: a
+ * component test that scrolls with a dropdown open would take a TypeError rather than a verdict. The
+ * fallback is deliberately "not obscured" — dismissal then rests on `anchorVisible` alone, which is
+ * the test that existed before this one, instead of every scroll closing every panel.
+ */
+export function anchorCovered(anchor: Element, rect: Rect, ownPanel?: Element | null): boolean {
+  const doc = anchor.ownerDocument;
+  if (typeof doc?.elementFromPoint !== "function") return false;
+  const { x, y } = anchorProbePoint(rect);
+  const hit = doc.elementFromPoint(x, y);
+  // The panel's OWN body is not something to hide from, and it can genuinely end up over the edge it
+  // hangs from: a multi-select whose chips wrap grows its control downward after the panel has been
+  // placed, until the 6px gap is gone and the panel is lying across the bottom of its own trigger.
+  // Read as chrome, that closed the menu on the second pick — the panel dismissing itself because it
+  // found itself. The right answer to "am I covered by me" is no; the placement follows the control.
+  if (ownPanel && hit && ownPanel.contains(hit)) return false;
+  return anchorObscured(anchor, hit);
+}
+
+/**
+ * The box a `position: fixed` panel is actually laid out in.
+ *
+ * `window.innerWidth` is the wrong number for this and every caller here used it. The two differ by
+ * the width of a classic scrollbar, and that difference lands straight in the layout: `innerWidth`
+ * counts the scrollbar, while the `right` and `bottom` this module hands back are resolved by CSS
+ * against the initial containing block, which does not. A row menu asking to sit flush with the ⋯
+ * button that opened it came out 6px to the left of it on any scrollbarred window.
+ *
+ * So: ask for the ICB, in one place, rather than passing `window.innerWidth` at thirteen call sites.
+ */
+export function viewportBox(): { width: number; height: number } {
+  const el = document.documentElement;
+  return { width: el.clientWidth, height: el.clientHeight };
+}
+
+/**
+ * Which of the trigger's vertical edges the panel lines up with.
+ *
+ * "start" (the default) is the rule this function was written for and the one every existing caller
+ * wants: line the panel's LEFT edge up with the trigger's, and only right-align it if that would run
+ * off the window.
+ *
+ * "end" is for a MENU hanging off a small button — the kind that used to be written `absolute
+ * right-0`. Those read as pinned to the button's right edge, and a 208px menu suddenly opening
+ * rightward from a 90px pill is not a placement fix, it is a different design. So the caller says
+ * which edge it means rather than the geometry deciding for it.
+ */
+export type PlacementAlign = "start" | "end";
+
+/**
  * @param anchor   the trigger's bounding rect, in viewport coordinates
  * @param panel    the panel's size — the height is the cap it WANTS, not a measurement
  * @param viewport the window's inner size
+ * @param align    which of the trigger's edges the panel lines up with; "start" (default) for a
+ *                 field's dropdown, "end" for a menu pinned to a button's right edge
  *
  * Horizontal: open RIGHTWARD from the trigger's left edge when the panel fits — that direction moves
  * away from the leading columns of a table, which is where the reading happens. Fall back to
- * right-aligning it under the trigger, and clamp if even that would overflow.
+ * right-aligning it under the trigger, and clamp if even that would overflow. An "end" caller starts
+ * from the right-aligned case instead, and falls back the same way.
  *
  * Vertical: below the trigger when the panel fits there, otherwise the side with more room — a flip
  * that swaps one overflow for another helps nobody. Then `maxHeight` states what that side had, so a
@@ -131,10 +228,20 @@ export function popoverPlacement(
   anchor: Rect,
   panel: { width: number; height: number },
   viewport: { width: number; height: number },
+  align: PlacementAlign = "start",
 ): Placement {
   const place: Placement = {};
 
-  if (anchor.left + panel.width + MARGIN <= viewport.width) {
+  if (align === "end" && anchor.right - panel.width >= MARGIN) {
+    // Pinned to the trigger's right edge, as `absolute right-0` did. Expressed as a `right` offset so
+    // it stays pinned there rather than drifting if the panel is later measured differently.
+    place.right = Math.max(MARGIN, viewport.width - anchor.right);
+  } else if (align === "end" && anchor.left + panel.width + MARGIN <= viewport.width) {
+    // No room leftward — open the other way rather than hanging off the left edge of the window.
+    place.left = anchor.left;
+  } else if (align === "end") {
+    place.right = MARGIN;
+  } else if (anchor.left + panel.width + MARGIN <= viewport.width) {
     place.left = anchor.left;
   } else if (anchor.right - panel.width >= MARGIN) {
     // Right-aligned to the trigger: expressed as a `right` offset so the panel stays pinned to the

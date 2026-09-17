@@ -19,9 +19,10 @@ import { listIrmTypes } from "@/services/irm-type.service";
 import { listIrmCategories } from "@/services/irm-category.service";
 import { listSupplierOptions } from "@/services/supplier.service";
 import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
-import { listToolbarCls } from "@/components/ui/styles";
+import { dropdownRadius, dropdownSurfaceCls, listToolbarCls } from "@/components/ui/styles";
 import type { IrmItem, IrmStatus } from "@/types/irm";
 import type { UserStatus } from "@/types/user";
+import { viewportBox } from "@/components/ui/popoverPlacement";
 
 const PAGE_SIZE = 20;
 
@@ -81,9 +82,13 @@ function IrmRowActions({
   const openMenu = () => {
     const rect = btnRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const right = Math.max(8, window.innerWidth - rect.right);
-    const spaceBelow = window.innerHeight - rect.bottom;
-    setPos(spaceBelow < 200 ? { bottom: window.innerHeight - rect.top + 4, right } : { top: rect.bottom + 4, right });
+    // The ICB, not `window.innerWidth`/`innerHeight`: the two differ by a scrollbar's width, and
+    // these numbers become the CSS `right`/`bottom` of a fixed element, which CSS resolves against
+    // the ICB. The menu came out 6px shy of the button it hangs from. See viewportBox.
+    const view = viewportBox();
+    const right = Math.max(8, view.width - rect.right);
+    const spaceBelow = view.height - rect.bottom;
+    setPos(spaceBelow < 200 ? { bottom: view.height - rect.top + 4, right } : { top: rect.bottom + 4, right });
     setOpen(true);
   };
   React.useEffect(() => {
@@ -130,8 +135,8 @@ function IrmRowActions({
               ref={menuRef}
               role="menu"
               aria-label="IRM item actions"
-              className="anim-fade-in fixed z-[60] w-48 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-2xl"
-              style={{ top: pos.top, bottom: pos.bottom, right: pos.right }}
+              className={`anim-fade-in fixed z-[60] w-48 py-1 ${dropdownSurfaceCls}`}
+              style={{ ...dropdownRadius, top: pos.top, bottom: pos.bottom, right: pos.right }}
             >
               {canEdit && (
                 <>

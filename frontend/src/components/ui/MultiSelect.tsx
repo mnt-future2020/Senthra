@@ -3,8 +3,8 @@
 import * as React from "react";
 import { Check, ChevronDown, X } from "lucide-react";
 
+import { AnchoredPanel } from "./AnchoredPanel";
 import { multiSelectKey } from "./multiSelectKeys";
-import { dropdownRadius, dropdownSurfaceCls } from "./styles";
 
 export interface MultiSelectOption {
   value: string;
@@ -43,7 +43,9 @@ export function MultiSelect({
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [activeIndex, setActiveIndex] = React.useState(0);
-  const containerRef = React.useRef<HTMLDivElement>(null);
+  // The popup is placed against the CONTROL, and `AnchoredPanel` owns the click-outside that used
+  // to be a containment check on the wrapper.
+  const controlRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
   const listId = React.useId();
 
@@ -57,16 +59,6 @@ export function MultiSelect({
   // Active option, clamped to the current filtered range at render (the list can shrink as the user
   // types). Reset to 0 on each query change in the input handler — no synchronous setState in effects.
   const active = Math.min(activeIndex, Math.max(0, filtered.length - 1));
-
-  // Close on outside click.
-  React.useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [open]);
 
   const openMenu = () => {
     if (disabled) return;
@@ -123,9 +115,10 @@ export function MultiSelect({
   };
 
   return (
-    <div ref={containerRef} className="relative">
+    <div>
       {/* Control */}
       <div
+        ref={controlRef}
         role="combobox"
         aria-expanded={open}
         aria-haspopup="listbox"
@@ -182,14 +175,21 @@ export function MultiSelect({
         <ChevronDown className="ml-auto h-4 w-4 shrink-0 text-[var(--faint)]" />
       </div>
 
-      {/* Popup */}
-      {open && (
+      {/* Popup — portalled and placed; see AnchoredPanel. The chips + search box stay in the
+          control above, so focus never enters the panel and its keyboard model is untouched. */}
+      <AnchoredPanel
+        anchorRef={controlRef}
+        open={open}
+        onDismiss={() => setOpen(false)}
+        /* 256px of list (`max-h-64`) plus the shell's padding — what this panel wants when the
+           options are plenty, and all placement needs to choose a side. */
+        panelHeight={264}
+      >
         <div
           id={listId}
           role="listbox"
           aria-multiselectable="true"
-          className={`absolute z-50 mt-1.5 max-h-64 w-full overflow-y-auto p-1 outline-none [scrollbar-width:thin] ${dropdownSurfaceCls}`}
-          style={dropdownRadius}
+          className="min-h-0 max-h-64 flex-1 overflow-y-auto p-1 outline-none [scrollbar-width:thin]"
         >
           {filtered.length === 0 ? (
             <p className="px-3 py-2 text-xs text-[var(--faint)]">{query ? "No matches." : emptyText}</p>
@@ -214,7 +214,7 @@ export function MultiSelect({
             })
           )}
         </div>
-      )}
+      </AnchoredPanel>
     </div>
   );
 }

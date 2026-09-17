@@ -3,7 +3,8 @@
 import * as React from "react";
 import { Check, ChevronDown, PackagePlus, Plus } from "lucide-react";
 
-import { dropdownRadius, dropdownSurfaceCls, inputCls } from "@/components/ui/styles";
+import { AnchoredPanel } from "@/components/ui/AnchoredPanel";
+import { inputCls } from "@/components/ui/styles";
 import type { CustomerStockEntry, PortalStockEntry } from "@/types/customer";
 
 // Only the five fields the grouping reads, so this serves BOTH callers: the admin modal passes the
@@ -99,21 +100,11 @@ export function StockItemPicker({
 }) {
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
-  const wrapRef = React.useRef<HTMLDivElement>(null);
+  // The panel hangs off this: `AnchoredPanel` places it against the trigger, follows it while it is
+  // visible, and owns the click-outside that used to be a wrapper-containment check here.
+  const btnRef = React.useRef<HTMLButtonElement>(null);
   const listboxId = React.useId();
   const serverFiltered = onQueryChange !== undefined;
-
-  React.useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
-        setOpen(false);
-        setQuery("");
-      }
-    };
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [open]);
 
   // Server-driven search: debounce the raw input up to the caller (which refetches). Reset to the
   // full list when the field is cleared or the picker closes (query resets on close/pick).
@@ -147,8 +138,9 @@ export function StockItemPicker({
   const label = value.name || (loading ? "Loading your items…" : "— Select or type an item —");
 
   return (
-    <div className="relative" ref={wrapRef}>
+    <div>
       <button
+        ref={btnRef}
         type="button"
         role="combobox"
         aria-controls={listboxId}
@@ -166,79 +158,83 @@ export function StockItemPicker({
         <ChevronDown className="h-4 w-4 shrink-0 text-[var(--faint)]" />
       </button>
 
-      {open && !disabled && (
-        <div
-          id={listboxId}
-          className={`absolute z-30 mt-1 w-full overflow-hidden ${dropdownSurfaceCls}`} style={dropdownRadius}
-        >
-          <div className="border-b border-[var(--border-2)] p-2">
-            <input
-              autoFocus
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  if (exact) pickExisting(exact);
-                  else if (showUseNew) pickNew(q);
-                } else if (e.key === "Escape") {
-                  setOpen(false);
-                  setQuery("");
-                }
-              }}
-              placeholder="Search your items or type a new name…"
-              maxLength={160}
-              className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-            />
-          </div>
-          <div className="max-h-60 overflow-auto py-1">
-            {showUseNew && (
-              <button
-                type="button"
-                onClick={() => pickNew(q)}
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-semibold text-[var(--accent)] hover:bg-[var(--accent-10)]"
-              >
-                <Plus className="h-3.5 w-3.5 shrink-0" />
-                Use &ldquo;{q}&rdquo; as a new item
-              </button>
-            )}
-
-            {filtered.length > 0 && (
-              <>
-                {items.length > 0 && (
-                  <p className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
-                    Your existing stock
-                  </p>
-                )}
-                {filtered.map((o) => (
-                  <button
-                    key={o.id}
-                    type="button"
-                    onClick={() => pickExisting(o)}
-                    className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left hover:bg-[var(--surface-2)]"
-                  >
-                    <span className="min-w-0">
-                      <span className="block truncate text-sm text-[var(--ink)]">{o.name}</span>
-                      {o.detail && (
-                        <span className="block truncate text-[11px] text-[var(--muted)]">{o.detail}</span>
-                      )}
-                    </span>
-                    {value.entryId === o.id && (
-                      <Check className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
-                    )}
-                  </button>
-                ))}
-              </>
-            )}
-
-            {filtered.length === 0 && !showUseNew && (
-              <p className="px-3 py-3 text-center text-xs text-[var(--muted)]">
-                {loading ? "Loading…" : items.length ? "No match." : "No existing stock yet — type a new item name."}
-              </p>
-            )}
-          </div>
+      <AnchoredPanel
+        id={listboxId}
+        anchorRef={btnRef}
+        open={open && !disabled}
+        onDismiss={() => {
+          setOpen(false);
+          setQuery("");
+        }}
+      >
+        <div className="shrink-0 border-b border-[var(--border-2)] p-2">
+          {/* Focus is AnchoredPanel's — an `autoFocus` here cannot work: the panel is invisible until
+              it has been placed, and the browser declines focus on a hidden element. */}
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                if (exact) pickExisting(exact);
+                else if (showUseNew) pickNew(q);
+              } else if (e.key === "Escape") {
+                setOpen(false);
+                setQuery("");
+              }
+            }}
+            placeholder="Search your items or type a new name…"
+            maxLength={160}
+            className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+          />
         </div>
-      )}
+        <div className="min-h-0 flex-1 overflow-auto py-1">
+          {showUseNew && (
+            <button
+              type="button"
+              onClick={() => pickNew(q)}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-semibold text-[var(--accent)] hover:bg-[var(--accent-10)]"
+            >
+              <Plus className="h-3.5 w-3.5 shrink-0" />
+              Use &ldquo;{q}&rdquo; as a new item
+            </button>
+          )}
+
+          {filtered.length > 0 && (
+            <>
+              {items.length > 0 && (
+                <p className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
+                  Your existing stock
+                </p>
+              )}
+              {filtered.map((o) => (
+                <button
+                  key={o.id}
+                  type="button"
+                  onClick={() => pickExisting(o)}
+                  className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left hover:bg-[var(--surface-2)]"
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm text-[var(--ink)]">{o.name}</span>
+                    {o.detail && (
+                      <span className="block truncate text-[11px] text-[var(--muted)]">{o.detail}</span>
+                    )}
+                  </span>
+                  {value.entryId === o.id && (
+                    <Check className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
+                  )}
+                </button>
+              ))}
+            </>
+          )}
+
+          {filtered.length === 0 && !showUseNew && (
+            <p className="px-3 py-3 text-center text-xs text-[var(--muted)]">
+              {loading ? "Loading…" : items.length ? "No match." : "No existing stock yet — type a new item name."}
+            </p>
+          )}
+        </div>
+      </AnchoredPanel>
 
       {value.entryId && (
         <p className="mt-1 flex items-center gap-1.5 text-[11px] font-semibold text-[var(--accent)]">

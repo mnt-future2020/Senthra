@@ -10,8 +10,9 @@ import {
   shouldReposition,
   type Placement,
   type PlacementCause,
+  viewportBox,
 } from "./popoverPlacement";
-import { inputCls, toolbarInputCls } from "./styles";
+import { dropdownRadius, dropdownSurfaceCls, inputCls, toolbarInputCls } from "./styles";
 
 // ── The SITE filter's picker ───────────────────────────────────────────────────────────────────
 //
@@ -118,7 +119,7 @@ export function SitePicker({
     const rect = btnRef.current?.getBoundingClientRect();
     if (!rect) return;
     anchorRef.current = rect;
-    setPos(popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, { width: window.innerWidth, height: window.innerHeight }));
+    setPos(popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, viewportBox()));
     setOpen(true);
   };
 
@@ -147,7 +148,7 @@ export function SitePicker({
       if (!anchorVisible(rect, { height: window.innerHeight })) { setOpen(false); return; }
       if (!shouldReposition(cause, anchorRef.current, rect)) return;
       anchorRef.current = rect;
-      setPos(popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, { width: window.innerWidth, height: window.innerHeight }));
+      setPos(popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, viewportBox()));
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
     // Two events, two questions — see shouldReposition. A resize always re-places; a scroll only
@@ -209,8 +210,8 @@ export function SitePicker({
               aria-label={ariaLabel}
               /* The height cap arrives on `pos` — the room this side actually had, capped at PANEL_H.
                  Still a flex column: the search box stays put and the list below it takes the rest. */
-              className="anim-fade-in fixed z-[60] flex w-[300px] flex-col rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-2xl"
-              style={pos}
+              className={`anim-fade-in fixed z-[60] flex w-[300px] flex-col p-3 ${dropdownSurfaceCls}`}
+              style={{ ...dropdownRadius, ...pos }}
             >
               <div className="mb-2 flex items-center justify-between">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Site</span>

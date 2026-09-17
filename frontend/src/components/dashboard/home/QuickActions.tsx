@@ -6,7 +6,7 @@ import { Plus } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
 import { principalCan } from "@/lib/auth";
-import { dropdownRadius, dropdownSurfaceCls } from "@/components/ui/styles";
+import { AnchoredPanel } from "@/components/ui/AnchoredPanel";
 
 // Quick Actions — permission-gated links into the owning modules' create routes. Desktop shows them
 // as individual buttons; narrow viewports collapse them into a single "+ New" dropdown (the label ERP
@@ -24,23 +24,18 @@ const ACTIONS: Action[] = [
 export function QuickActions() {
   const { principal } = useAuth();
   const [open, setOpen] = React.useState(false);
-  const wrapRef = React.useRef<HTMLDivElement>(null);
+  // The menu is placed against the trigger BUTTON; AnchoredPanel owns the click-outside.
+  const btnRef = React.useRef<HTMLButtonElement>(null);
   const actions = ACTIONS.filter((a) => principalCan(principal, a.perm));
 
   React.useEffect(() => {
     if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
-    };
+    // Escape only: the click-outside is AnchoredPanel's now.
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
     };
-    window.addEventListener("mousedown", onDown);
     window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
+    return () => window.removeEventListener("keydown", onKey);
   }, [open]);
 
   // AFTER the hooks — an early return above them changes the hook count between renders.
@@ -69,8 +64,9 @@ export function QuickActions() {
           that actually bit — not following a link. This bar lives in the dashboard shell, so a client
           navigation never unmounts it, and the menu stayed hanging open over the page you had just
           navigated to. */}
-      <div className="relative sm:hidden" ref={wrapRef}>
+      <div className="sm:hidden">
         <button
+          ref={btnRef}
           type="button"
           aria-haspopup="menu"
           aria-expanded={open}
@@ -80,12 +76,24 @@ export function QuickActions() {
           <Plus className="h-4 w-4" />
           New
         </button>
-        {open && (
-          <div
-            role="menu"
-            className={`absolute right-0 z-30 mt-1 w-44 overflow-hidden ${dropdownSurfaceCls}`}
-            style={dropdownRadius}
-          >
+        {/* A MENU: its own width, pinned to the button's right edge, portalled and placed — see
+            AnchoredPanel. As an `absolute` child it could be clipped by the page's scroll container
+            and, being z-30, could paint over the sticky top bar. */}
+        <AnchoredPanel
+          anchorRef={btnRef}
+          open={open}
+          onDismiss={() => setOpen(false)}
+          width="content"
+          align="end"
+          className="w-44"
+          panelHeight={160}
+        >
+          {/* `min-h-0 flex-1 overflow-auto`, as every other AnchoredPanel list has: the panel is
+              `overflow-hidden` and wears the room its side had as a max-height, so a list that
+              cannot scroll inside that just loses its last rows. Measured on a 240px-tall window:
+              the cap came out at 113px against 144px of content and "Goods In" was unreachable —
+              and a fifth quick action would overflow the 160px cap on any screen at all. */}
+          <div role="menu" className="min-h-0 flex-1 overflow-auto">
             {actions.map((a) => (
               <Link
                 key={a.href}
@@ -98,7 +106,7 @@ export function QuickActions() {
               </Link>
             ))}
           </div>
-        )}
+        </AnchoredPanel>
       </div>
     </>
   );

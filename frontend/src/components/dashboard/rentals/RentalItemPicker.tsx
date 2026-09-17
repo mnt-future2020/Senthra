@@ -4,7 +4,8 @@ import * as React from "react";
 import { AlertTriangle, Check, ChevronDown, Loader2, PackagePlus, Search } from "lucide-react";
 
 import { listRentalItems } from "@/services/rental.service";
-import { dropdownRadius, dropdownSurfaceCls, inputCls } from "@/components/ui/styles";
+import { AnchoredPanel } from "@/components/ui/AnchoredPanel";
+import { inputCls } from "@/components/ui/styles";
 import {
   CATALOGUE_MIN_QUERY,
   catalogueSearchView,
@@ -82,22 +83,15 @@ export function RentalItemPicker({
   // time so closing the dropdown (which clears `query`) cannot blank the form's name field.
   const [createName, setCreateName] = React.useState<string | null>(null);
 
-  const wrapRef = React.useRef<HTMLDivElement>(null);
+  // The panel hangs off this: `AnchoredPanel` places it against the trigger, follows it while it is
+  // visible, and owns the click-outside that used to be a wrapper-containment check here.
+  const btnRef = React.useRef<HTMLButtonElement>(null);
   // Every search run takes a ticket, so a slow "cat" answering after a fast "cat6" is dropped.
   const seqRef = React.useRef(0);
   const listboxId = React.useId();
 
   const q = query.trim();
   const isSearchQuery = q.length >= CATALOGUE_MIN_QUERY;
-
-  React.useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [open]);
 
   React.useEffect(() => {
     if (!open || !isSearchQuery) return;
@@ -163,8 +157,9 @@ export function RentalItemPicker({
 
   return (
     <>
-      <div className="relative" ref={wrapRef}>
+      <div>
         <button
+          ref={btnRef}
           type="button"
           role="combobox"
           aria-controls={listboxId}
@@ -182,97 +177,102 @@ export function RentalItemPicker({
           <ChevronDown className="h-4 w-4 shrink-0 text-[var(--faint)]" />
         </button>
 
-        {open && !disabled && (
-          <div className={`absolute z-30 mt-1 w-full overflow-hidden ${dropdownSurfaceCls}`} style={dropdownRadius}>
-            <div className="border-b border-[var(--border-2)] p-2">
-              <div className="relative">
-                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--faint)]" />
-                <input
-                  autoFocus
-                  value={query}
-                  onChange={(e) => {
-                    setQuery(e.target.value);
-                    setActiveIndex(0);
-                  }}
-                  onKeyDown={onKeyDown}
-                  placeholder="Search by name, code or description…"
-                  aria-label="Search the rental catalogue"
-                  className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2 pl-8 pr-8 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-                />
-                {searching && (
-                  <Loader2 className="absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[var(--faint)]" />
-                )}
-              </div>
+        <AnchoredPanel
+          anchorRef={btnRef}
+          open={open && !disabled}
+          /* Outside-click closes but keeps the typed query, exactly as the old wrapper check did —
+             reopening shows what you had searched for rather than a blank box. */
+          onDismiss={() => setOpen(false)}
+        >
+          <div className="shrink-0 border-b border-[var(--border-2)] p-2">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--faint)]" />
+              {/* Focus is AnchoredPanel's — an `autoFocus` here cannot work: the panel is invisible until
+                  it has been placed, and the browser declines focus on a hidden element. */}
+              <input
+                value={query}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setActiveIndex(0);
+                }}
+                onKeyDown={onKeyDown}
+                placeholder="Search by name, code or description…"
+                aria-label="Search the rental catalogue"
+                className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2 pl-8 pr-8 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+              />
+              {searching && (
+                <Loader2 className="absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[var(--faint)]" />
+              )}
             </div>
+          </div>
 
-            <ul id={listboxId} role="listbox" aria-label={ariaLabel} className="max-h-64 overflow-auto py-1">
-              {options.map((item, idx) => (
-                <li key={item.id} role="option" aria-selected={item.id === value}>
-                  <button
-                    type="button"
-                    onClick={() => commit(item)}
-                    onMouseEnter={() => setActiveIndex(idx)}
-                    className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm text-[var(--ink)] ${
-                      idx === active ? "bg-[var(--surface-2)]" : ""
-                    }`}
-                  >
-                    <span className="min-w-0">
-                      <span className="block truncate">{item.name}</span>
-                      <span className="block truncate text-[11px] text-[var(--muted)]">
-                        {item.code}
-                        {item.baseUnit ? ` · ${item.baseUnit}` : ""}
-                      </span>
-                    </span>
-                    {item.id === value && <Check className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />}
-                  </button>
-                </li>
-              ))}
-
-              {options.length === 0 && searching && (
-                <li className="px-3 py-3 text-center text-xs text-[var(--muted)]">Searching…</li>
-              )}
-
-              {/* A failed lookup is reported as a failure, never as "no match" — the difference is
-                  the whole reason the create option stays hidden here. */}
-              {searchFailed && (
-                <li className="flex items-start gap-2 px-3 py-3 text-xs text-[var(--muted)]">
-                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
-                  <span>
-                    Couldn&apos;t search the rental catalogue. Check your connection and try again —
-                    until it answers there&apos;s no way to tell whether this item already exists.
-                  </span>
-                </li>
-              )}
-
-              {options.length === 0 && !searching && !searchFailed && (
-                <li className="px-3 py-3 text-center text-xs text-[var(--muted)]">
-                  {isSearchQuery ? "No matching rental item." : "No rental items to show."}
-                </li>
-              )}
-            </ul>
-
-            {offerCreate && (
-              <div className="border-t border-[var(--border-2)] p-1">
+          <ul id={listboxId} role="listbox" aria-label={ariaLabel} className="min-h-0 flex-1 overflow-auto py-1">
+            {options.map((item, idx) => (
+              <li key={item.id} role="option" aria-selected={item.id === value}>
                 <button
                   type="button"
-                  onClick={openCreate}
-                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-[var(--accent)] transition-colors hover:bg-[var(--accent-10)]"
+                  onClick={() => commit(item)}
+                  onMouseEnter={() => setActiveIndex(idx)}
+                  className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm text-[var(--ink)] ${
+                    idx === active ? "bg-[var(--surface-2)]" : ""
+                  }`}
                 >
-                  <PackagePlus className="h-3.5 w-3.5 shrink-0" />
-                  <span className="truncate">Add &ldquo;{q}&rdquo; as a new rental item</span>
+                  <span className="min-w-0">
+                    <span className="block truncate">{item.name}</span>
+                    <span className="block truncate text-[11px] text-[var(--muted)]">
+                      {item.code}
+                      {item.baseUnit ? ` · ${item.baseUnit}` : ""}
+                    </span>
+                  </span>
+                  {item.id === value && <Check className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />}
                 </button>
-              </div>
+              </li>
+            ))}
+
+            {options.length === 0 && searching && (
+              <li className="px-3 py-3 text-center text-xs text-[var(--muted)]">Searching…</li>
             )}
 
-            {/* Said only before a search: the list on screen is the caller's mount-time page, not the
-                catalogue. Without this the first screenful reads as "all we have". */}
-            {!isSearchQuery && !loading && (
-              <p className="border-t border-[var(--border-2)] px-3 py-2 text-[11px] text-[var(--faint)]">
-                Type to search the whole rental catalogue.
-              </p>
+            {/* A failed lookup is reported as a failure, never as "no match" — the difference is
+                the whole reason the create option stays hidden here. */}
+            {searchFailed && (
+              <li className="flex items-start gap-2 px-3 py-3 text-xs text-[var(--muted)]">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+                <span>
+                  Couldn&apos;t search the rental catalogue. Check your connection and try again —
+                  until it answers there&apos;s no way to tell whether this item already exists.
+                </span>
+              </li>
             )}
-          </div>
-        )}
+
+            {options.length === 0 && !searching && !searchFailed && (
+              <li className="px-3 py-3 text-center text-xs text-[var(--muted)]">
+                {isSearchQuery ? "No matching rental item." : "No rental items to show."}
+              </li>
+            )}
+          </ul>
+
+          {offerCreate && (
+            <div className="shrink-0 border-t border-[var(--border-2)] p-1">
+              <button
+                type="button"
+                onClick={openCreate}
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-[var(--accent)] transition-colors hover:bg-[var(--accent-10)]"
+              >
+                <PackagePlus className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">Add &ldquo;{q}&rdquo; as a new rental item</span>
+              </button>
+            </div>
+          )}
+
+          {/* Said only before a search: the list on screen is the caller's mount-time page, not the
+              catalogue. Without this the first screenful reads as "all we have". */}
+          {!isSearchQuery && !loading && (
+            <p className="shrink-0 border-t border-[var(--border-2)] px-3 py-2 text-[11px] text-[var(--faint)]">
+              Type to search the whole rental catalogue.
+            </p>
+          )}
+        </AnchoredPanel>
       </div>
 
       {createName !== null && (

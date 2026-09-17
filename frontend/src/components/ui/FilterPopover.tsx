@@ -10,7 +10,9 @@ import {
   shouldReposition,
   type Placement,
   type PlacementCause,
+  viewportBox,
 } from "./popoverPlacement";
+import { dropdownRadius, dropdownSurfaceCls } from "./styles";
 
 /** Panel size, in px. Kept here (not measured) so placement is decided BEFORE the first paint — a
  *  measure-then-reposition would show the panel in the wrong place for a frame. `w-72` = 288px.
@@ -71,7 +73,7 @@ export function FilterPopover({
     // would otherwise clip it.
     anchorRef.current = rect;
     setPos(
-      popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, { width: window.innerWidth, height: window.innerHeight }),
+      popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, viewportBox()),
     );
     setOpen(true);
   };
@@ -99,7 +101,7 @@ export function FilterPopover({
       if (!shouldReposition(cause, anchorRef.current, rect)) return;
       anchorRef.current = rect;
       setPos(
-        popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, { width: window.innerWidth, height: window.innerHeight }),
+        popoverPlacement(rect, { width: PANEL_W, height: PANEL_H }, viewportBox()),
       );
     };
     const onKey = (e: KeyboardEvent) => {
@@ -158,8 +160,8 @@ export function FilterPopover({
               aria-label={label}
               /* The height cap arrives on `pos` — the room this side actually had, capped at PANEL_H.
                  Stating it as a class too would be the same number written twice. */
-              className="anim-fade-in fixed z-[60] w-72 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-2xl"
-              style={pos}
+              className={`anim-fade-in fixed z-[60] w-72 overflow-y-auto p-3 ${dropdownSurfaceCls}`}
+              style={{ ...dropdownRadius, ...pos }}
             >
               <div className="mb-2 flex items-center justify-between">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">{label}</span>

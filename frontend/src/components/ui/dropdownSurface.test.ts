@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { dropdownRadius, dropdownSurfaceCls } from "./styles";
@@ -19,9 +19,53 @@ const read = (rel: string) =>
   readFileSync(join(SRC, rel), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "");
 
 const POPUPS = [
+  // Base UI draws and positions this one for us, in its own portal.
   "components/ui/Select.tsx",
-  "components/ui/MultiSelect.tsx",
+  // The profile menu at the foot of the sidebar. Missed by the first sweep precisely because it is
+  // not a form control, which is why the list above is written out rather than inferred. It hangs off
+  // the sidebar, which is fixed and full-height — not inside the page's scroll container — so it is
+  // the one anchored popup with no scrolling chrome above it to collide with.
+  "components/dashboard/shell/Sidebar.tsx",
+  // Every field dropdown in the app is drawn by THIS now, so this is the file the radius rule has to
+  // hold in for all of them.
+  "components/ui/AnchoredPanel.tsx",
+  // The panels and menus that place themselves: each portals to <body> and positions with
+  // popoverPlacement, so they are not the bug AnchoredPanel exists to fix — but they were drawing
+  // their own surface, and that IS the bug this file exists to fix. All thirteen had
+  // `rounded-xl border border-[var(--border)] bg-[var(--surface)] … shadow-2xl` copied out by hand:
+  // a duplicate of dropdownSurfaceCls with the radius frozen at 12px. Measured on Customers with
+  // Appearance → Corner radius at 18px, a row menu came out 16px while the item dropdown beside it
+  // came out 18px — two popups on one screen with different corners, which is exactly what the rule
+  // at the top of this file was written to stop.
+  "components/ui/FilterPopover.tsx",
+  "components/ui/SitePicker.tsx",
+  "components/dashboard/shell/AttentionMenu.tsx",
+  "components/dashboard/customers/CustomersView.tsx",
+  "components/dashboard/goods-in/GoodsReceiptsView.tsx",
+  "components/dashboard/irm/IrmItemsView.tsx",
+  "components/dashboard/jobs/JobsView.tsx",
+  "components/dashboard/purchase-orders/PurchaseOrdersView.tsx",
+  "components/dashboard/purchase-requests/PurchaseRequestsView.tsx",
+  "components/dashboard/rentals/RentalItemsView.tsx",
+  "components/dashboard/suppliers/SuppliersView.tsx",
+  "components/dashboard/users-roles/users/UsersView.tsx",
+  "components/dashboard/warehouses/WarehousesView.tsx",
+];
+
+// The controls that hand their popup to `AnchoredPanel` instead of rendering one.
+//
+// They each used to draw it themselves, as an `absolute` child of the field, and every one of them
+// inherited the bug that cost: on the purchase-order form a dropdown whose row had scrolled up
+// behind the sticky header bar stayed glued to the hidden trigger and painted across the header —
+// and near the foot of the window the list simply ran off the bottom. The panel is portalled and
+// placed now, and these files keep only their trigger and their list.
+//
+// So the radius rule moves with it — checked once, on AnchoredPanel, above. What is checked HERE is
+// that none of these grew a second hand-rolled popup beside the shared one, because that copy would
+// come without the placement and be straight back to covering the header.
+const DELEGATED = [
   "components/ui/CreatableSelect.tsx",
+  "components/ui/MultiSelect.tsx",
   "components/ui/SuggestInput.tsx",
   "components/dashboard/irm/IrmItemPicker.tsx",
   "components/dashboard/stock/StockItemPicker.tsx",
@@ -29,9 +73,7 @@ const POPUPS = [
   "components/dashboard/users-roles/job-titles/JobTitleCombobox.tsx",
   "components/dashboard/users-roles/departments/DepartmentCombobox.tsx",
   "components/dashboard/warehouses/ExpectedDeliveries.tsx",
-  // The profile menu at the foot of the sidebar. Missed by the first sweep precisely because it is
-  // not a form control, which is why the list above is written out rather than inferred.
-  "components/dashboard/shell/Sidebar.tsx",
+  "components/dashboard/home/QuickActions.tsx",
 ];
 
 describe("the shared dropdown surface", () => {
@@ -66,5 +108,52 @@ describe.each(POPUPS)("%s", (rel) => {
     for (const tag of popupTags) {
       expect(tag, `${rel}: hardcoded radius on the popup — ${tag.trim()}`).not.toMatch(/rounded-/);
     }
+  });
+});
+
+// The sweep the named lists above cannot do: catch the NEXT hand-rolled popup, in a file nobody has
+// thought to add here.
+//
+// Every popup in the app draws on `dropdownSurfaceCls`, which is what makes this checkable by
+// grep — a new one either uses the shared surface (and shows up here) or hardcodes its own, which
+// the radius rule has always been there to catch. Three components are allowed to reference it:
+// AnchoredPanel, which draws the shell for everything anchored to a trigger; Select, whose popup Base
+// UI positions in its own portal; and the sidebar profile menu, which hangs off fixed, full-height
+// chrome with nothing above it to collide with.
+describe("no fourth component draws its own popup", () => {
+  it("keeps the shared surface in the three files entitled to it", () => {
+    const walk = (dir: string): string[] =>
+      readdirSync(join(SRC, dir), { withFileTypes: true }).flatMap((e) => {
+        const rel = dir ? `${dir}/${e.name}` : e.name;
+        if (e.isDirectory()) return walk(rel);
+        return e.name.endsWith(".tsx") ? [rel] : [];
+      });
+    const files = walk("").filter((f) => read(f).includes("dropdownSurfaceCls"));
+    expect(
+      files.sort(),
+      "a popup drawn outside AnchoredPanel gets none of its placement: it is clipped by the page's " +
+        "scroll container, it can run off the bottom of the window, and it paints over the sticky " +
+        "header once its trigger scrolls behind it. Render it through <AnchoredPanel> instead.",
+    ).toEqual([...POPUPS].sort());
+  });
+});
+
+describe.each(DELEGATED)("%s", (rel) => {
+  const code = read(rel);
+
+  it("hands its popup to AnchoredPanel", () => {
+    expect(code, `${rel} must render its popup through AnchoredPanel`).toContain("<AnchoredPanel");
+  });
+
+  it("does not draw a popup of its own beside it", () => {
+    // Both halves matter. The surface is how a hand-rolled popup is spotted; `absolute` is how the
+    // one this replaced was positioned, and it is the positioning — not the styling — that put a
+    // dropdown over the form's header bar.
+    expect(code, `${rel}: a second popup drawn here would skip AnchoredPanel's placement`).not.toContain(
+      "dropdownSurfaceCls",
+    );
+    expect(code, `${rel}: an absolutely positioned popup is the bug AnchoredPanel exists to fix`).not.toMatch(
+      /className=\{?[`"][^`"]*\babsolute\b[^`"]*\bz-\d/,
+    );
   });
 });
