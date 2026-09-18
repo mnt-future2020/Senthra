@@ -11,7 +11,14 @@
 // platform and the device locale can reorder the parts, and a date that renders
 // differently on one engineer's phone than on the dashboard is exactly the drift
 // this module exists to end.
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+//
+// "Sept", not "Sep", and that is the whole reason this line is pinned by a test. These names have to
+// match what the DASHBOARD prints, and the dashboard asks the en-GB locale (formatDate.ts), which
+// abbreviates September with four letters and every other month with three. Writing the obvious
+// three here left one month a year rendering "30 Sep" on the phone against "30 Sept" in the browser,
+// for the same hire, on the same day — the exact drift the paragraph above set out to prevent, and
+// invisible for eleven months of the year.
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"];
 
 /** An em dash, not an empty string — rows rely on it so a blank value still occupies its line. */
 const EMPTY = "—";

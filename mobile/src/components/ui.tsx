@@ -18,12 +18,14 @@ import {
 import Ionicons from "@expo/vector-icons/Ionicons";
 import type { StyleProp, TextInputProps, ViewStyle } from "react-native";
 import { BlurView } from "expo-blur";
+import { Image } from "expo-image";
 // As of SDK 56 Expo Router vendors react-navigation rather than depending on it,
 // so these contexts come from Expo Router's own subpaths. Importing the standalone
 // @react-navigation packages here would give us a second context instance that the
 // navigator never populates.
 import { HeaderHeightContext } from "expo-router/react-navigation";
 import { BottomTabBarHeightContext } from "expo-router/js-tabs";
+import { useBranding } from "@/lib/branding";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors, statusTone, toneColors } from "../lib/theme";
 import { titleCase } from "../lib/format";
@@ -359,6 +361,33 @@ export function RentalBadge() {
     <View style={s.rentalBadge}>
       <Ionicons name="timer-outline" size={10} color={colors.accent} />
       <Text style={s.rentalBadgeText}>RENTAL</Text>
+    </View>
+  );
+}
+
+/**
+ * The brand mark every signed-out screen leads with: the client's logo when Settings carries one,
+ * the Senthra mark when it does not.
+ *
+ * Shared rather than copied because sign-in is now TWO screens — credentials, then the emailed code —
+ * and the second one asking for a six-digit code under no branding at all is precisely what a
+ * phishing page looks like. One copy also means a client logo appears on both the day it is set.
+ */
+export function AuthBrand({ subtitle }: { subtitle?: string }) {
+  const branding = useBranding();
+  return (
+    <View style={s.brandWrap}>
+      {branding?.logoUrl ? (
+        <Image source={{ uri: branding.logoUrl }} style={s.brandLogo} contentFit="contain" />
+      ) : (
+        <>
+          <View style={s.brandDot}>
+            <Text style={s.brandDotText}>S</Text>
+          </View>
+          <Text style={s.brandName}>Senthra</Text>
+        </>
+      )}
+      {subtitle ? <Text style={s.brandSubtitle}>{subtitle}</Text> : null}
     </View>
   );
 }
@@ -930,6 +959,21 @@ export function Stepper({
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
+  // AuthBrand — carried over from the login screen so both sign-in steps look like one flow.
+  brandWrap: { alignItems: "center", gap: 6 },
+  brandLogo: { width: 240, height: 110, marginBottom: 4 },
+  brandDot: {
+    width: 56,
+    height: 56,
+    borderRadius: 18,
+    backgroundColor: colors.accent,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 6,
+  },
+  brandDotText: { color: "#fff", fontSize: 28, fontWeight: "800" },
+  brandName: { fontSize: 26, fontWeight: "800", color: colors.text },
+  brandSubtitle: { fontSize: 14, color: colors.muted },
   screen: { flex: 1, backgroundColor: colors.bg },
   screenScroll: { flex: 1 },
   // The keyboard avoider's own box: everything above a pinned footer.

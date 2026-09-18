@@ -81,6 +81,10 @@ function RootStack() {
     >
       <Stack.Screen name="index" options={{ headerShown: false }} />
       <Stack.Screen name="login" options={{ headerShown: false }} />
+      {/* Half-signed-in: the password was accepted and the emailed code has not been. It sits beside
+          `login` rather than under the guard below for the same reason `login` does — there is no
+          principal yet, and there will not be one until this screen succeeds. */}
+      <Stack.Screen name="two-factor" options={{ headerShown: false }} />
       <Stack.Screen name="forgot-password" options={{ headerShown: false }} />
       <Stack.Screen name="set-password" options={{ headerShown: false }} />
       {/* PUBLIC, and deliberately OUTSIDE the guard below. A data subject must be able to read how
