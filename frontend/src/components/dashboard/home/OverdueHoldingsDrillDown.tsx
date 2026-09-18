@@ -171,6 +171,7 @@ export function OverdueHoldingsDrillDown({ open, onClose }: { open: boolean; onC
             </span>
             <Select
               size="sm"
+              searchable
               value={engineerId ?? ""}
               onChange={(v) => setEngineerId(v || null)}
               options={engineerOptions}

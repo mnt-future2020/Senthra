@@ -314,7 +314,7 @@ export function AdjustStockForm({ onDone }: AdjustStockFormProps) {
               </div>
               <div>
                 <label className={labelCls}>Warehouse</label>
-                <Select
+                <Select searchable
                   value={warehouseId}
                   onChange={(v) => {
                     setWarehouseId(v);

@@ -342,7 +342,7 @@ export function AddStockForm() {
               </div>
               <div>
                 <label className={labelCls}>Warehouse<RequiredMark /></label>
-                <Select value={warehouseId} onChange={(v) => { setWarehouseId(v); touch(); clearError("warehouseId"); }} options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))} placeholder="— Select warehouse —" ariaLabel="Warehouse" invalid={Boolean(errors.warehouseId)} disabled={Boolean(lockedWarehouseId) || locked} />
+                <Select searchable value={warehouseId} onChange={(v) => { setWarehouseId(v); touch(); clearError("warehouseId"); }} options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))} placeholder="— Select warehouse —" ariaLabel="Warehouse" invalid={Boolean(errors.warehouseId)} disabled={Boolean(lockedWarehouseId) || locked} />
                 <FieldError message={errors.warehouseId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">
                   {!irmItemId || !warehouseId ? "Pick an item and warehouse to see the current on-hand." : onHand !== null ? `${onHand} currently on hand${selectedItem?.baseUnit ? ` ${selectedItem.baseUnit}` : ""}.` : "No stock of this item here yet."}

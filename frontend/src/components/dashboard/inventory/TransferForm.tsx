@@ -199,7 +199,7 @@ export function TransferForm() {
               </div>
               <div>
                 <label className={labelCls}>Source warehouse<RequiredMark /></label>
-                <Select value={fromWarehouseId} onChange={(v) => { setFromWarehouseId(v); touch(); clearError("fromWarehouseId"); clearError("quantity"); }} options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))} placeholder="— Select source —" ariaLabel="Source warehouse" invalid={Boolean(errors.fromWarehouseId)} />
+                <Select searchable value={fromWarehouseId} onChange={(v) => { setFromWarehouseId(v); touch(); clearError("fromWarehouseId"); clearError("quantity"); }} options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))} placeholder="— Select source —" ariaLabel="Source warehouse" invalid={Boolean(errors.fromWarehouseId)} />
                 <FieldError message={errors.fromWarehouseId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">
                   {!irmItemId || !fromWarehouseId ? "Pick an item and source to see available stock." : availLoading ? "Checking available stock…" : available !== null ? `${available} available to move${selectedItem?.baseUnit ? ` ${selectedItem.baseUnit}` : ""}.` : "No stock of this item at the source."}
@@ -207,7 +207,7 @@ export function TransferForm() {
               </div>
               <div>
                 <label className={labelCls}>Destination warehouse<RequiredMark /></label>
-                <Select value={toWarehouseId} onChange={(v) => { setToWarehouseId(v); touch(); clearError("toWarehouseId"); }} options={warehouses.filter((w) => w.id !== fromWarehouseId).map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))} placeholder="— Select destination —" ariaLabel="Destination warehouse" invalid={Boolean(errors.toWarehouseId)} />
+                <Select searchable value={toWarehouseId} onChange={(v) => { setToWarehouseId(v); touch(); clearError("toWarehouseId"); }} options={warehouses.filter((w) => w.id !== fromWarehouseId).map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))} placeholder="— Select destination —" ariaLabel="Destination warehouse" invalid={Boolean(errors.toWarehouseId)} />
                 <FieldError message={errors.toWarehouseId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Must be different from the source warehouse.</p>
               </div>

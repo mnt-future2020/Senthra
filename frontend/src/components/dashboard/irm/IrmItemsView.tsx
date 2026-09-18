@@ -404,7 +404,7 @@ export function IrmItemsView() {
             options={[{ value: "", label: "All categories" }, ...irmCategories.map((c) => ({ value: c.id, label: c.name }))]}
             ariaLabel="Filter by category"
           />
-          <Select
+          <Select searchable
             size="sm"
             value={supplierFilter}
             onChange={(v) => patch({ supplier: v || null })}

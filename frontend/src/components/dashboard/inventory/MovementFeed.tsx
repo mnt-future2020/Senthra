@@ -158,11 +158,11 @@ function FilterBar({
                 "Warehouse" is already implied, and picking "Engineer van" asks the server for the
                 intersection of engineer-held and warehouse-held movements, which is always empty. */}
             {!lockedWarehouse && (
-              <Select size="sm" ariaLabel="Filter by warehouse" value={value.warehouse ?? ""} onChange={(v) => set({ warehouse: v || undefined })} options={[{ value: "", label: "All warehouses" }, ...lists.warehouses]} />
+              <Select searchable size="sm" ariaLabel="Filter by warehouse" value={value.warehouse ?? ""} onChange={(v) => set({ warehouse: v || undefined })} options={[{ value: "", label: "All warehouses" }, ...lists.warehouses]} />
             )}
-            <Select size="sm" ariaLabel="Filter by engineer" value={value.engineer ?? ""} onChange={(v) => set({ engineer: v || undefined })} options={[{ value: "", label: "All engineers" }, ...lists.engineers]} />
+            <Select searchable size="sm" ariaLabel="Filter by engineer" value={value.engineer ?? ""} onChange={(v) => set({ engineer: v || undefined })} options={[{ value: "", label: "All engineers" }, ...lists.engineers]} />
             {showCustomerFilter && (
-              <Select size="sm" ariaLabel="Filter by customer" value={value.customer ?? ""} onChange={(v) => set({ customer: v || undefined })} options={[{ value: "", label: "All customers" }, ...lists.customers]} />
+              <Select searchable size="sm" ariaLabel="Filter by customer" value={value.customer ?? ""} onChange={(v) => set({ customer: v || undefined })} options={[{ value: "", label: "All customers" }, ...lists.customers]} />
             )}
           </>
         )}

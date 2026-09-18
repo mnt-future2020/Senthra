@@ -399,7 +399,7 @@ export function StockPositionTable({
             />
           )}
           {showWarehouse && (
-            <Select
+            <Select searchable
               size="sm"
               value={warehouseFilter}
               onChange={(v) => patch({ warehouse: v || null })}
@@ -426,7 +426,7 @@ export function StockPositionTable({
             />
           )}
           {showCustomer && (
-            <Select
+            <Select searchable
               size="sm"
               value={customerFilter}
               onChange={(v) => patch({ customer: v || null })}

@@ -741,6 +741,7 @@ export function GoodsManagementTab({
                       use of the screen a two-click one. */}
                   <Select
                     size="sm"
+                    searchable
                     ariaLabel="Filter by engineer"
                     value={engineerFilter}
                     onChange={(v) => patch({ gmEngineer: v || null })}
@@ -776,7 +777,7 @@ export function GoodsManagementTab({
                     {/* Customer and site are company-wide lists — drawn only for a viewer the server lets
                         read them (see showCustomerFilter / showSiteFilter above). */}
                     {showCustomerFilter && (
-                      <Select
+                      <Select searchable
                         size="sm"
                         ariaLabel="Filter by customer"
                         value={customerFilter}

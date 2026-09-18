@@ -322,7 +322,7 @@ export function JobsView() {
         {/* ENGINEER stays out in the open beside status. It is the question this list is read by on
             a dispatch day — "what is Dave on" — and burying the answer behind a menu makes the
             commonest use of the screen a two-click one. */}
-        <Select size="sm" value={engineer} onChange={(v) => patchParams({ engineer: v || null }, true)} options={[{ value: "", label: "All engineers" }, ...engineers.map((u) => ({ value: u.id, label: u.name }))]} ariaLabel="Filter by engineer" />
+        <Select size="sm" searchable value={engineer} onChange={(v) => patchParams({ engineer: v || null }, true)} options={[{ value: "", label: "All engineers" }, ...engineers.map((u) => ({ value: u.id, label: u.name }))]} ariaLabel="Filter by engineer" />
         {/* SITE is its own control rather than a Select: a customer can hold thousands of sites, so
             the options are searched server-side. See SitePicker for why a dropdown is wrong here. */}
         <SitePicker
@@ -340,8 +340,8 @@ export function JobsView() {
           }
           onClear={() => patchParams({ customer: null, project: null, priority: null, dueFrom: null, dueTo: null }, true)}
         >
-          <Select size="sm" value={customer} onChange={(v) => patchParams({ customer: v || null, site: null }, true)} options={[{ value: "", label: "All customers" }, ...customers.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by customer" />
-          <Select size="sm" value={project} onChange={(v) => patchParams({ project: v || null }, true)} options={[{ value: "", label: "All projects" }, ...projects.map((p) => ({ value: p.id, label: p.name }))]} ariaLabel="Filter by project" />
+          <Select searchable size="sm" value={customer} onChange={(v) => patchParams({ customer: v || null, site: null }, true)} options={[{ value: "", label: "All customers" }, ...customers.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by customer" />
+          <Select searchable size="sm" value={project} onChange={(v) => patchParams({ project: v || null }, true)} options={[{ value: "", label: "All projects" }, ...projects.map((p) => ({ value: p.id, label: p.name }))]} ariaLabel="Filter by project" />
           <Select size="sm" value={priority} onChange={(v) => patchParams({ priority: v || null }, true)} options={[{ value: "", label: "Any priority" }, ...JOB_PRIORITIES.map((p) => ({ value: p, label: JOB_PRIORITY_LABELS[p] }))]} ariaLabel="Filter by priority" />
           {/* The DUE date range. "Overdue" is not here — it lives in the status list beside it,
               because it is a derived state the server resolves against ITS clock, not a range a

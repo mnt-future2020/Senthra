@@ -269,7 +269,7 @@ export function RentalLinesEditor({
                 {rowWarehouse && (
                   <div className="min-w-0 @sm:col-span-2 @xl:col-span-4 @3xl:col-span-4">
                     <label className={cellLabel}>Warehouse</label>
-                    <Select
+                    <Select searchable
                       value={rowWarehouse.valueFor(row)}
                       onChange={(v) => setRow({ warehouseId: v })}
                       options={rowWarehouse.options}

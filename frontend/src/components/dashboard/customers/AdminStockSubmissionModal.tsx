@@ -130,11 +130,14 @@ export function AdminStockSubmissionModal({
           {shouldShowPreferredWarehouse(warehousesLoaded, warehouses) && (
             <div className="sm:col-span-2">
               <label className={labelCls}>Preferred warehouse</label>
-              <Select
+              <Select searchable
                 value={preferredWarehouseId}
                 onChange={setPreferredWarehouseId}
                 options={preferredWarehouseOptions(warehouses)}
                 placeholder="No preference"
+                // Matches the visible <label> above, which is not wired to this control:
+                // without it a screen reader announces the search box as "Search options".
+                ariaLabel="Preferred warehouse"
               />
               <p className={hintCls}>What the customer asked for. You still assign the final destination.</p>
             </div>

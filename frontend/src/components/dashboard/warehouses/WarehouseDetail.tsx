@@ -791,7 +791,7 @@ function IncomingStock({
         <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
           {/* `effective`, not `filters` — a pick whose option has gone shows as "All" rather than
               leaving the trigger blank while the table quietly ignores it. */}
-          <Select
+          <Select searchable
             value={effective.customerCode}
             onChange={(v) => patchFilters({ customerCode: v })}
             options={customerOptions}

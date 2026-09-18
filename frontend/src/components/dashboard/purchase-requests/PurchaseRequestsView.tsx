@@ -336,8 +336,8 @@ export function PurchaseRequestsView() {
           onClear={() => patchParams({ status: null, supplier: null, warehouse: null, requiredFrom: null, requiredTo: null, validFrom: null, validTo: null }, true)}
         >
           <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, ...PRF_DERIVED_STATUS_OPTIONS, ...(Object.keys(PRF_STATUS_LABELS) as PrfStatus[]).map((s) => ({ value: s, label: PRF_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
-          <Select size="sm" value={supplierFilter || "all"} onChange={(v) => patchParams({ supplier: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All suppliers" }, ...suppliers.map((s) => ({ value: s.id, label: markInactive(s.name, s.inactive) }))]} ariaLabel="Filter by supplier" />
-          <Select size="sm" value={warehouseFilter || "all"} onChange={(v) => patchParams({ warehouse: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: markInactive(w.name, w.inactive) }))]} ariaLabel="Filter by warehouse" />
+          <Select searchable size="sm" value={supplierFilter || "all"} onChange={(v) => patchParams({ supplier: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All suppliers" }, ...suppliers.map((s) => ({ value: s.id, label: markInactive(s.name, s.inactive) }))]} ariaLabel="Filter by supplier" />
+          <Select searchable size="sm" value={warehouseFilter || "all"} onChange={(v) => patchParams({ warehouse: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: markInactive(w.name, w.inactive) }))]} ariaLabel="Filter by warehouse" />
           {/* WHEN THE GOODS ARE NEEDED — the question a buyer prioritises by, and the field the
               generated PO inherits its expected delivery date from. */}
           <DateRangeFilter

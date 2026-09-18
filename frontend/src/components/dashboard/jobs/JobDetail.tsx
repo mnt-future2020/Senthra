@@ -443,7 +443,7 @@ function ReassignDialog({ current, busy, onConfirm, onClose }: { current: string
         <h3 className="text-sm font-extrabold text-[var(--ink)]">Reassign engineer</h3>
         <p className="mt-1 text-xs text-[var(--muted)]">The new engineer is notified immediately and must accept the job.</p>
         <div className="mt-3">
-          <Select value={engineerId} onChange={setEngineerId} options={engineers.map((s) => ({ value: s.id, label: s.jobTitle ? `${s.name} — ${s.jobTitle}` : s.name }))} placeholder={engineersLoading && !engineerId ? "Loading engineers…" : "— Select engineer —"} disabled={engineersLoading && !engineerId} ariaLabel="New engineer" />
+          <Select searchable value={engineerId} onChange={setEngineerId} options={engineers.map((s) => ({ value: s.id, label: s.jobTitle ? `${s.name} — ${s.jobTitle}` : s.name }))} placeholder={engineersLoading && !engineerId ? "Loading engineers…" : "— Select engineer —"} disabled={engineersLoading && !engineerId} ariaLabel="New engineer" />
         </div>
         <div className="mt-4 flex justify-end gap-2">
           <button type="button" onClick={onClose} className="rounded-xl border border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--ink)] hover:bg-[var(--surface-2)]">Cancel</button>

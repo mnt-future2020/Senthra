@@ -391,8 +391,8 @@ export function PurchaseOrdersView() {
             )
           }
         >
-          <Select size="sm" value={supplierFilter} onChange={(v) => patchParams({ supplier: v || null }, true)} options={[{ value: "", label: "All suppliers" }, ...supplierOptions]} ariaLabel="Filter by supplier" />
-          <Select size="sm" value={warehouseFilter} onChange={(v) => patchParams({ warehouse: v || null }, true)} options={[{ value: "", label: "All warehouses" }, ...warehouseOptions]} ariaLabel="Filter by warehouse" />
+          <Select searchable size="sm" value={supplierFilter} onChange={(v) => patchParams({ supplier: v || null }, true)} options={[{ value: "", label: "All suppliers" }, ...supplierOptions]} ariaLabel="Filter by supplier" />
+          <Select searchable size="sm" value={warehouseFilter} onChange={(v) => patchParams({ warehouse: v || null }, true)} options={[{ value: "", label: "All warehouses" }, ...warehouseOptions]} ariaLabel="Filter by warehouse" />
           <Select size="sm" value={priorityFilter} onChange={(v) => patchParams({ priority: v || null }, true)} options={[{ value: "", label: "Any priority" }, ...(Object.keys(PO_PRIORITY_LABELS) as PoPriority[]).map((p) => ({ value: p, label: PO_PRIORITY_LABELS[p] }))]} ariaLabel="Filter by priority" />
           {/* Two SEPARATE windows because they answer different questions: when we placed the order,
               and when the supplier said it lands. Overdue stays in the status list — it is derived

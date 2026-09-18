@@ -197,6 +197,7 @@ export function WalkInIssue({
                 <div>
                   <label className={labelCls}>Engineer <RequiredMark /></label>
                   <Select
+                    searchable
                     ariaLabel="Engineer"
                     value={engineerId}
                     // Clears the moment they pick — a red ring on a field they've just answered

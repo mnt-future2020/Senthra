@@ -503,13 +503,13 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Supplier<RequiredMark /></label>
-                <Select value={supplierId} onChange={onPickSupplier} options={withHistoricalOption(suppliers.map((s) => ({ value: s.id, label: `${s.name} (${s.code})` })), supplierId, r?.supplier?.name)} placeholder={refLoading && !supplierId ? "Loading suppliers…" : "— Select a supplier —"} disabled={refLoading && !supplierId} ariaLabel="Supplier" invalid={Boolean(errors.supplierId)} />
+                <Select searchable value={supplierId} onChange={onPickSupplier} options={withHistoricalOption(suppliers.map((s) => ({ value: s.id, label: `${s.name} (${s.code})` })), supplierId, r?.supplier?.name)} placeholder={refLoading && !supplierId ? "Loading suppliers…" : "— Select a supplier —"} disabled={refLoading && !supplierId} ariaLabel="Supplier" invalid={Boolean(errors.supplierId)} />
                 <FieldError id="err-supplierId" message={errors.supplierId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">The supplier this quotation came from.</p>
               </div>
               <div>
                 <label className={labelCls}>Delivery warehouse<RequiredMark /></label>
-                <Select value={warehouseId} onChange={(v) => { setWarehouseId(v); touch(); clearError("warehouseId"); }} options={withHistoricalOption(warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})${w.isDefault ? " — default" : ""}` })), warehouseId, r?.warehouse?.name)} placeholder={refLoading && !warehouseId ? "Loading warehouses…" : "— Select a warehouse —"} disabled={refLoading && !warehouseId} ariaLabel="Delivery warehouse" invalid={Boolean(errors.warehouseId)} />
+                <Select searchable value={warehouseId} onChange={(v) => { setWarehouseId(v); touch(); clearError("warehouseId"); }} options={withHistoricalOption(warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})${w.isDefault ? " — default" : ""}` })), warehouseId, r?.warehouse?.name)} placeholder={refLoading && !warehouseId ? "Loading warehouses…" : "— Select a warehouse —"} disabled={refLoading && !warehouseId} ariaLabel="Delivery warehouse" invalid={Boolean(errors.warehouseId)} />
                 <FieldError id="err-warehouseId" message={errors.warehouseId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Where the goods would be delivered once ordered.</p>
               </div>

@@ -571,7 +571,7 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
 
                     {excluded(l) ? null : l.source !== "misc" && l.source !== "rental" && src === "engineer" ? (
                       <>
-                        <Select value={lineEng[l.id] ?? ""} onChange={(v) => setLineEng((p) => ({ ...p, [l.id]: v }))} options={vans} placeholder="— Select engineer —" ariaLabel={`Source engineer for ${l.itemName}`} />
+                        <Select searchable value={lineEng[l.id] ?? ""} onChange={(v) => setLineEng((p) => ({ ...p, [l.id]: v }))} options={vans} placeholder="— Select engineer —" ariaLabel={`Source engineer for ${l.itemName}`} />
                         {/* The SPLIT. A van rarely covers the whole line on its own — 5 requested with
                             2 on the shelf and 29 on a colleague's van had no answer before, because
                             the source was all-or-nothing. The kit line already merges sources
@@ -606,7 +606,7 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
                         {/* A split still needs a pickup location for the remainder. */}
                         {isSplit(l) && !!lineEng[l.id] && l.source === "irm" && (
                           <div className="mt-2">
-                            <Select value={lineWh[l.id] ?? ""} onChange={(v) => setLineWh((p) => ({ ...p, [l.id]: v }))} options={whOptions[l.id] ?? []} placeholder="— Warehouse for the remainder —" ariaLabel={`Warehouse for the remainder of ${l.itemName}`} />
+                            <Select searchable value={lineWh[l.id] ?? ""} onChange={(v) => setLineWh((p) => ({ ...p, [l.id]: v }))} options={whOptions[l.id] ?? []} placeholder="— Warehouse for the remainder —" ariaLabel={`Warehouse for the remainder of ${l.itemName}`} />
                           </div>
                         )}
                       </>

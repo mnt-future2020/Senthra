@@ -122,7 +122,7 @@ export function CustomerTransferForm({ row, onDone }: CustomerTransferFormProps)
 
           <div>
             <label className={labelCls}>Destination warehouse</label>
-            <Select
+            <Select searchable
               value={toWarehouseId}
               onChange={(v) => {
                 setToWarehouseId(v);

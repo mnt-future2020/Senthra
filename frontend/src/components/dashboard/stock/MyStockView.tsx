@@ -278,7 +278,7 @@ export function MyStockView() {
           {/* Only offered when the stock is actually split — a single-warehouse customer gets a
               dropdown whose only real choice is the one they already see. */}
           {warehouses.length > 1 && (
-            <Select
+            <Select searchable
               size="sm"
               // The raw URL value — safe to bind directly because the effect above guarantees it is
               // either a warehouse in these options or empty.

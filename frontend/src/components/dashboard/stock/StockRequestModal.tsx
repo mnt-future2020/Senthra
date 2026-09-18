@@ -148,13 +148,16 @@ export function StockRequestModal({
           {shouldShowPreferredWarehouse(warehousesLoaded, warehouses) && (
             <div className="sm:col-span-2">
               <label className={labelCls}>Preferred warehouse</label>
-              <Select
+              <Select searchable
                 value={preferredWarehouseId}
                 onChange={setPreferredWarehouseId}
                 // Includes the app's standard clearable "" entry — without it a customer who
                 // picks a warehouse has no way back to expressing no preference.
                 options={preferredWarehouseOptions(warehouses)}
                 placeholder="No preference"
+                // Matches the visible <label> above, which is not wired to this control:
+                // without it a screen reader announces the search box as "Search options".
+                ariaLabel="Preferred warehouse"
               />
               <p className={hintCls}>Your preferred warehouse. Our team confirms the final destination.</p>
             </div>

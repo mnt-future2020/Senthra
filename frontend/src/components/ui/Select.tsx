@@ -4,6 +4,8 @@ import * as React from "react";
 import { Check, ChevronDown, ChevronUp } from "lucide-react";
 import { Select as BaseSelect } from "@base-ui/react/select";
 
+import { SearchableSelect } from "./SearchableSelect";
+import { shouldSearch } from "./searchableSelectKeys";
 import { dropdownRadius, dropdownSurfaceCls, inputCls } from "./styles";
 
 export interface SelectOption {
@@ -26,6 +28,18 @@ interface SelectProps {
   ariaLabel?: string;
   describedBy?: string;
   className?: string;
+  /**
+   * Show a search box in the menu.
+   *
+   * Omit and the length decides (see SEARCHABLE_THRESHOLD) — that is what makes a dropdown nobody
+   * thought about searchable once its data grows. Pass `true` on any list that is UNBOUNDED in
+   * principle — people, customers, suppliers, warehouses, sites — however short it is in a dev
+   * database today, because that is the control that will hold sixty rows on a real site. Pass
+   * `false` for a fixed set that happens to be long (a month list) where typing helps nobody.
+   */
+  searchable?: boolean;
+  searchPlaceholder?: string;
+  emptyText?: string;
 }
 
 // Compact trigger styling for list-view filter toolbars (mirrors the old `selectCls`).
@@ -52,8 +66,36 @@ export function Select({
   ariaLabel,
   describedBy,
   className,
+  searchable,
+  searchPlaceholder = "Search…",
+  emptyText = "No options.",
 }: SelectProps) {
   const triggerBase = size === "sm" ? smTriggerCls : inputCls;
+
+  // Two implementations behind one prop, deliberately. The Base UI select below stays exactly as it
+  // was for the ~90 call sites that pick from a short fixed set — no new behaviour, no new risk —
+  // while lists worth searching get the app's combobox treatment instead.
+  if (shouldSearch(options.length, searchable)) {
+    return (
+      <SearchableSelect
+        value={value}
+        onChange={onChange}
+        options={options}
+        placeholder={placeholder}
+        searchPlaceholder={searchPlaceholder}
+        emptyText={emptyText}
+        triggerCls={`${triggerBase} ${className ?? ""}`}
+        compact={size === "sm"}
+        disabled={disabled}
+        invalid={invalid}
+        required={required}
+        id={id}
+        ariaLabel={ariaLabel}
+        describedBy={describedBy}
+      />
+    );
+  }
+
   return (
     <BaseSelect.Root
       value={value}

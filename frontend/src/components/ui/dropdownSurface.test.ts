@@ -66,6 +66,9 @@ const POPUPS = [
 const DELEGATED = [
   "components/ui/CreatableSelect.tsx",
   "components/ui/MultiSelect.tsx",
+  // The searchable half of <Select>. It is NOT in POPUPS above: Base UI draws the plain select's
+  // popup, but this one is an ordinary anchored combobox like the rest of this list.
+  "components/ui/SearchableSelect.tsx",
   "components/ui/SuggestInput.tsx",
   "components/dashboard/irm/IrmItemPicker.tsx",
   "components/dashboard/stock/StockItemPicker.tsx",
@@ -154,6 +157,48 @@ describe.each(DELEGATED)("%s", (rel) => {
     );
     expect(code, `${rel}: an absolutely positioned popup is the bug AnchoredPanel exists to fix`).not.toMatch(
       /className=\{?[`"][^`"]*\babsolute\b[^`"]*\bz-\d/,
+    );
+  });
+});
+
+// ── The themed scrollbar ───────────────────────────────────────────────────────────────────────
+//
+// globals.css styles every scrollbar in the app: 6px, transparent track, a rounded `var(--border)`
+// thumb that follows the theme. Chrome throws ALL of that away for an element whose `scrollbar-width`
+// is set, and draws its native bar instead — 10px, and light-coloured on the dark theme, because the
+// app never declares `color-scheme: dark`.
+//
+// So `[scrollbar-width:thin]` is not a smaller scrollbar. It is a bigger, un-themed one, and having it
+// on two of the dropdowns put two different scrollbars on one purchase-request form. Hiding the bar
+// outright (`none`) is a different decision and stays allowed, for the two places that replace it with
+// something else.
+const MAY_HIDE_THEIR_SCROLLBAR = [
+  // Base UI shows themed up/down chevrons at the popup's edges instead.
+  "components/ui/Select.tsx",
+  // A horizontal strip of tabs, with fades at its edges to say it scrolls.
+  "components/ui/TabPills.tsx",
+];
+
+describe("the app's themed scrollbar", () => {
+  it("is not overridden by any dropdown", () => {
+    const walk = (dir: string): string[] =>
+      readdirSync(join(SRC, dir), { withFileTypes: true }).flatMap((e) => {
+        const rel = dir ? `${dir}/${e.name}` : e.name;
+        if (e.isDirectory()) return walk(rel);
+        return e.name.endsWith(".tsx") ? [rel] : [];
+      });
+
+    const offenders = walk("").filter((f) => /scrollbar-width:\s*thin/.test(read(f)));
+    expect(
+      offenders,
+      "`scrollbar-width: thin` makes Chrome ignore the app's own scrollbar styling and draw a wider, " +
+        "un-themed native bar — light-on-dark in the dark theme. Delete it; the global rule in " +
+        "globals.css already gives this list a 6px themed bar.",
+    ).toEqual([]);
+
+    const hiders = walk("").filter((f) => /scrollbar-width:\s*none/.test(read(f)));
+    expect(hiders.sort(), "hiding a scrollbar means replacing it with another affordance").toEqual(
+      [...MAY_HIDE_THEIR_SCROLLBAR].sort(),
     );
   });
 });

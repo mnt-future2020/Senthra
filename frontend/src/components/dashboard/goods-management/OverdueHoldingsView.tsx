@@ -278,6 +278,7 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
             {/* The engineer stays out in the open — this list is worked one engineer at a time. */}
             <Select
               size="sm"
+              searchable
               ariaLabel="Filter by engineer"
               value={engineerFilter}
               onChange={(v) => patch({ gmOvEng: v || null })}

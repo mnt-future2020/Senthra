@@ -192,7 +192,7 @@ export function VanRequestsBoard({
               <Select size="sm" ariaLabel="Filter by type" value={type} onChange={onFilter("vType")} options={TYPE_OPTIONS} />
               <Select size="sm" ariaLabel="Filter by priority" value={priority} onChange={onFilter("vPriority")} options={PRIORITY_FILTER_OPTIONS} />
               <Select size="sm" ariaLabel="Filter by origin" value={createdVia} onChange={onFilter("vOrigin")} options={ORIGIN_OPTIONS} />
-              <Select size="sm" ariaLabel="Filter by engineer" value={engineerFilter} onChange={onFilter("vEngineer")} options={[{ value: "", label: "All engineers" }, ...engineerOptions]} />
+              <Select size="sm" searchable ariaLabel="Filter by engineer" value={engineerFilter} onChange={onFilter("vEngineer")} options={[{ value: "", label: "All engineers" }, ...engineerOptions]} />
               {/* WHEN it was raised. A reviewer clearing a backlog works a day at a time. */}
               <DateRangeFilter
                 label="Requested"

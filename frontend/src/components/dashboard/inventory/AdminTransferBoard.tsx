@@ -410,6 +410,7 @@ export function AdminTransferBoard() {
               hand-over. Ownership and the raised window fold away — both are set once. */}
           <Select
             size="sm"
+            searchable
             value={engineerFilter}
             onChange={(v) => patchParams({ engineer: v || null }, true)}
             options={[{ value: "", label: "All engineers" }, ...engineerOptions]}
