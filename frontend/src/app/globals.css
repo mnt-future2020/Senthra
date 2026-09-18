@@ -8,6 +8,12 @@
 }
 
 :root {
+  /* Tells the browser which way to paint the parts WE do not: the calendar icon and popup in a
+     date field, checkboxes, radios, range sliders, text selection and autofill. Without it Chrome
+     assumes light whatever our tokens say — which is why, on the dark theme, the calendar icon in
+     `dd-mm-yyyy` came out near-black on a near-black field and its picker opened white. */
+  color-scheme: light;
+
   --accent: #7b6ef0;
   --radius: 18px;
 
@@ -41,6 +47,8 @@
 }
 
 [data-theme="dark"] {
+  color-scheme: dark;
+
   --bg: #09090b;
   --surface: #18181b;
   --surface-2: #27272a;
