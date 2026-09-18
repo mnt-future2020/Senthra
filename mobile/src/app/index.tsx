@@ -35,7 +35,7 @@ function BrandSplash() {
 // Entry gate: animated splash while the stored session is validated (with a
 // minimum display so it never flashes), then route by principal state.
 export default function Index() {
-  const { principal, loading } = useAuth();
+  const { principal, loading, pendingTwoFactor } = useAuth();
   const [minShown, setMinShown] = useState(false);
 
   useEffect(() => {
@@ -44,7 +44,10 @@ export default function Index() {
   }, []);
 
   if (loading || !minShown) return <BrandSplash />;
-  if (!principal) return <Redirect href="/login" />;
+  // A sign-in that got as far as the emailed code, on an app the OS killed while the engineer was
+  // reading it. The provider probed for it during the splash above, so landing straight back on the
+  // code step costs nothing and saves a code that is still live. See AuthProvider's boot effect.
+  if (!principal) return <Redirect href={pendingTwoFactor ? "/two-factor" : "/login"} />;
   if (principal.type === "user" && principal.mustResetPassword) {
     return <Redirect href="/set-password" />;
   }
