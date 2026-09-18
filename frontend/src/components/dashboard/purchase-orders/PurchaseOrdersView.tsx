@@ -165,7 +165,7 @@ function PoTableSkeleton({ actions }: { actions: boolean }) {
 export function PurchaseOrdersView() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { can } = useAuth();
+  const { can, principal } = useAuth();
   const { pushToast } = useDashboard();
 
   // Derive filter state from URL params
@@ -175,7 +175,22 @@ export function PurchaseOrdersView() {
   const statusFilter = (searchParams.get("status") as "all" | "overdue" | "awaiting_close" | PoStatus) ?? "all";
   // "Awaiting my action" — the PM worklist (orders in pm_review assigned to me). Overrides the
   // status filter while active; only offered to users who can actually send (i.e. act as a PM).
-  const awaitingMine = searchParams.get("awaiting") === "1";
+  //
+  // A STAFF USER, and not merely the Send permission. The filter asks the server for
+  // `pmUserId = <my id>`, and a PO's PM is always a User: `resolvePmCandidates` reads
+  // `userRepo.findActiveWithRole()`, and `assignPm` rejects anything else outright ("Selected
+  // project manager is not an active staff user."). An admin signs in as an ADMIN principal — the
+  // login checks that collection first — so `pm=me` sends an Admin id that no `pmUserId` can ever
+  // equal. Admins hold every permission, so the old check passed for them and handed them a button
+  // whose answer was "No purchase orders match" forever, whatever the data said.
+  //
+  // Nothing is lost by hiding it: the status dropdown already carries "Send queue"
+  // (`awaiting_send`), which is the same queue unscoped — the oversight view an admin actually
+  // wants. And the param is read through this flag rather than straight from the URL, so an admin
+  // arriving on `?awaiting=1` (a bookmark, browser history, a link from someone else) gets the
+  // ordinary list instead of an empty one with no visible control left to switch off.
+  const canOwnPmQueue = principal?.type === "user" && can("purchase_orders.send");
+  const awaitingMine = canOwnPmQueue && searchParams.get("awaiting") === "1";
   const supplierFilter = searchParams.get("supplier") ?? "";
   const warehouseFilter = searchParams.get("warehouse") ?? "";
   const priorityFilter = searchParams.get("priority") ?? "";
@@ -346,8 +361,9 @@ export function PurchaseOrdersView() {
           />
         </div>
         <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v, awaiting: null }, true)} options={[{ value: "all", label: "All statuses" }, ...PO_DERIVED_STATUS_OPTIONS, ...(Object.keys(PO_STATUS_LABELS) as PoStatus[]).map((s) => ({ value: s, label: PO_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" disabled={awaitingMine} />
-        {/* PM worklist quick filter — orders routed to ME for review + send. */}
-        {can("purchase_orders.send") && (
+        {/* PM worklist quick filter — orders routed to ME for review + send. See `canOwnPmQueue`
+            for why this asks for a staff user and not just the Send permission. */}
+        {canOwnPmQueue && (
           <button
             type="button"
             onClick={() => patchParams({ awaiting: awaitingMine ? null : "1", status: null }, true)}
