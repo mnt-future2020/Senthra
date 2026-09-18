@@ -43,24 +43,37 @@ export function ActivityFeed({ items }: { items: ActivityDTO[] }) {
         <ul className="flex flex-col gap-2.5">
           {items.map((a) => {
             const href = entityHref(a.entity.type, a.entity.id);
+            // TWO LINES on a phone, one row from `sm` up — the same shape, and the same reason, as
+            // the worklist rows next door. The action badge is `shrink-0` and `actionLabel` builds
+            // it from the audit action, so it is routinely long ("Purchase Order · Exported"):
+            // with the code and timestamp also unshrinkable, the actor cell was squeezed away and
+            // the timestamp pushed clean out of the card — measured at a 320px viewport, it sat at
+            // x=336 in a 240px row and dragged a horizontal scrollbar across the page.
+            // `sm:contents` dissolves both wrappers from 640px up, so the desktop row is the one
+            // that was always there. `flex-wrap` on the first line is the safety valve for an
+            // action label longer than any today: the timestamp drops below it rather than out.
             return (
-              <li key={a.id} className="flex items-center gap-3">
-                <span className={`inline-block shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${TONE_CLASSES[actionTone(a.action)]}`}>
-                  {actionLabel(a.action)}
-                </span>
-                {a.entity.code ? (
-                  href ? (
-                    <Link href={href} className="shrink-0 font-mono text-xs font-semibold text-[var(--accent)] hover:underline">
-                      {a.entity.code}
-                    </Link>
-                  ) : (
-                    <span className="shrink-0 font-mono text-xs font-semibold text-[var(--muted)]">{a.entity.code}</span>
-                  )
-                ) : null}
-                <span className="min-w-0 flex-1 truncate text-sm text-[var(--muted)]">{a.actorName}</span>
-                <span className="shrink-0 text-xs text-[var(--faint)]" title={absoluteTime(a.at)}>
-                  {relativeTime(a.at)}
-                </span>
+              <li key={a.id} className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 sm:contents">
+                  <span className={`inline-block shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${TONE_CLASSES[actionTone(a.action)]}`}>
+                    {actionLabel(a.action)}
+                  </span>
+                  <span className="ml-auto shrink-0 text-xs text-[var(--faint)] sm:order-last sm:ml-0" title={absoluteTime(a.at)}>
+                    {relativeTime(a.at)}
+                  </span>
+                </div>
+                <div className="flex min-w-0 items-center gap-2 sm:contents">
+                  {a.entity.code ? (
+                    href ? (
+                      <Link href={href} className="shrink-0 font-mono text-xs font-semibold text-[var(--accent)] hover:underline">
+                        {a.entity.code}
+                      </Link>
+                    ) : (
+                      <span className="shrink-0 font-mono text-xs font-semibold text-[var(--muted)]">{a.entity.code}</span>
+                    )
+                  ) : null}
+                  <span className="min-w-0 flex-1 truncate text-sm text-[var(--muted)]">{a.actorName}</span>
+                </div>
               </li>
             );
           })}

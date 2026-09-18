@@ -74,23 +74,47 @@ export function WorklistPanel({
             const overdue = isOverdue(it.dueDate);
             return (
               <li key={`${it.kind}:${it.id}`}>
+                {/* TWO LINES on a phone, one row from `sm` up.
+
+                    As a single row this did not fit and did not degrade: four of the five cells are
+                    `shrink-0` (the badge is also `whitespace-nowrap`, and the code and age cells
+                    carry fixed widths), so the only cell that could give way was the title. Measured
+                    on the dashboard at a 320px viewport — 240px of usable row — the row asked for
+                    335px and the title was handed exactly ZERO of it: the item's own name, the thing
+                    that says which supplier or job the work is for, was not rendered at all, and the
+                    95px left over pushed a horizontal scrollbar across the whole page.
+
+                    So the phone gets the badge and the age on one line and the code, title and
+                    priority on the next, where the title has ~140px to be read in. `sm:contents`
+                    dissolves both wrappers at 640px and up, which leaves the five cells as direct
+                    flex children of this link exactly as before — the desktop row is unchanged, not
+                    a second layout to keep in step. The age cell is last in the row there and first
+                    on the phone, hence `sm:order-last` against its mobile `ml-auto`. */}
                 <Link
                   href={it.href}
-                  className="flex items-center gap-3 py-2.5 transition-colors hover:bg-[var(--surface-2)]"
+                  className="flex flex-col gap-1 py-2.5 transition-colors hover:bg-[var(--surface-2)] sm:flex-row sm:items-center sm:gap-3"
                 >
-                  <span
-                    className={`inline-block shrink-0 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[11px] font-bold ${KIND_TONE[it.kind] ?? "bg-[var(--surface-2)] text-[var(--muted)]"}`}
-                  >
-                    {KIND_LABELS[it.kind] ?? it.kind}
-                  </span>
-                  <span className="w-24 shrink-0 truncate font-mono text-xs font-semibold text-[var(--accent)]">{it.code}</span>
-                  <span className="min-w-0 flex-1 truncate text-sm text-[var(--ink)]">{it.title ?? "—"}</span>
-                  {it.priority === "high" || it.priority === "urgent" ? (
-                    <span className="shrink-0 text-[11px] font-bold uppercase text-amber-600">{it.priority}</span>
-                  ) : null}
-                  <span className={`w-16 shrink-0 text-right text-xs ${overdue ? "font-bold text-[var(--neg)]" : "text-[var(--muted)]"}`}>
-                    {overdue ? "overdue" : `${it.ageDays} d`}
-                  </span>
+                  {/* `flex-wrap`: the age drops below rather than out, should a future KIND_LABEL
+                      run longer than "Record acceptance" (the longest today, measured at 115px). */}
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 sm:contents">
+                    <span
+                      className={`inline-block shrink-0 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[11px] font-bold ${KIND_TONE[it.kind] ?? "bg-[var(--surface-2)] text-[var(--muted)]"}`}
+                    >
+                      {KIND_LABELS[it.kind] ?? it.kind}
+                    </span>
+                    <span
+                      className={`ml-auto shrink-0 text-right text-xs sm:order-last sm:ml-0 sm:w-16 ${overdue ? "font-bold text-[var(--neg)]" : "text-[var(--muted)]"}`}
+                    >
+                      {overdue ? "overdue" : `${it.ageDays} d`}
+                    </span>
+                  </div>
+                  <div className="flex min-w-0 items-center gap-2 sm:contents">
+                    <span className="shrink-0 truncate font-mono text-xs font-semibold text-[var(--accent)] sm:w-24">{it.code}</span>
+                    <span className="min-w-0 flex-1 truncate text-sm text-[var(--ink)]">{it.title ?? "—"}</span>
+                    {it.priority === "high" || it.priority === "urgent" ? (
+                      <span className="shrink-0 text-[11px] font-bold uppercase text-amber-600">{it.priority}</span>
+                    ) : null}
+                  </div>
                 </Link>
               </li>
             );
