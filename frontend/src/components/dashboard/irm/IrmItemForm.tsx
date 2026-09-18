@@ -658,7 +658,7 @@ export function IrmItemForm({
                   <div className="grid grid-cols-2 gap-3 xl:grid-cols-12">
                     <FormField className="col-span-2 xl:col-span-4">
                       <label className={labelCls}>Supplier</label>
-                      <Select
+                      <Select searchable
                         value={row.supplierId}
                         onChange={(v) => updateRow(idx, { supplierId: v })}
                         options={supplierOptions.map((s) => ({ value: s.id, label: s.label }))}

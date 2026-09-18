@@ -185,11 +185,13 @@ export function MultiSelect({
            options are plenty, and all placement needs to choose a side. */
         panelHeight={264}
       >
+        {/* No `scrollbar-width` here — see SearchableSelect: setting it makes Chrome ignore the app's
+            themed scrollbar and draw its own, which is wider and light-on-dark. */}
         <div
           id={listId}
           role="listbox"
           aria-multiselectable="true"
-          className="min-h-0 max-h-64 flex-1 overflow-y-auto p-1 outline-none [scrollbar-width:thin]"
+          className="min-h-0 max-h-64 flex-1 overflow-y-auto p-1 outline-none"
         >
           {filtered.length === 0 ? (
             <p className="px-3 py-2 text-xs text-[var(--faint)]">{query ? "No matches." : emptyText}</p>

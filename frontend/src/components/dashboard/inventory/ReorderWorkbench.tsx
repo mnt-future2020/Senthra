@@ -464,9 +464,9 @@ export function ReorderWorkbench() {
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search item, code or SKU…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
         <FilterPopover activeCount={activeFilterCount} onClear={clearFilters}>
-          <Select size="sm" value={warehouseFilter} onChange={setWarehouseFilter} options={[{ value: "", label: "All warehouses" }, ...warehouseOptions]} ariaLabel="Filter by warehouse" />
+          <Select searchable size="sm" value={warehouseFilter} onChange={setWarehouseFilter} options={[{ value: "", label: "All warehouses" }, ...warehouseOptions]} ariaLabel="Filter by warehouse" />
           {supplierOptions.length > 0 && (
-            <Select size="sm" value={supplierFilter} onChange={setSupplierFilter} options={[{ value: "", label: "All suppliers" }, ...supplierOptions]} ariaLabel="Filter by supplier" />
+            <Select searchable size="sm" value={supplierFilter} onChange={setSupplierFilter} options={[{ value: "", label: "All suppliers" }, ...supplierOptions]} ariaLabel="Filter by supplier" />
           )}
           {categoryOptions.length > 0 && (
             <Select size="sm" value={categoryFilter} onChange={setCategoryFilter} options={[{ value: "", label: "All categories" }, ...categoryOptions]} ariaLabel="Filter by category" />

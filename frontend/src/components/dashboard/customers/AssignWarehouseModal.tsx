@@ -139,7 +139,7 @@ export function AssignWarehouseModal({
           <div key={i} className="flex items-end gap-2">
             <div className="flex-1">
               <label className={labelCls}>Warehouse</label>
-              <Select
+              <Select searchable
                 value={row.warehouseId}
                 onChange={(v) => updateRow(i, "warehouseId", v)}
                 options={warehouses.map((w) => ({

@@ -400,7 +400,7 @@ export function FinanceView() {
         )}
         {suppliers.length > 0 ? (
           <div className="w-56">
-            <Select
+            <Select searchable
               size="sm"
               value={supplierId}
               onChange={(v) => patch({ supplierId: v || null })}

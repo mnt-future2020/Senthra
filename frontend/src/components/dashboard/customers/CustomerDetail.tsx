@@ -1037,7 +1037,7 @@ function StockEntriesTab({
                   activeCount={activeStockFilters}
                   onClear={() => patch({ stock_wh: "", stock_from: "", stock_to: "", stockPage: "" })}
                 >
-                  <Select
+                  <Select searchable
                     size="sm"
                     value={stockWarehouse}
                     onChange={(v) => patch({ stock_wh: v, stockPage: "" })}

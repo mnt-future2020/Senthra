@@ -127,14 +127,14 @@ export function MovementHistory() {
           activeCount={(fromWarehouse ? 1 : 0) + (toWarehouse ? 1 : 0) + (movedFrom || movedTo ? 1 : 0)}
           onClear={() => { setFromWarehouse(""); setToWarehouse(""); setMovedFrom(""); setMovedTo(""); setPage(1); }}
         >
-          <Select
+          <Select searchable
             size="sm"
             value={fromWarehouse}
             onChange={(v) => { setFromWarehouse(v); setPage(1); }}
             options={[{ value: "", label: "From: anywhere" }, ...warehouseOptions]}
             ariaLabel="Filter by source warehouse"
           />
-          <Select
+          <Select searchable
             size="sm"
             value={toWarehouse}
             onChange={(v) => { setToWarehouse(v); setPage(1); }}

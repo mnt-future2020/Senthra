@@ -282,7 +282,7 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
             <FormSection title="Warehouse" description="Select the warehouse where this item will be stored.">
               <div>
                 <label className={labelCls}>Warehouse<RequiredMark /></label>
-                <Select
+                <Select searchable
                   value={warehouseId}
                   onChange={(v) => { setWarehouseId(v); clearError("warehouseId"); }}
                   options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))}

@@ -500,7 +500,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                 <label className={labelCls}>Purchase order<RequiredMark /></label>
                 {mode === "create" ? (
                   <>
-                    <Select value={poId} onChange={onPickPo} options={receivablePos.map((p) => ({ value: p.id, label: `${p.code} — ${p.supplierName ?? p.supplier?.name ?? ""} (${PO_STATUS_LABELS[p.status] ?? p.status})` }))} placeholder="— Select a purchase order —" ariaLabel="Purchase order" invalid={Boolean(errors.purchaseOrderId)} />
+                    <Select searchable value={poId} onChange={onPickPo} options={receivablePos.map((p) => ({ value: p.id, label: `${p.code} — ${p.supplierName ?? p.supplier?.name ?? ""} (${PO_STATUS_LABELS[p.status] ?? p.status})` }))} placeholder="— Select a purchase order —" ariaLabel="Purchase order" invalid={Boolean(errors.purchaseOrderId)} />
                     <FieldError message={errors.purchaseOrderId} />
                     {posLoaded && receivablePos.length === 0 ? (
                       <p className="mt-1.5 text-[11px] font-semibold text-[var(--muted)]">

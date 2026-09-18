@@ -976,7 +976,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Customer<RequiredMark /></label>
-                <Select value={customerId} onChange={onPickCustomer} options={withHistoricalOption(customers, customerId, job?.customerName)} placeholder="— Select customer —" ariaLabel="Customer" invalid={Boolean(errors.customerId)} />
+                <Select searchable value={customerId} onChange={onPickCustomer} options={withHistoricalOption(customers, customerId, job?.customerName)} placeholder="— Select customer —" ariaLabel="Customer" invalid={Boolean(errors.customerId)} />
                 <FieldError message={errors.customerId} />
               </div>
               <div>
@@ -988,7 +988,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                     </button>
                   )}
                 </div>
-                <Select value={projectId} onChange={(v) => { setProjectId(v); touch(); clearError("projectId"); }} options={projects.map((p) => ({ value: p.id, label: p.code ? `${p.code} — ${p.name}` : p.name }))} placeholder={customerId ? (loadingProjects ? "Loading…" : "— Select project —") : "Pick a customer first"} disabled={!customerId || loadingProjects} ariaLabel="Project" invalid={Boolean(errors.projectId)} />
+                <Select searchable value={projectId} onChange={(v) => { setProjectId(v); touch(); clearError("projectId"); }} options={projects.map((p) => ({ value: p.id, label: p.code ? `${p.code} — ${p.name}` : p.name }))} placeholder={customerId ? (loadingProjects ? "Loading…" : "— Select project —") : "Pick a customer first"} disabled={!customerId || loadingProjects} ariaLabel="Project" invalid={Boolean(errors.projectId)} />
                 <FieldError message={errors.projectId} />
                 {customerId && !loadingProjects && projects.length === 0 && (
                   <p className="mt-1.5 text-[11px] text-[var(--faint)]">
@@ -1114,7 +1114,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
               </div>
               <div>
                 <label className={labelCls}>Assigned engineer<RequiredMark /></label>
-                <Select value={assignedEngineerId} onChange={(v) => { setAssignedEngineerId(v); touch(); clearError("assignedEngineerId"); }} options={engineers.map((s) => ({ value: s.id, label: engineerLabel(s) }))} placeholder="— Select engineer —" ariaLabel="Assigned engineer" invalid={Boolean(errors.assignedEngineerId)} />
+                <Select searchable value={assignedEngineerId} onChange={(v) => { setAssignedEngineerId(v); touch(); clearError("assignedEngineerId"); }} options={engineers.map((s) => ({ value: s.id, label: engineerLabel(s) }))} placeholder="— Select engineer —" ariaLabel="Assigned engineer" invalid={Boolean(errors.assignedEngineerId)} />
                 <FieldError message={errors.assignedEngineerId} />
               </div>
               <div>
@@ -1123,7 +1123,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
               </div>
               <div>
                 <label className={labelCls}>Supplier</label>
-                <Select value={supplierId} onChange={(v) => { setSupplierId(v); touch(); }} options={withHistoricalOption([{ value: "", label: "— None —" }, ...suppliers], supplierId, o?.supplierName)} placeholder="— None —" ariaLabel="Supplier" />
+                <Select searchable value={supplierId} onChange={(v) => { setSupplierId(v); touch(); }} options={withHistoricalOption([{ value: "", label: "— None —" }, ...suppliers], supplierId, o?.supplierName)} placeholder="— None —" ariaLabel="Supplier" />
               </div>
               <div>
                 <label className={labelCls}>Planner name</label>
@@ -1194,7 +1194,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                         !customerId ? (
                           <p className="flex h-[42px] items-center truncate rounded-xl border border-dashed border-[var(--border)] px-3 text-[11px] text-[var(--faint)]">Pick a customer in step 2 first.</p>
                         ) : (
-                          <Select value={l.customerStockItemKey} onChange={(v) => onPickStockItem(l._key, v)} options={stockItemOptions} placeholder="— Select customer stock —" disabled={locked} ariaLabel="Customer stock item" />
+                          <Select searchable value={l.customerStockItemKey} onChange={(v) => onPickStockItem(l._key, v)} options={stockItemOptions} placeholder="— Select customer stock —" disabled={locked} ariaLabel="Customer stock item" />
                         )
                       ) : l.lineType === "irm" ? (
                         <IrmItemPicker
@@ -1236,7 +1236,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                         ) : irmNotStocked ? (
                           <div className="flex h-[42px] items-center rounded-xl border border-dashed border-[var(--neg)]/40 px-3 text-[11px] text-[var(--neg)]" title="This item has no on-hand stock in any warehouse.">Not stocked anywhere</div>
                         ) : (
-                          <Select value={l.warehouseId} onChange={(v) => onPickLineWarehouse(l._key, v)} options={irmWhOptions} placeholder="— Pick warehouse —" disabled={locked} ariaLabel="Pickup warehouse" />
+                          <Select searchable value={l.warehouseId} onChange={(v) => onPickLineWarehouse(l._key, v)} options={irmWhOptions} placeholder="— Pick warehouse —" disabled={locked} ariaLabel="Pickup warehouse" />
                         )
                       ) : l.lineType === "rental" ? (
                         !l.rentalItemId ? (
@@ -1246,13 +1246,13 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                         ) : rentalNotHired ? (
                           <div className="flex h-[42px] items-center rounded-xl border border-dashed border-[var(--neg)]/40 px-3 text-[11px] text-[var(--neg)]" title="No live hire of this rental item has a spare unit at any depot. Raise a purchase request to hire one.">None on hire</div>
                         ) : (
-                          <Select value={l.warehouseId} onChange={(v) => onPickLineWarehouse(l._key, v)} options={rentalWhOptions} placeholder="— Pick warehouse —" disabled={locked} ariaLabel="Pickup warehouse" />
+                          <Select searchable value={l.warehouseId} onChange={(v) => onPickLineWarehouse(l._key, v)} options={rentalWhOptions} placeholder="— Pick warehouse —" disabled={locked} ariaLabel="Pickup warehouse" />
                         )
                       ) : l.lineType === "customer_stock" ? (
                         !l.customerStockItemKey ? (
                           <div className="flex h-[42px] items-center rounded-xl border border-dashed border-[var(--border)] px-3 text-[11px] text-[var(--faint)]">Pick an item first</div>
                         ) : (
-                          <Select value={l.warehouseId} onChange={(v) => onPickStockWarehouse(l._key, v)} options={stockWhOptions} placeholder="— Pick warehouse —" disabled={locked} ariaLabel="Pickup warehouse" />
+                          <Select searchable value={l.warehouseId} onChange={(v) => onPickStockWarehouse(l._key, v)} options={stockWhOptions} placeholder="— Pick warehouse —" disabled={locked} ariaLabel="Pickup warehouse" />
                         )
                       ) : (
                         <div className="flex h-[42px] items-center rounded-xl border border-dashed border-[var(--border)] px-3 text-[11px] text-[var(--faint)]">Not applicable</div>

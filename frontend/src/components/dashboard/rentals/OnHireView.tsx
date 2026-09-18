@@ -351,7 +351,7 @@ export function OnHireView() {
             activeCount={(supplierFilter ? 1 : 0) + (endsFrom || endsTo ? 1 : 0)}
             onClear={() => patch({ supplier: null, endsFrom: null, endsTo: null })}
           >
-            <Select
+            <Select searchable
               size="sm"
               value={supplierFilter}
               onChange={(v) => patch({ supplier: v || null })}

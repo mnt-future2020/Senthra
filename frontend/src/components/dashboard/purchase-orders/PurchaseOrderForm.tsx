@@ -606,7 +606,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Supplier<RequiredMark /></label>
-                <Select value={supplierId} onChange={onPickSupplier} options={withHistoricalOption(suppliers.map((s) => ({ value: s.id, label: `${s.name} (${s.code})` })), supplierId, o?.supplier?.name)} placeholder={refLoading && !supplierId ? "Loading suppliers…" : "— Select a supplier —"} disabled={refLoading && !supplierId} ariaLabel="Supplier" invalid={Boolean(errors.supplierId)} />
+                <Select searchable value={supplierId} onChange={onPickSupplier} options={withHistoricalOption(suppliers.map((s) => ({ value: s.id, label: `${s.name} (${s.code})` })), supplierId, o?.supplier?.name)} placeholder={refLoading && !supplierId ? "Loading suppliers…" : "— Select a supplier —"} disabled={refLoading && !supplierId} ariaLabel="Supplier" invalid={Boolean(errors.supplierId)} />
                 <FieldError id="err-supplierId" message={errors.supplierId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Choose who this order is being placed with.</p>
               </div>
@@ -615,7 +615,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
               {mode === "edit" && (
                 <div>
                   <label className={labelCls}>Delivery warehouse<RequiredMark /></label>
-                  <Select value={warehouseId} onChange={(v) => { setWarehouseId(v); touch(); clearError("warehouseId"); }} options={withHistoricalOption(warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})${w.isDefault ? " — default" : ""}` })), warehouseId, o?.warehouse?.name)} placeholder={refLoading && !warehouseId ? "Loading warehouses…" : "— Select a warehouse —"} disabled={refLoading && !warehouseId} ariaLabel="Delivery warehouse" invalid={Boolean(errors.warehouseId)} />
+                  <Select searchable value={warehouseId} onChange={(v) => { setWarehouseId(v); touch(); clearError("warehouseId"); }} options={withHistoricalOption(warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})${w.isDefault ? " — default" : ""}` })), warehouseId, o?.warehouse?.name)} placeholder={refLoading && !warehouseId ? "Loading warehouses…" : "— Select a warehouse —"} disabled={refLoading && !warehouseId} ariaLabel="Delivery warehouse" invalid={Boolean(errors.warehouseId)} />
                   <FieldError id="err-warehouseId" message={errors.warehouseId} />
                   <p className="mt-1.5 text-[11px] text-[var(--faint)]">The warehouse this order delivers to.</p>
                 </div>
@@ -727,7 +727,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
                         {mode === "create" && (
                           <div className="min-w-0">
                             <label className={labelCls}>Warehouse</label>
-                            <Select
+                            <Select searchable
                               value={rowWarehouseId(row)}
                               onChange={(v) => updateLine(idx, { warehouseId: v })}
                               options={warehouseOptions.map((w) => ({ value: w.id, label: `${w.code} — ${w.name}` }))}

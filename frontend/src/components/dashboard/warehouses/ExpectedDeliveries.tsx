@@ -519,7 +519,7 @@ export function ExpectedDeliveries({
         activeCount={(supplierFilter ? 1 : 0) + (expectedFrom || expectedTo ? 1 : 0)}
         onClear={() => { setSupplierFilter(""); setExpectedFrom(""); setExpectedTo(""); setPage(1); }}
       >
-        <Select
+        <Select searchable
           size="sm"
           value={supplierFilter}
           onChange={(v) => { setSupplierFilter(v); setPage(1); }}

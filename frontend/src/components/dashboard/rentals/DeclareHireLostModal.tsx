@@ -156,7 +156,7 @@ export function DeclareHireLostModal({
             <label htmlFor={hireId} className="mb-1.5 block text-xs font-semibold text-[var(--muted)]">
               Which hire <span className="text-[var(--neg)]">*</span>
             </label>
-            <Select
+            <Select searchable
               id={hireId}
               size="sm"
               className="w-full"

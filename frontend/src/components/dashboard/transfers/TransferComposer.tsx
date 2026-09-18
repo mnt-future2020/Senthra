@@ -538,6 +538,7 @@ export function TransferComposer({ mode, returnUrl }: { mode: "admin" | "enginee
                 <div>
                   <label className={labelCls}>From (holder) <RequiredMark /></label>
                   <Select
+                    searchable
                     value={fromId}
                     onChange={(v) => void changeFrom(v)}
                     placeholder="Select…"
@@ -547,7 +548,7 @@ export function TransferComposer({ mode, returnUrl }: { mode: "admin" | "enginee
                 </div>
                 <div>
                   <label className={labelCls}>To (recipient) <RequiredMark /></label>
-                  <Select
+                  <Select searchable
                     value={toId}
                     onChange={setToId}
                     placeholder="Select…"

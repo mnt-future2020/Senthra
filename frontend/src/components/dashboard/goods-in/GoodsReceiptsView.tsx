@@ -294,7 +294,7 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
           {/* No warehouse picker inside a warehouse page: the list IS that warehouse's register, and
               offering a control that could only ever contradict the page is worse than none. */}
           {!warehouseId && (
-            <Select
+            <Select searchable
               size="sm"
               value={warehouseFilter}
               onChange={(v) => patch({ warehouse: v || null })}
@@ -302,7 +302,7 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
               ariaLabel="Filter by warehouse"
             />
           )}
-          <Select
+          <Select searchable
             size="sm"
             value={supplierFilter}
             onChange={(v) => patch({ supplier: v || null })}
