@@ -1,8 +1,9 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, ArrowLeftRight, MapPin, ScrollText } from "lucide-react";
+import { ArrowLeft, ArrowLeftRight, Boxes, MapPin, ScrollText } from "lucide-react";
 
 import * as inventoryService from "@/services/inventory.service";
 import * as stockPositionService from "@/services/stockPosition.service";
@@ -357,6 +358,46 @@ export function InventoryDetailPage({ initial }: { initial: InventoryDetailType 
 
   const canMove = can("inventory.move") && inv.available > 0;
 
+  /**
+   * The route back to the CATALOGUE record.
+   *
+   * This page answers "where is this stock and how much"; the catalogue answers "what is this
+   * product" — supplier, pricing, the editable SKU. There was no route between them at all, so
+   * arriving here from a warehouse meant leaving and finding the item again by hand under
+   * Inventory → IRM.
+   *
+   * Gated on `irm.view` because `/dashboard/irm/[id]` is itself behind a PermissionGate: an
+   * ungated link would be an invitation to a permission wall. Same rule SupplierDetail applies to
+   * its Items tab.
+   *
+   * By CODE, not id — every other entry into the catalogue (the IRM list, the supplier's items,
+   * the form's post-save redirect) links by code, and the page resolves either.
+   *
+   * A real link rather than a router.push button: this is navigation to another record, so
+   * middle-click and "open in new tab" should work — checking the catalogue is exactly the kind of
+   * thing you want beside the stock page, not instead of it.
+   */
+  const headerActions = [
+    can("irm.view") && (
+      <Link
+        key="catalogue"
+        href={`/dashboard/irm/${inv.itemCode}`}
+        className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3.5 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
+      >
+        <Boxes className="h-4 w-4" /> View in catalogue
+      </Link>
+    ),
+    canMove && (
+      <button
+        key="move"
+        onClick={() => router.push(`/dashboard/inventory/move?item=${inv.irmItemId}&from=${inv.warehouseId}`)}
+        className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90"
+      >
+        <ArrowLeftRight className="h-4 w-4" /> Move stock
+      </button>
+    ),
+  ].filter(Boolean);
+
   return (
     <div className="space-y-5">
       <button
@@ -390,16 +431,10 @@ export function InventoryDetailPage({ initial }: { initial: InventoryDetailType 
             </span>
           </>
         }
-        actions={
-          canMove && (
-            <button
-              onClick={() => router.push(`/dashboard/inventory/move?item=${inv.irmItemId}&from=${inv.warehouseId}`)}
-              className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90"
-            >
-              <ArrowLeftRight className="h-4 w-4" /> Move stock
-            </button>
-          )
-        }
+        // undefined, never an empty fragment: DetailHeader renders its actions wrapper on
+        // truthiness, and `<></>` is truthy — a reader with neither permission would get an empty
+        // flex row holding the header open.
+        actions={headerActions.length > 0 ? headerActions : undefined}
       />
 
       {/* KPIs — at this warehouse */}
