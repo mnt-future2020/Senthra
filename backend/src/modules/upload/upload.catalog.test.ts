@@ -8,7 +8,6 @@ import {
   UPLOAD_PURPOSES,
   isPrintableAscii,
   isTextByte,
-  resourceTypeFor,
 } from "./upload.catalog.js";
 
 // The catalog is the ONLY place an upload's size limit lives, and a limit set too low fails in a way
@@ -125,14 +124,17 @@ describe("spreadsheet policy", () => {
 });
 
 describe("content signatures", () => {
-  // `assertContentMatches` FAILS CLOSED: a raw type with no entry here is refused outright. So every
-  // non-image type any purpose accepts must be checkable, or that purpose is advertising a type it
-  // will always reject at finalize — after the user has waited for the whole upload.
-  it("covers every non-image media type any purpose accepts", () => {
+  // `assertContentMatches` FAILS CLOSED: a type with no entry here is refused outright. So every
+  // type any purpose accepts must be checkable, or that purpose is advertising a type it will always
+  // reject at finalize — after the user has waited for the whole upload.
+  //
+  // IMAGES ARE NO LONGER EXEMPT. They used to be, because Cloudinary decoded them on ingest and the
+  // pass never ran; a provider that stores opaque bytes has no such step, so an image reaching
+  // finalize without an entry would be refused outright on that provider and nowhere else.
+  it("covers every media type any purpose accepts", () => {
     const covered = new Set(CONTENT_SIGNATURES.map((s) => s.mediaType));
     for (const [name, cfg] of Object.entries(UPLOAD_PURPOSES)) {
       for (const type of cfg.mediaTypes) {
-        if (resourceTypeFor(type) === "image") continue;
         expect(covered, `${name} accepts ${type} with no content signature`).toContain(type);
       }
     }

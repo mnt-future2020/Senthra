@@ -22,8 +22,16 @@ vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ findByI
 vi.mock("#modules/inventory/inventory.service.js", () => ({ applyInbound: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
-vi.mock("#modules/attachment/attachment.service.js", () => ({ releaseAsset: vi.fn() }));
-vi.mock("../../lib/cloudinary.js", () => ({ uploadFileToCloudinary: vi.fn() }));
+vi.mock("#modules/attachment/attachment.service.js", () => ({
+  releaseAsset: vi.fn(),
+  // The REAL mapping, not a stub: these tests assert the identity that reaches releaseAsset,
+  // and the provider is now part of it.
+  refFromAttachment: (row: { storageProvider: string | null; publicId: string | null; resourceType: string | null }) => ({
+    provider: row.storageProvider,
+    publicId: row.publicId,
+    resourceType: row.resourceType,
+  }),
+}));
 vi.mock("../../lib/prisma.js", () => ({ withTransaction: (fn: (tx: unknown) => unknown) => fn({}) }));
 
 import * as grnRepo from "./goods-in.repository.js";
@@ -32,7 +40,7 @@ import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
-import { assertCanAttach, cancelGoodsReceipt, completeGoodsReceipt, createGoodsReceipt, deleteGoodsReceipt, getGoodsReceipt, removeAttachment, updateGoodsReceipt } from "./goods-in.service.js";
+import { assertCanAttach, attachUploadedAsset, cancelGoodsReceipt, completeGoodsReceipt, createGoodsReceipt, deleteGoodsReceipt, getGoodsReceipt, removeAttachment, updateGoodsReceipt } from "./goods-in.service.js";
 
 const GRN_ID = "e".repeat(24);
 const PO_ID = "f".repeat(24);
@@ -410,5 +418,48 @@ describe("GRN attachments — Cloudinary cleanup", () => {
     mockFindById.mockResolvedValue(grnRow({ status: "draft", attachments: [ATT] }));
     await deleteGoodsReceipt(GRN_ID);
     expect(release).not.toHaveBeenCalled();
+  });
+});
+
+// ── The stored provider reaches the row ───────────────────────────────────────────────────────
+//
+// TWO DIFFERENT THINGS, and confusing them is the bug this exists to prevent:
+//
+//   ACTIVE provider  — where a NEW upload should go. Read from Settings.
+//   STORED provider  — where THIS asset actually is. Carried on the verified upload.
+//
+// A file signed before an administrator switches provider is finalized after it, so the two can
+// legitimately disagree. The row must record the second. If it recorded the first — or recorded
+// nothing and let `null` mean Cloudinary — a Spaces-stored file would later be deleted from
+// Cloudinary, answer "not found", and survive forever with nothing reporting a problem.
+//
+// Nothing in this path reads Settings at all; the provider arrives as part of the input. These pin
+// that it is written rather than dropped.
+describe("GRN attachments — the provider is persisted on the row", () => {
+  const mockAddAtt = grnRepo.addAttachment as ReturnType<typeof vi.fn>;
+  const attach = (provider: string) =>
+    attachUploadedAsset(GRN_ID, {
+      fileName: "note.pdf",
+      fileType: "pdf",
+      fileSizeBytes: 9,
+      url: "https://cdn/note.pdf",
+      publicId: "senthra/goods-in/note.pdf",
+      resourceType: "raw",
+      provider,
+    });
+
+  beforeEach(() => {
+    mockFindById.mockResolvedValue(grnRow({ status: "draft", attachments: [] }));
+    mockAddAtt.mockResolvedValue({ id: "a1" });
+  });
+
+  it("persists a Cloudinary provider", async () => {
+    await attach("cloudinary");
+    expect(mockAddAtt.mock.calls[0][0]).toMatchObject({ storageProvider: "cloudinary" });
+  });
+
+  it("persists a Spaces provider rather than flattening it to null", async () => {
+    await attach("spaces");
+    expect(mockAddAtt.mock.calls[0][0]).toMatchObject({ storageProvider: "spaces" });
   });
 });

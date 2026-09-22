@@ -9,19 +9,29 @@ vi.mock("./upload.repository.js", () => ({
   remove: vi.fn(),
   findReapable: vi.fn(),
 }));
-vi.mock("../../lib/cloudinary.js", () => ({ destroyFromCloudinary: vi.fn() }));
-vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
+// The STORAGE LAYER is mocked, not a vendor transport — the reaper resolves the provider that holds
+// each abandoned asset and calls `destroy` on it.
+const { destroy } = vi.hoisted(() => ({ destroy: vi.fn() }));
+vi.mock("../../lib/storage/index.js", () => ({
+  getStorageFor: vi.fn(),
+  normalizeProviderId: (v: string | null | undefined) => (v === "spaces" ? "spaces" : "cloudinary"),
+}));
 
 import * as pendingRepo from "./upload.repository.js";
-import { destroyFromCloudinary } from "../../lib/cloudinary.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
+import { getStorageFor } from "../../lib/storage/index.js";
 import { reapAbandonedUploads } from "./upload.reaper.js";
 
 const findReapable = vi.mocked(pendingRepo.findReapable);
 const claim = vi.mocked(pendingRepo.claim);
 const remove = vi.mocked(pendingRepo.remove);
-const destroy = vi.mocked(destroyFromCloudinary);
-const creds = vi.mocked(getCloudinaryCreds);
+const storage = vi.mocked(getStorageFor);
+/**
+ * The ref the reaper hands to the storage layer for a ledger row with NO provider recorded.
+ *
+ * The row says `null`; what reaches `destroy` is the NORMALISED id, "cloudinary" — the provider
+ * every upload authorised before that column existed was signed against.
+ */
+const refOf = (publicId: string, resourceType: string) => ({ provider: "cloudinary", publicId, resourceType });
 
 const row = (over: Record<string, unknown> = {}) => ({
   id: "p1",
@@ -36,9 +46,9 @@ const row = (over: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
-  creds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+  storage.mockReset().mockResolvedValue({ destroy } as never);
   claim.mockResolvedValue(new Date(Date.now() + 60_000));
-  destroy.mockResolvedValue(undefined);
+  destroy.mockReset().mockResolvedValue(undefined);
   remove.mockResolvedValue({ count: 1 });
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.spyOn(console, "info").mockImplementation(() => {});
@@ -48,7 +58,7 @@ describe("reapAbandonedUploads — what it destroys", () => {
   it("destroys an abandoned upload and clears its ledger row", async () => {
     findReapable.mockResolvedValue([row()]);
     const r = await reapAbandonedUploads();
-    expect(destroy).toHaveBeenCalledWith("senthra/jobs/abandoned.pdf", "raw", expect.anything());
+    expect(destroy).toHaveBeenCalledWith(refOf("senthra/jobs/abandoned.pdf", "raw"));
     expect(remove).toHaveBeenCalledWith("senthra/jobs/abandoned.pdf");
     expect(r.destroyed).toBe(1);
   });
@@ -97,7 +107,7 @@ describe("reapAbandonedUploads — it cannot interrupt a finalize", () => {
     claim.mockResolvedValueOnce(null).mockResolvedValueOnce(new Date(Date.now() + 60_000));
     const r = await reapAbandonedUploads();
     expect(r).toMatchObject({ skipped: 1, destroyed: 1 });
-    expect(destroy).toHaveBeenCalledWith("b", "raw", expect.anything());
+    expect(destroy).toHaveBeenCalledWith(refOf("b", "raw"));
   });
 });
 
@@ -121,9 +131,9 @@ describe("reapAbandonedUploads — failure handling", () => {
 
   // Without credentials there is nothing to destroy WITH. Deleting the ledger anyway would throw away
   // the only record that the asset exists.
-  it("leaves every row alone when Cloudinary is not configured", async () => {
+  it("leaves every row alone when that row's provider is not configured", async () => {
     findReapable.mockResolvedValue([row(), row({ publicId: "b" })]);
-    creds.mockResolvedValue(null);
+    storage.mockResolvedValue(null);
     const r = await reapAbandonedUploads();
     expect(destroy).not.toHaveBeenCalled();
     expect(remove).not.toHaveBeenCalled();
@@ -151,5 +161,77 @@ describe("reapAbandonedUploads — safety mechanism", () => {
     // Only the ledger and Cloudinary were touched — no domain table was read to reach the decision.
     expect(findReapable).toHaveBeenCalledTimes(1);
     expect(destroy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── One sweep, several providers ──────────────────────────────────────────────────────────────
+//
+// A pass routinely spans providers: rows signed before a switch, rows signed after, and legacy rows
+// with no provider recorded at all. Resolving ONCE per pass would send some of them to the wrong
+// backend — which answers "not found", counts as success, and leaves the real file behind forever
+// with nothing reporting a problem. So the provider is resolved per ROW.
+describe("reapAbandonedUploads — a mixed-provider sweep", () => {
+  const destroyBy: Record<string, ReturnType<typeof vi.fn>> = {};
+
+  beforeEach(() => {
+    destroyBy.cloudinary = vi.fn().mockResolvedValue(undefined);
+    destroyBy.spaces = vi.fn().mockResolvedValue(undefined);
+    storage.mockReset().mockImplementation(async (ref: { provider: string | null }) => ({
+      destroy: destroyBy[ref.provider ?? "cloudinary"],
+    }) as never);
+    claim.mockResolvedValue(new Date(Date.now() + 60_000));
+    remove.mockResolvedValue({ count: 1 });
+  });
+
+  it("destroys each row through the provider that actually holds it", async () => {
+    findReapable.mockResolvedValue([
+      row({ publicId: "a", storageProvider: "cloudinary" }),
+      row({ publicId: "b", storageProvider: "spaces" }),
+      row({ publicId: "c", storageProvider: null }), // legacy ⇒ Cloudinary
+    ] as never);
+
+    const r = await reapAbandonedUploads();
+
+    expect(r.destroyed).toBe(3);
+    expect(destroyBy.cloudinary).toHaveBeenCalledTimes(2);
+    expect(destroyBy.spaces).toHaveBeenCalledTimes(1);
+    expect(destroyBy.spaces).toHaveBeenCalledWith({ provider: "spaces", publicId: "b", resourceType: "raw" });
+    expect(destroyBy.cloudinary).toHaveBeenCalledWith({ provider: "cloudinary", publicId: "c", resourceType: "raw" });
+  });
+
+  // There is no pass-level provider check, and this is why: a single check would have to pick one
+  // provider to ask about. Asking Cloudinary on an install where only Spaces is configured would
+  // abandon every Spaces row in the sweep — silently, since a skip is not an error.
+  it("reaps Spaces rows on an install where Cloudinary is NOT configured", async () => {
+    storage.mockImplementation(async (ref: { provider: string | null }) =>
+      ref.provider === "spaces" ? ({ destroy: destroyBy.spaces } as never) : null,
+    );
+    findReapable.mockResolvedValue([row({ publicId: "s1", storageProvider: "spaces" })] as never);
+
+    const r = await reapAbandonedUploads();
+
+    expect(r).toMatchObject({ destroyed: 1, skipped: 0 });
+    expect(destroyBy.spaces).toHaveBeenCalledTimes(1);
+  });
+
+  // One provider being unconfigured must not abandon the rest of the sweep, and must not drop the
+  // row either — the ledger entry is the only record that the asset exists.
+  it("skips a row whose provider is unconfigured and still reaps the others", async () => {
+    storage.mockImplementation(async (ref: { provider: string | null }) =>
+      ref.provider === "spaces" ? null : ({ destroy: destroyBy.cloudinary } as never),
+    );
+    findReapable.mockResolvedValue([
+      row({ publicId: "a", storageProvider: "spaces" }),
+      row({ publicId: "b", storageProvider: "cloudinary" }),
+    ] as never);
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const r = await reapAbandonedUploads();
+
+    expect(r).toMatchObject({ destroyed: 1, skipped: 1 });
+    expect(destroyBy.spaces).not.toHaveBeenCalled();
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(remove).toHaveBeenCalledWith("b");
+    spy.mockRestore();
   });
 });

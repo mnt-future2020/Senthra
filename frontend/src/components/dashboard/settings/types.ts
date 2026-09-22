@@ -5,6 +5,7 @@ export type Section =
   | "branding"
   | "appearance"
   | "integrations"
+  | "storage"
   | "email"
   | "email-templates"
   | "operations"

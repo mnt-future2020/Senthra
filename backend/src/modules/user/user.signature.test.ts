@@ -10,7 +10,11 @@ vi.mock("./user.repository.js", () => ({
 }));
 vi.mock("#modules/auth/admin.repository.js", () => ({ findNamesByEmails: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
-vi.mock("../../lib/cloudinary.js", () => ({ uploadToCloudinary: vi.fn(), uploadFileToCloudinary: vi.fn() }));
+const { mockUpload } = vi.hoisted(() => ({ mockUpload: vi.fn() }));
+vi.mock("../../lib/storage/index.js", () => ({
+  // Cloudinary: it rasterises on delivery, so no derivative is generated and signaturePdfUrl stays null.
+  findActiveStorage: vi.fn(async () => ({ upload: mockUpload, transformsOnDelivery: true })),
+}));
 // The shared Cloudinary release path. Mocked so these stay pure unit tests AND so the destroy-on-
 // remove call is assertable; the real one reads every attachment table through Prisma.
 vi.mock("#modules/attachment/attachment.service.js", () => ({
@@ -24,9 +28,9 @@ vi.mock("#modules/settings/settings.service.js", () => ({
 import * as userRepo from "./user.repository.js";
 import * as adminRepo from "#modules/auth/admin.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
-import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
+import { findActiveStorage } from "../../lib/storage/index.js";
 import {
   getDisplayNamesForEmails,
   getSignatureForEmail,
@@ -79,7 +83,7 @@ const mockFindById = userRepo.findById as ReturnType<typeof vi.fn>;
 const mockFindByEmail = userRepo.findByEmailWithRole as ReturnType<typeof vi.fn>;
 const mockUpdate = userRepo.update as ReturnType<typeof vi.fn>;
 const mockCreds = getCloudinaryCreds as ReturnType<typeof vi.fn>;
-const mockUpload = uploadToCloudinary as ReturnType<typeof vi.fn>;
+
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -100,7 +104,13 @@ describe("uploadMySignature", () => {
     mockFindById.mockResolvedValue(userRow());
     const result = await uploadMySignature({ signature: PNG, fileName: "sig.png" }, actor);
 
-    expect(mockUpload).toHaveBeenCalledWith(PNG, `signature-${USER_ID}`, CREDS, "senthra/signatures");
+    expect(mockUpload).toHaveBeenCalledWith(
+      PNG,
+      `signature-${USER_ID}`,
+      // `immutable: false` IS the deterministic-id contract: this asset is overwritten in place, so
+      // there is never an older file to release.
+      { folder: "senthra/signatures", kind: "image", immutable: false },
+    );
     const data = mockUpdate.mock.calls[0][1];
     expect(data.signatureUrl).toMatch(/^https/);
     expect(data.signatureName).toBe("sig.png");
@@ -165,7 +175,7 @@ describe("removeMySignature — the stored image is destroyed", () => {
   it("names the asset exactly as the upload did — the two cannot drift", async () => {
     mockFindById.mockResolvedValue(userRow({ signatureUrl: null }));
     await uploadMySignature({ signature: PNG, fileName: "sig.png" }, actor);
-    const [, uploadedPublicId, , uploadedFolder] = mockUpload.mock.calls[0];
+    const [, uploadedPublicId, { folder: uploadedFolder }] = mockUpload.mock.calls[0];
 
     vi.clearAllMocks();
     mockUpdate.mockImplementation((_id: string, data: Record<string, unknown>) =>
@@ -226,6 +236,107 @@ describe("removeMySignature — the stored image is destroyed", () => {
     await removeMySignature(actor);
     expect(mockRelease).toHaveBeenCalledTimes(1);
     expect(mockAudit.mock.calls[0][0].action).toBe("user.signature_removed");
+  });
+});
+
+/**
+ * The pdfkit-safe DERIVATIVE, which is a second object with its own life.
+ *
+ * It is stored only on a provider that cannot transform at delivery, under a key derived from the
+ * original's — so it is just as deterministic, just as publicly fetchable, and just as much a
+ * signature. Leaving it behind means the user is told their signature is gone while a rendering of
+ * it stays live at a URL anyone can reconstruct from a user id the API hands out.
+ */
+describe("removeMySignature — the derivative is released too", () => {
+  const mockRelease = attachmentService.releaseAsset as ReturnType<typeof vi.fn>;
+  const SIG_REF = { publicId: `senthra/signatures/signature-${USER_ID}`, resourceType: "image" };
+  const PDF_REF = { publicId: `senthra/signatures/signature-${USER_ID}__pdf.png`, resourceType: "image" };
+  const withDerivative = {
+    signatureUrl: "https://files.example.com/sig.svg",
+    signaturePdfUrl: "https://files.example.com/senthra/signatures/signature-x__pdf.png",
+    signatureProvider: "spaces",
+  };
+
+  it("releases BOTH objects, each on the provider the row names", async () => {
+    mockFindById.mockResolvedValue(userRow(withDerivative));
+    await removeMySignature(actor);
+
+    expect(mockRelease).toHaveBeenCalledTimes(2);
+    expect(mockRelease.mock.calls[0][0]).toEqual({ ...SIG_REF, provider: "spaces" });
+    // `resourceType: "image"` because the derivative was uploaded with `kind: "image"` — it is a
+    // PNG, never a raw asset, and Cloudinary cannot address an asset under the wrong type at all.
+    expect(mockRelease.mock.calls[1][0]).toEqual({ ...PDF_REF, provider: "spaces" });
+  });
+
+  // Cloudinary rasterises on delivery, so it stores no derivative and `signaturePdfUrl` is null.
+  // Firing a destroy for an object that was never written would be a pointless call on a path that
+  // has none today — so the release is guarded on the column, not on the provider.
+  it("releases only the original when no derivative was ever stored", async () => {
+    mockFindById.mockResolvedValue(userRow({ signatureUrl: "https://cdn/sig.png", signatureProvider: "cloudinary" }));
+    await removeMySignature(actor);
+    expect(mockRelease).toHaveBeenCalledTimes(1);
+    expect(mockRelease.mock.calls[0][0]).toEqual({ ...SIG_REF, provider: "cloudinary" });
+  });
+
+  it("clears every persisted signature column, derivative and provider included", async () => {
+    mockFindById.mockResolvedValue(userRow(withDerivative));
+    await removeMySignature(actor);
+    expect(mockUpdate.mock.calls[0][1]).toEqual({
+      signatureUrl: null,
+      signatureName: null,
+      signatureMimeType: null,
+      signatureFileSize: null,
+      signatureUploadedAt: null,
+      signatureUpdatedAt: null,
+      signaturePdfUrl: null,
+      signatureProvider: null,
+    });
+  });
+
+  // ── The provider comes off the ROW, never from what is selected today ────────────────────────
+  //
+  // Proven twice over: the ref carries the stored provider in BOTH directions, and the active
+  // provider is never even asked. The second assertion is the durable one — a future edit that
+  // reintroduced a "which provider are we on?" lookup would fail it immediately.
+  it("targets the stored provider when the active provider is the opposite one", async () => {
+    mockFindById.mockResolvedValue(userRow({ signatureUrl: "https://cdn/sig.png", signatureProvider: "cloudinary" }));
+    await removeMySignature(actor);
+    expect(mockRelease.mock.calls[0][0].provider).toBe("cloudinary");
+    expect(findActiveStorage).not.toHaveBeenCalled();
+  });
+
+  it("targets Spaces for a Spaces-stored signature, again without consulting the active provider", async () => {
+    mockFindById.mockResolvedValue(userRow(withDerivative));
+    await removeMySignature(actor);
+    for (const call of mockRelease.mock.calls) expect(call[0].provider).toBe("spaces");
+    expect(findActiveStorage).not.toHaveBeenCalled();
+  });
+
+  // A row written before the column existed. `normalizeProviderId` downstream reads null as
+  // Cloudinary, which is where every one of those signatures actually is.
+  it("passes a legacy null provider straight through, for the normaliser to read as Cloudinary", async () => {
+    mockFindById.mockResolvedValue(userRow({ signatureUrl: "https://cdn/sig.png", signatureProvider: null }));
+    await removeMySignature(actor);
+    expect(mockRelease).toHaveBeenCalledTimes(1);
+    expect(mockRelease.mock.calls[0][0]).toEqual({ ...SIG_REF, provider: null });
+  });
+
+  // Original first, derivative second — and both AFTER the row is cleared. A destroy that outran
+  // the row it is named by would leave a live URL pointing at a deleted object; the reverse only
+  // ever leaks a file the reaper's own logging can find.
+  it("clears the row first, then releases the original before the derivative", async () => {
+    const order: string[] = [];
+    mockFindById.mockResolvedValue(userRow(withDerivative));
+    mockUpdate.mockImplementation(() => {
+      order.push("db");
+      return Promise.resolve(userRow({ signatureUrl: null }));
+    });
+    mockRelease.mockImplementation((ref: { publicId: string }) => {
+      order.push(ref.publicId.endsWith("__pdf.png") ? "derivative" : "original");
+      return Promise.resolve();
+    });
+    await removeMySignature(actor);
+    expect(order).toEqual(["db", "original", "derivative"]);
   });
 });
 

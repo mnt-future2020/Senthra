@@ -20,6 +20,29 @@ const portSchema = z
 // All fields optional — the settings update is a partial patch. Unknown keys are
 // stripped by default. Business rules (e.g. required SMTP fields for a test send)
 // live in the service, since they depend on merged saved + override values.
+/**
+ * A URL field that may also be cleared.
+ *
+ * Both storage URLs reach the network: the endpoint is where the SDK signs its requests, and the CDN
+ * origin is BAKED INTO every delivery URL this app then stores on attachment, avatar and signature
+ * rows. A typo in the second one is therefore not a settings mistake that can be corrected later by
+ * retyping it — the bad origin is already persisted in every row written since, and undoing that is
+ * a data migration. `.url()` is the cheapest possible place to stop it, and it is the same shape
+ * `websiteUrl` below already uses.
+ *
+ * The scheme is pinned too: `z.string().url()` accepts `ftp://` and `javascript:` quite happily, and
+ * neither belongs on a value the server is about to fetch.
+ */
+const httpUrl = (message: string) =>
+  z.union([
+    z.literal(""),
+    z
+      .string()
+      .url(message)
+      .refine((v) => /^https?:\/\//i.test(v), message)
+      .refine((v) => v.length <= 2048, "That URL is too long."),
+  ]);
+
 export const updateSettingsSchema = z.object({
   googleEnabled: z.boolean().optional(),
   googleClientId: z.string().optional(),
@@ -36,6 +59,17 @@ export const updateSettingsSchema = z.object({
   cloudinaryCloudName: z.string().optional(),
   cloudinaryApiKey: z.string().optional(),
   cloudinaryApiSecret: z.string().optional(),
+  // Which provider NEW uploads go to. An enum, not a free string: an unrecognised value would fall
+  // back to Cloudinary at read time and look like the save silently did nothing.
+  storageProvider: z.enum(["cloudinary", "spaces"]).optional(),
+  // DigitalOcean Spaces — UI-configurable. The secret follows the blank-to-keep rule every other
+  // secret here uses, so the form never has to hold one to save the rest.
+  spacesEndpoint: httpUrl("Enter a valid Spaces endpoint URL (including https://).").optional(),
+  spacesRegion: z.string().optional(),
+  spacesBucket: z.string().optional(),
+  spacesAccessKeyId: z.string().optional(),
+  spacesSecretKey: z.string().optional(),
+  spacesCdnUrl: httpUrl("Enter a valid CDN URL (including https://).").optional(),
   // Branding (all public). Logo/favicon are normally set via the upload endpoint,
   // but accepting the URL here lets the UI clear them (send "").
   brandName: z.string().max(60).optional(),
@@ -178,3 +212,26 @@ export const testEmailSchema = z.object({
   smtpFromEmail: z.string().optional(),
 });
 export type TestEmailInput = z.infer<typeof testEmailSchema>;
+
+/**
+ * What a storage connection test carries.
+ *
+ * THE VALUES CURRENTLY ON SCREEN, which may not be saved. Testing the stored row while the form
+ * holds unsaved edits would confirm a configuration nobody is about to use. Every field is optional
+ * and falls back to what is stored — which is also how a blank secret means "keep the saved one".
+ */
+export const testStorageSchema = z.object({
+  provider: z.enum(["cloudinary", "spaces"]),
+  // Cloudinary's own fields, for the same reason the Spaces ones are here: the test judges what is
+  // ON SCREEN. Without these it would confirm the stored credentials while the form held new ones.
+  cloudinaryCloudName: z.string().optional(),
+  cloudinaryApiKey: z.string().optional(),
+  cloudinaryApiSecret: z.string().optional(),
+  spacesEndpoint: httpUrl("Enter a valid Spaces endpoint URL (including https://).").optional(),
+  spacesRegion: z.string().optional(),
+  spacesBucket: z.string().optional(),
+  spacesAccessKeyId: z.string().optional(),
+  spacesSecretKey: z.string().optional(),
+  spacesCdnUrl: httpUrl("Enter a valid CDN URL (including https://).").optional(),
+});
+export type TestStorageInput = z.infer<typeof testStorageSchema>;

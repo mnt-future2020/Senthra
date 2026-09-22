@@ -44,7 +44,10 @@ export async function resolveBrandVars(): Promise<TemplateVars> {
     supportEmail: s.smtpFromEmail || "",
     loginUrl: `${env.FRONTEND_URL}/login`,
     // Trusted HTML (see RAW_HTML_KEYS in template-render) — the logo-aware header.
-    emailHeaderRow: buildEmailHeaderRow(brandName, logoUrl, brandColor),
+    // The stored email-sized raster travels WITH the logo. Null on Cloudinary, which rasterises on
+    // delivery instead — so this changes nothing there, and is what stops a vector logo on any other
+    // provider reaching Gmail/Outlook as bare alt text.
+    emailHeaderRow: buildEmailHeaderRow(brandName, logoUrl, brandColor, s.logoEmailUrl ?? null),
   };
 }
 

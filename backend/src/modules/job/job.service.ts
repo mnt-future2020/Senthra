@@ -2112,6 +2112,10 @@ async function reconcileAttachments(
           fileSizeBytes: claimed.fileSizeBytes,
           publicId: claimed.publicId,
           resourceType: claimed.resourceType,
+          // The provider recorded on the ledger row this URL was claimed from — see
+          // claimDeferredUpload. A job attachment is composed before the job exists, so this is the
+          // only place the provider that stored it is still known.
+          storageProvider: claimed.provider,
           uploadedBy: actor?.email ?? null,
         },
         tx,
@@ -2122,7 +2126,7 @@ async function reconcileAttachments(
   // Whatever is left in the map was dropped from the form.
   for (const gone of byUrl.values()) {
     await jobRepo.removeAttachment(gone.id);
-    await attachmentService.releaseAsset(gone, `job ${jobLabel}`);
+    await attachmentService.releaseAsset(attachmentService.refFromAttachment(gone), `job ${jobLabel}`);
   }
 }
 

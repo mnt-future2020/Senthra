@@ -46,9 +46,32 @@ const files = walk(SRC).map((path) => ({ path, rel: path.slice(SRC.length + 1).r
 // tables only, so for a job or van-stock upload it returns zero whether the asset is referenced or
 // not; the right answer would come out by coincidence, resting on an argument that does not hold.
 // `upload.reaper.test.ts` asserts the reaper never consults it.
+//
+// AMENDED when storage moved behind a provider abstraction. There are now TWO ways to reach a
+// delete and the guard has to see both: naming the vendor transport (`destroyFromCloudinary`), and
+// obtaining a provider you can delete THROUGH — `getStorageFor`, which resolves the provider that
+// holds an existing asset, or a bare `.destroy(` call on one. `findActiveStorage` is deliberately
+// NOT on that list: it answers "where do new uploads go", and an upload site holding it is the
+// normal case rather than the offence. What makes a file an offender is reaching for an asset that
+// already exists.
 const DESTROY_ALLOWLIST = [
-  "lib/cloudinary.ts",
-  "lib/__tests__/cloudinary.destroy.test.ts",
+  "lib/storage/index.ts",
+  // The TRANSPORTS and their own tests. Each one IS a delete implementation, so naming the operation
+  // is their job rather than an offence — the guard exists to stop a DOMAIN service reaching past
+  // releaseAsset, and a provider adapter is not one. A new provider adds its pair here and nothing
+  // else; anything outside this list that names a destroy is still a failure.
+  "lib/storage/cloudinary.ts",
+  "lib/storage/cloudinary.test.ts",
+  "lib/storage/__tests__/cloudinary.destroy.test.ts",
+  "lib/storage/spaces.ts",
+  "lib/storage/spaces.test.ts",
+  // The derivative generator, on the SAME justification as the upload module's: it destroys only
+  // objects it created moments earlier in the same call, which nothing has ever referenced — a
+  // half-generated derivative set, abandoned because a later one failed. `releaseAsset` would be the
+  // wrong tool, not a safer one: its reference count reads the attachment tables, which never name a
+  // derivative, so it would answer "unreferenced" by coincidence rather than by argument.
+  "lib/storage/derivatives.ts",
+  "lib/storage/derivatives.test.ts",
   "modules/attachment/attachment.service.ts",
   "modules/attachment/attachment.service.test.ts",
   "modules/attachment/attachment.boundary.test.ts",
@@ -64,9 +87,12 @@ const DESTROY_ALLOWLIST = [
   "modules/user/user.signature.release.test.ts",
 ];
 
+/** Naming the vendor transport, or holding a provider for an asset that already exists. */
+const DESTROY_REACH = /destroyFromCloudinary|getStorageFor|\.destroy\(/;
+
 describe("Cloudinary deletion has exactly one entrance", () => {
   it("is reached only through releaseAsset", () => {
-    const offenders = files.filter((f) => f.src.includes("destroyFromCloudinary") && !DESTROY_ALLOWLIST.includes(f.rel));
+    const offenders = files.filter((f) => DESTROY_REACH.test(f.src) && !DESTROY_ALLOWLIST.includes(f.rel));
     expect(offenders.map((f) => f.rel)).toEqual([]);
   });
 
@@ -77,7 +103,7 @@ describe("Cloudinary deletion has exactly one entrance", () => {
     const offenders = files.filter(
       (f) =>
         /uploader\.destroy|delete_resources|api\.delete/.test(f.src) &&
-        f.rel !== "lib/cloudinary.ts" &&
+        f.rel !== "lib/storage/cloudinary.ts" &&
         f.rel !== "modules/attachment/attachment.boundary.test.ts",
     );
     expect(offenders.map((f) => f.rel)).toEqual([]);
@@ -105,11 +131,20 @@ describe("deterministic and evidence assets have no deletion path", () => {
     "modules/van-stock-request/van-stock-request.service.ts",
   ];
 
-  it.each(IMAGE_UPLOAD_SITES)("%s uploads but never releases", (rel) => {
+  // The assertion used to be `toContain("uploadToCloudinary")` — the vendor transport by name. These
+  // sites now upload through the abstraction, so what it asserts instead is the same invariant one
+  // level up: they hold the ACTIVE-upload accessor and nothing more. Uploading is not a reason to
+  // acquire the ability to delete, and `findActiveStorage` is the accessor that grants the first
+  // without the second — it answers "where does a new file go", never "who holds this existing one".
+  it.each(IMAGE_UPLOAD_SITES)("%s uploads through the abstraction but never releases", (rel) => {
     const file = files.find((f) => f.rel === rel);
     expect(file, `${rel} not found — was it moved?`).toBeDefined();
-    expect(file!.src).toContain("uploadToCloudinary");
+    // It really does upload — so this is a statement about an upload site, not a vacuous pass on a
+    // file that stopped storing anything.
+    expect(file!.src, `${rel} should upload through findActiveStorage`).toContain("findActiveStorage");
     expect(file!.src).not.toContain("releaseAsset");
+    expect(file!.src).not.toContain("getStorageFor");
+    expect(file!.src).not.toContain(".destroy(");
     expect(file!.src).not.toContain("destroyFromCloudinary");
   });
 });
@@ -189,6 +224,10 @@ describe("avatar and company logo release the file they replace", () => {
     expect(f, `${rel} not found — was it moved?`).toBeDefined();
     expect(f!.src).toContain("releaseAsset");
     expect(f!.src).not.toContain("destroyFromCloudinary");
+    // And not through the abstraction either — holding a provider for an existing asset is the same
+    // unguarded delete by another name.
+    expect(f!.src).not.toContain("getStorageFor");
+    expect(f!.src).not.toContain(".destroy(");
   });
 
   // Identity has to be STORED for the release to have anything to address.

@@ -66,6 +66,25 @@ export interface JobAttachment {
 const CLOUDINARY_HOST = "res.cloudinary.com";
 
 /**
+ * Is this URL served from one of OUR storage hosts?
+ *
+ * Matched on the WHOLE hostname, never a substring: `files.senthra.co.uk.evil.test` contains a real
+ * host's characters and must not pass. The Cloudinary check keeps its original `endsWith` form so a
+ * regional subdomain still matches, which is what it has always done.
+ *
+ * `hosts` is optional so a caller without branding data keeps exactly today's behaviour rather than
+ * losing the Cloudinary check as well.
+ */
+function isOurHost(hostname: string, hosts?: string[]): boolean {
+  const host = hostname.toLowerCase();
+  if (host.endsWith(CLOUDINARY_HOST)) return true;
+  return (hosts ?? []).some((h) => {
+    const candidate = h.trim().toLowerCase();
+    return candidate !== "" && host === candidate;
+  });
+}
+
+/**
  * Extensions that render behind a FILE icon rather than the external-link one.
  *
  * `.doc` is here and is NOT in the upload policy: nothing can upload one any more, but jobs created
@@ -137,7 +156,7 @@ function stripUploadHash(fileName: string): string {
 }
 
 /** Parse one stored attachment string. Returns null for a blank entry (the form keeps empty rows). */
-export function parseJobAttachment(value: string): JobAttachment | null {
+export function parseJobAttachment(value: string, uploadHosts?: string[]): JobAttachment | null {
   const url = value.trim();
   if (!url) return null;
 
@@ -166,7 +185,7 @@ export function parseJobAttachment(value: string): JobAttachment | null {
     const parsed = new URL(rawUrl);
     const parts = parsed.pathname.split("/").filter(Boolean);
     name = stripUploadHash(parts[parts.length - 1] || parsed.hostname);
-    isUploaded = parsed.hostname.toLowerCase().endsWith(CLOUDINARY_HOST);
+    isUploaded = isOurHost(parsed.hostname, uploadHosts);
   } catch {
     name = rawUrl;
   }

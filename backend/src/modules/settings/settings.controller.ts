@@ -2,6 +2,7 @@ import * as settingsService from "./settings.service.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import type {
   TestEmailInput,
+  TestStorageInput,
   UpdateSettingsInput,
   UploadBrandingInput,
 } from "./settings.validation.js";
@@ -34,6 +35,18 @@ export const updateSettings = asyncHandler(async (req, res) => {
     type: req.principal?.type,
   });
   res.json({ settings });
+});
+
+/**
+ * POST /settings/storage/test  (protected) — prove a storage configuration works.
+ *
+ * Tests the SUBMITTED values, not the stored ones, so an administrator can verify new credentials
+ * before committing to them. Returns `{ ok, message }` and nothing else: no configuration is echoed
+ * back, and no SDK detail reaches the browser.
+ */
+export const testStorage = asyncHandler(async (req, res) => {
+  const result = await settingsService.testStorageConnection(req.body as TestStorageInput);
+  res.json(result);
 });
 
 // POST /settings/email/test  (protected) — send a test email.

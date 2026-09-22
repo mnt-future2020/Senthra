@@ -43,6 +43,22 @@ const envSchema = z.object({
   CLOUDINARY_UPLOAD_PRESET_IMAGE: z.string().default("senthra_image"),
   CLOUDINARY_UPLOAD_PRESET_RAW: z.string().default("senthra_raw"),
 
+  // DigitalOcean Spaces (S3-compatible object storage). All optional, and all five of endpoint /
+  // region / bucket / key / secret are needed together — Spaces cannot be selected as the active
+  // provider until the set is complete, from Settings or from here. Settings takes precedence,
+  // exactly as it does for Cloudinary.
+  //
+  // This is the ONLY place these are read. `lib/storage/spaces.ts` receives resolved config as an
+  // argument and has no config source of its own, which is what lets a test build one without
+  // touching the environment.
+  SPACES_ENDPOINT: z.string().optional(),
+  SPACES_REGION: z.string().optional(),
+  SPACES_BUCKET: z.string().optional(),
+  SPACES_ACCESS_KEY_ID: z.string().optional(),
+  SPACES_SECRET_KEY: z.string().optional(),
+  // Optional CDN origin. When set, delivery URLs are built from it instead of the bucket host.
+  SPACES_CDN_URL: z.string().optional(),
+
   // Firebase Cloud Messaging service-account (push notifications to the engineer
   // app). Optional — push is disabled until all three are set. The private key is
   // stored with literal \n escapes; the FCM lib un-escapes them at init.

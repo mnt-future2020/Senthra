@@ -1,6 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
-import { uploadToCloudinary } from "../../lib/cloudinary.js";
+import { findActiveStorage } from "../../lib/storage/index.js";
 import { notify } from "#modules/notification/notification.service.js";
 import { emitAttentionChanged, emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import * as audit from "#modules/audit/audit.service.js";
@@ -646,15 +646,19 @@ export async function acknowledge(id: string, signatureDataUri: string, actor: A
     throw forbidden("Only the recipient can acknowledge this transfer.");
   }
 
-  // Upload signature to Cloudinary
-  const creds = await settingsService.getCloudinaryCreds();
-  if (!creds) throw badRequest("Cloudinary is not configured. Contact an administrator.");
-  // Unique per upload, not per millisecond. uploadToCloudinary passes `overwrite: true` because
+  // Upload the signature to whichever provider is active
+  const storage = await findActiveStorage();
+  if (!storage) throw badRequest("File storage is not configured. Contact an administrator.");
+  // Unique per upload, not per millisecond. The image transport passes `overwrite: true` because
   // branding and user signatures are replaced in place — so a publicId two concurrent uploads can
   // agree on is one silently overwriting the other. Two engineers acknowledging at once is exactly
   // the case, and the loser's signature is evidence nobody would notice was gone.
   const publicId = `sig-${t.id}-${randomUUID()}`;
-  const { url: signatureUrl } = await uploadToCloudinary(signatureDataUri, publicId, creds, "senthra/engineer-transfers");
+  const { url: signatureUrl } = await storage.upload(signatureDataUri, publicId, {
+    folder: "senthra/engineer-transfers",
+    kind: "image",
+    immutable: true,
+  });
 
   const acknowledged = await transferRepo.acknowledgeTx(id, signatureUrl);
 
@@ -674,11 +678,15 @@ export async function acknowledge(id: string, signatureDataUri: string, actor: A
 // ---- uploadAttachment -----------------------------------------------------------------------
 
 export async function uploadAttachment(image: string): Promise<{ url: string }> {
-  const creds = await settingsService.getCloudinaryCreds();
-  if (!creds) throw badRequest("Cloudinary is not configured. Contact an administrator.");
+  const storage = await findActiveStorage();
+  if (!storage) throw badRequest("File storage is not configured. Contact an administrator.");
   // Same reason as the acknowledgement signature above — and worse here, since `attach-` carries no
   // transfer id either, so the collision window was the whole app rather than one transfer.
   const publicId = `attach-${randomUUID()}`;
-  const { url } = await uploadToCloudinary(image, publicId, creds, "senthra/engineer-transfers");
+  const { url } = await storage.upload(image, publicId, {
+    folder: "senthra/engineer-transfers",
+    kind: "image",
+    immutable: true,
+  });
   return { url };
 }

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { ArrowLeft, ExternalLink, FileText, Image as ImageIcon, Link as LinkIcon } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
+import { useBranding } from "@/hooks/useBranding";
 import { DetailHeader } from "@/components/ui/DetailHeader";
 import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
 import {
@@ -63,6 +64,10 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 export function PortalJobDetail({ id }: { id: string }) {
+  // Which hosts serve OUR uploads, so a stored attachment is not mistaken for a pasted link.
+  // From the PUBLIC branding payload — the two portal surfaces below cannot read Settings.
+  const { uploadHosts } = useBranding();
+
   const [job, setJob] = React.useState<PortalJobDetailData | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -238,7 +243,7 @@ export function PortalJobDetail({ id }: { id: string }) {
               {job.attachments.map((a, i) => {
                 // The internal ones are already filtered out upstream; parsing here still strips the
                 // marker so a stray one could never reach a customer's screen as a visible URL.
-                const meta = parseJobAttachment(a);
+                const meta = parseJobAttachment(a, uploadHosts);
                 if (!meta || meta.isInternal) return null;
                 const { rawUrl: clean, name, isImg, isPdf, isDoc } = meta;
 

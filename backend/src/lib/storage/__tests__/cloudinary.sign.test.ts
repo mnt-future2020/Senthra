@@ -1,7 +1,7 @@
 import { v2 as cloudinary } from "cloudinary";
 import { describe, expect, it } from "vitest";
 
-import { signUploadParams } from "./cloudinary.js";
+import { signUploadParams } from "../cloudinary.js";
 
 // The signature is the only thing standing between a browser and an upload on our terms. Cloudinary
 // rebuilds it from the fields the browser posts, so a field is enforced ONLY if it is signed — an

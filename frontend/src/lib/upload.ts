@@ -5,15 +5,20 @@ import { EXT_MEDIA_TYPE } from "./uploadPolicy";
 
 // ── Direct browser upload ──────────────────────────────────────────────────────────────────────
 //
-// The file goes from this browser to Cloudinary and never through our backend. What the backend still
-// decides is the part that matters — whether this user may upload here, and whether what arrived is
-// what was promised — so the round trip is: ask for a signature, post the file, hand back what
-// Cloudinary said.
+// The file goes from this browser straight to the storage provider and never through our backend.
+// What the backend still decides is the part that matters — whether this user may upload here, and
+// whether what arrived is what was promised — so the round trip is: ask for an upload envelope, post
+// the file where it says, hand back whatever the provider answered.
+//
+// WHICH provider is deliberately unknowable here. The envelope describes a protocol, not a vendor:
+// a method, a URL and an opaque bag of signed fields. Nothing in this file reads those fields or
+// branches on where they are going, which is what lets a second backend be added without touching
+// the frontend at all.
 //
 // Whatever a caller checks before calling this — extension, size, `file.type` — is UX ONLY. It exists
 // so a wrong file is refused in the picker rather than after a 10 MB upload, and none of it is
-// trusted: the signature caps the size and the folder at Cloudinary, and the server reads a
-// document's actual bytes before it will attach one.
+// trusted: the signed fields cap the size and the destination at the provider, and the server reads
+// a document's actual bytes before it will attach one.
 
 /**
  * Extension → the media type the backend's catalog names.
@@ -58,25 +63,41 @@ export type UploadPurpose =
   // exists by the time the photo is taken, so the asset keeps an identity that can be released with it.
   | "hire_delivery_photo";
 
-interface SignatureResponse {
-  cloudName: string;
-  apiKey: string;
-  timestamp: number;
-  signature: string;
-  folder: string;
+/**
+ * What the server says to do with this file — the whole of the browser's knowledge about storage.
+ *
+ * There is no provider name here, and no provider-specific field: no cloud name, no api key, no
+ * preset, no AWS anything. The browser performs the protocol it is handed and cannot tell which
+ * backend is on the other end. That is deliberate — a client that could tell would eventually grow
+ * an `if (provider === ...)`, and then every future backend means a frontend change.
+ */
+interface UploadEnvelope {
+  method: "POST";
+  url: string;
+  /**
+   * Posted VERBATIM, and before the file.
+   *
+   * Opaque on purpose: these are the values the server's signature was computed over. Renaming one,
+   * re-stringifying it, reordering them or dropping one invalidates the upload — so this side never
+   * reads them, it only forwards them.
+   */
+  fields: Record<string, string>;
+  /** The key the upload was authorised for. What finalize needs when the provider returns no body. */
   publicId: string;
-  resourceType: "image" | "raw";
-  uploadPreset?: string;
-  uploadUrl: string;
   purpose: UploadPurpose;
 }
 
-interface CloudinaryUploadResponse {
-  public_id: string;
-  version: number;
-  signature: string;
-  secure_url: string;
-  bytes: number;
+/**
+ * What a provider may hand back, all of it optional.
+ *
+ * Cloudinary answers with JSON and signs it. An S3 presigned POST answers 204 with no body at all.
+ * Neither shape is assumed: success is decided by the HTTP status, and whatever the body happens to
+ * contain is passed along for the server to check if it wants to.
+ */
+interface UploadReceipt {
+  publicId?: string;
+  version?: number | string;
+  signature?: string;
 }
 
 export interface UploadOptions {
@@ -111,34 +132,35 @@ export interface UploadOptions {
 export type UploadResult = { attachment: unknown } | { url: string };
 
 /**
- * Post the file straight to Cloudinary.
+ * Send the file where the envelope says, with the fields the envelope gave.
  *
  * XHR rather than fetch because it is still the only way to observe upload progress, and an engineer
  * sending a photo over a slow link needs to see that something is happening.
+ *
+ * Three rules, and all three are protocol rather than preference:
+ *
+ *   1. FIELDS VERBATIM. They are what the signature covers, so this forwards them untouched and in
+ *      the order given. It does not add, rename, reorder or re-stringify any of them.
+ *   2. FILE LAST. An S3 POST policy requires the file to be the final multipart part; Cloudinary
+ *      does not care, so last is correct for both. (This used to append it first.)
+ *   3. SUCCESS IS THE STATUS, NOT THE BODY. A presigned POST answers 204 with nothing in it. The
+ *      body is parsed opportunistically and its absence is not a failure.
  */
-function postToCloudinary(
-  signed: SignatureResponse,
+export function postToStorage(
+  envelope: UploadEnvelope,
   file: File,
   onProgress?: (p: number) => void,
   signal?: AbortSignal,
-): Promise<CloudinaryUploadResponse> {
+): Promise<UploadReceipt> {
   return new Promise((resolve, reject) => {
     const form = new FormData();
+    // Rule 1 — exactly what the server sent, in its own order.
+    for (const [name, value] of Object.entries(envelope.fields)) form.append(name, value);
+    // Rule 2 — after every field, always.
     form.append("file", file);
-    form.append("api_key", signed.apiKey);
-    form.append("timestamp", String(signed.timestamp));
-    form.append("signature", signed.signature);
-    // Exactly the values the server signed. Changing any of them invalidates the signature, which is
-    // what stops a client choosing its own folder or public id.
-    form.append("folder", signed.folder);
-    form.append("public_id", signed.publicId);
-    form.append("overwrite", "false");
-    // The server's preset, when it sent one. It is signed like the rest, so this cannot be dropped to
-    // escape the account's format allowlist — leaving it out just fails the signature.
-    if (signed.uploadPreset) form.append("upload_preset", signed.uploadPreset);
 
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", signed.uploadUrl);
+    xhr.open(envelope.method, envelope.url);
     if (onProgress) {
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
@@ -146,21 +168,12 @@ function postToCloudinary(
     }
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          resolve(JSON.parse(xhr.responseText) as CloudinaryUploadResponse);
-        } catch {
-          reject(new Error("The upload service returned something unexpected."));
-        }
+        // Rule 3 — a 2xx IS the success. A body is a bonus: Cloudinary sends a signed JSON receipt,
+        // S3 sends nothing at all, and neither is required for the upload to have worked.
+        resolve(readReceipt(xhr.responseText));
       } else {
-        // Cloudinary puts a readable reason here; surfacing it beats a bare status code.
-        let message = `Upload failed (${xhr.status}).`;
-        try {
-          const body = JSON.parse(xhr.responseText) as { error?: { message?: string } };
-          if (body.error?.message) message = body.error.message;
-        } catch {
-          /* keep the status-code message */
-        }
-        reject(new Error(message));
+        // A provider usually puts a readable reason in the body; surfacing it beats a bare status.
+        reject(new Error(errorMessage(xhr.status, xhr.responseText)));
       }
     };
     xhr.onerror = () => reject(new Error("Could not reach the upload service."));
@@ -170,11 +183,36 @@ function postToCloudinary(
   });
 }
 
+/** Whatever the provider said about the stored object, if it said anything. Never throws. */
+function readReceipt(body: string): UploadReceipt {
+  if (!body.trim()) return {};
+  try {
+    const parsed = JSON.parse(body) as { public_id?: string; version?: number; signature?: string };
+    return { publicId: parsed.public_id, version: parsed.version, signature: parsed.signature };
+  } catch {
+    // Not JSON — an S3 XML acknowledgement, or an empty-ish body. The status already said it worked.
+    return {};
+  }
+}
+
+/** The most useful thing that can be said about a failed upload, without assuming a body shape. */
+function errorMessage(status: number, body: string): string {
+  try {
+    // Cloudinary's shape. Anything else falls through to the status, which is always true.
+    const parsed = JSON.parse(body) as { error?: { message?: string } };
+    if (parsed.error?.message) return parsed.error.message;
+  } catch {
+    /* keep the status-code message */
+  }
+  return `Upload failed (${status}).`;
+}
+
 /**
  * Sign, upload, finalize.
  *
- * If the browser dies between the upload and the finalize, the asset is left in Cloudinary with a
- * pending-upload row against it, and the server's reaper destroys it a day later. That is why there is
+ * If the browser dies between the upload and the finalize, the asset is left with the provider and a
+ * pending-upload row against it, and the server's reaper destroys it a day later — through that same
+ * provider, which is why the row records which one signed it. That is why there is
  * no cleanup call here: this side cannot be relied on to run one.
  */
 export async function uploadDirect(opts: UploadOptions): Promise<UploadResult> {
@@ -182,7 +220,7 @@ export async function uploadDirect(opts: UploadOptions): Promise<UploadResult> {
   //
   // This sits here rather than in each picker because it is the one place every direct upload passes
   // through, and getting it wrong is invisible: a picker that forgot to shrink would still work, just
-  // slowly and at 20× the storage, and nobody would notice until the Cloudinary bill. `shrinkImage`
+  // slowly and at 20× the storage, and nobody would notice until the storage bill. `shrinkImage`
   // returns documents untouched, so the document pickers are safe to route through it — a PDF is not
   // an image and never reaches a canvas.
   //
@@ -192,7 +230,7 @@ export async function uploadDirect(opts: UploadOptions): Promise<UploadResult> {
   // rejects a media type whose resource type disagrees with the signature's.
   const file = await shrinkImage(opts.file);
 
-  const signed = await api<SignatureResponse>("/uploads/signature", {
+  const signed = await api<UploadEnvelope>("/uploads/signature", {
     method: "POST",
     body: {
       purpose: opts.purpose,
@@ -203,20 +241,24 @@ export async function uploadDirect(opts: UploadOptions): Promise<UploadResult> {
       mediaType: mediaTypeFor(file),
       ...(opts.targetId ? { targetId: opts.targetId } : {}),
       // Sent at signature time too, so a rejected label (the reserved issued-PO archive name) fails
-      // the user in the picker rather than after the file has already gone to Cloudinary.
+      // the user in the picker rather than after the file has already been uploaded.
       ...(opts.label ? { label: opts.label } : {}),
     },
   });
 
-  const uploaded = await postToCloudinary(signed, file, opts.onProgress, opts.signal);
+  const receipt = await postToStorage(signed, file, opts.onProgress, opts.signal);
 
   return api<UploadResult>("/uploads/finalize", {
     method: "POST",
     body: {
       purpose: opts.purpose,
-      publicId: uploaded.public_id,
-      version: uploaded.version,
-      signature: uploaded.signature,
+      // The provider's own echo when it gave one — Cloudinary may normalise the id it stored, and
+      // that normalised value is the one the ledger has to be matched on. Otherwise the key the
+      // server already minted and put in the envelope, which is what a 204 leaves us with.
+      publicId: receipt.publicId ?? signed.publicId,
+      // Forwarded only when the provider issued them. Its adapter decides whether they are required.
+      ...(receipt.version !== undefined ? { version: receipt.version } : {}),
+      ...(receipt.signature ? { signature: receipt.signature } : {}),
       fileName: file.name,
       // Same derivation at BOTH ends, and that is now load-bearing: finalize rejects a media type
       // whose resource type disagrees with the one the signature was minted for.

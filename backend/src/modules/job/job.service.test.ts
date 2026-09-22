@@ -28,7 +28,16 @@ vi.mock("#modules/upload/upload.service.js", () => ({
   claimDeferredUpload: vi.fn(),
   commitAttachment: vi.fn(),
 }));
-vi.mock("#modules/attachment/attachment.service.js", () => ({ releaseAsset: vi.fn() }));
+vi.mock("#modules/attachment/attachment.service.js", () => ({
+  releaseAsset: vi.fn(),
+  // The REAL mapping, not a stub: these tests assert the identity that reaches releaseAsset,
+  // and the provider is now part of it.
+  refFromAttachment: (row: { storageProvider: string | null; publicId: string | null; resourceType: string | null }) => ({
+    provider: row.storageProvider,
+    publicId: row.publicId,
+    resourceType: row.resourceType,
+  }),
+}));
 
 vi.mock("#modules/goods-management/goods-management.repository.js", () => ({
   reopenIssuanceForAddedKitTx: vi.fn(async () => 0),
@@ -820,5 +829,58 @@ describe("updateJob — retiring the legacy attachment array", () => {
     ).rejects.toThrow(/write failed/i);
     // Nothing emptied it, so the second URL is still recorded somewhere and a retry can finish.
     expect(mockUpdate.mock.calls.every((c) => (c[1] as { attachments?: string[] }).attachments === undefined)).toBe(true);
+  });
+});
+
+// ── The stored provider reaches the row ───────────────────────────────────────────────────────
+//
+// TWO DIFFERENT THINGS, and confusing them is the bug this exists to prevent:
+//
+//   ACTIVE provider  — where a NEW upload should go. Read from Settings.
+//   STORED provider  — where THIS asset actually is. Carried on the claimed ledger row.
+//
+// A job attachment is composed BEFORE the job exists, so the only record of where its file went is
+// the pending-upload row the form's URL is claimed from. If that provider were dropped here, the
+// row would read as `null` — Cloudinary — and a Spaces-stored file could never be deleted.
+describe("job attachments — the claimed provider is persisted on the row", () => {
+  const claimed = (provider: string) => ({
+    publicId: "senthra/jobs/uuid/Report.pdf",
+    resourceType: "raw",
+    provider,
+    fileName: "Report.pdf",
+    fileType: "pdf",
+    fileSizeBytes: 2048,
+    lease: new Date("2026-09-21T00:00:00.000Z"),
+  });
+
+  beforeEach(() => {
+    mockFindById.mockResolvedValue({ ...baseJob, status: "in_progress", attachments: [] });
+    mockUpdate.mockResolvedValue({ ...baseJob, status: "in_progress", attachments: [] });
+    vi.mocked(jobRepo.findAttachments).mockResolvedValue([]);
+    vi.mocked(jobRepo.addAttachment).mockResolvedValue({} as never);
+    // Stand in for the real transaction: run the write and hand back what it produced.
+    vi.mocked(uploadService.commitAttachment).mockImplementation((async (
+      _asset: unknown,
+      write: (tx: never) => unknown,
+    ) => write({} as never)) as never);
+  });
+
+  const save = () =>
+    updateJob(JOB_ID, { attachments: ["https://cdn.x/Report.pdf"] } as never, { email: "a@x.com" } as never);
+
+  it("persists a Cloudinary provider", async () => {
+    vi.mocked(uploadService.claimDeferredUpload).mockResolvedValue(claimed("cloudinary") as never);
+    await save();
+    expect(vi.mocked(jobRepo.addAttachment).mock.calls[0]![0]).toMatchObject({
+      storageProvider: "cloudinary",
+    });
+  });
+
+  it("persists a Spaces provider rather than flattening it to null", async () => {
+    vi.mocked(uploadService.claimDeferredUpload).mockResolvedValue(claimed("spaces") as never);
+    await save();
+    expect(vi.mocked(jobRepo.addAttachment).mock.calls[0]![0]).toMatchObject({
+      storageProvider: "spaces",
+    });
   });
 });

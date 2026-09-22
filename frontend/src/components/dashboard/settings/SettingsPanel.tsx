@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ShieldCheck, KeyRound, Palette, Plug, Mail, MailCheck, Paintbrush, Building2, ArrowRightLeft, FileText, ClipboardList } from "lucide-react";
+import { ShieldCheck, KeyRound, Palette, Plug, Mail, MailCheck, Paintbrush, Building2, ArrowRightLeft, FileText, ClipboardList, HardDrive } from "lucide-react";
 
 import { AccountSection } from "./account/AccountSection";
 import { SecuritySection } from "./account/SecuritySection";
@@ -11,7 +11,7 @@ import { BrandingSection } from "./branding/BrandingSection";
 import { CompanyProfileSection } from "./company/CompanyProfileSection";
 import { AppearanceSection } from "./appearance/AppearanceSection";
 import { IntegrationsSection } from "./integrations/IntegrationsSection";
-import { CloudinarySection } from "./integrations/CloudinarySection";
+import { StorageSection } from "./storage/StorageSection";
 import { EmailSection } from "./email/EmailSection";
 import { EmailTemplatesSection } from "./email/EmailTemplatesSection";
 import { OperationsSection } from "./operations/OperationsSection";
@@ -46,6 +46,7 @@ const NAV: {
   { id: "branding", label: "Branding", icon: Paintbrush, desc: "Logo, name & theme text", requires: "settings.view" },
   { id: "appearance", label: "Appearance", icon: Palette, desc: "Theme & layout", requires: "settings.view" },
   { id: "integrations", label: "Integrations", icon: Plug, desc: "Google Sign-In", requires: "settings.view" },
+  { id: "storage", label: "Storage", icon: HardDrive, desc: "Cloudinary & DigitalOcean Spaces", requires: "settings.view" },
   { id: "email", label: "Email", icon: Mail, desc: "SMTP & delivery", requires: "settings.view" },
   { id: "email-templates", label: "Email Templates", icon: MailCheck, desc: "Customize sent emails", requires: "email_templates.view" },
   { id: "operations", label: "Operations", icon: ArrowRightLeft, desc: "Transfers & workflow", requires: "settings.view" },
@@ -148,12 +149,8 @@ export function SettingsPanel(appearance: AppearanceProps) {
           {activeSection === "company" && <CompanyProfileSection />}
           {activeSection === "branding" && <BrandingSection />}
           {activeSection === "appearance" && <AppearanceSection {...appearance} />}
-          {activeSection === "integrations" && (
-            <>
-              <IntegrationsSection />
-              <CloudinarySection />
-            </>
-          )}
+          {activeSection === "integrations" && <IntegrationsSection />}
+          {activeSection === "storage" && <StorageSection />}
           {activeSection === "email" && <EmailSection />}
           {activeSection === "email-templates" && <EmailTemplatesSection />}
           {activeSection === "operations" && <OperationsSection />}

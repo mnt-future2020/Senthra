@@ -1,5 +1,19 @@
 import { v2 as cloudinary } from "cloudinary";
 
+import { env } from "../../config/env.js";
+import { badRequest } from "../../utils/http-error.js";
+
+import type {
+  AssetRef,
+  HeadResult,
+  SignUploadSpec,
+  SignedUpload,
+  StorageProvider,
+  StoredAsset,
+  UploadEvidence,
+  UploadOptions,
+} from "./types.js";
+
 export interface CloudinaryCreds {
   cloudName: string;
   apiKey: string;
@@ -280,4 +294,180 @@ export async function fetchFirstBytes(url: string, byteCount: number, timeoutMs 
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ── The storage-contract adapter ───────────────────────────────────────────────────────────────
+//
+// Everything above is the TRANSPORT: the Cloudinary SDK calls and the decisions that go with them,
+// unchanged from when they lived in `lib/cloudinary.ts`. Everything below adapts that transport to
+// the vendor-neutral `StorageProvider` contract, so the rest of the app can address a stored file
+// without naming Cloudinary.
+//
+// The split matters. The adapter makes NO decisions of its own — it chooses which transport function
+// to call and reshapes arguments. The moment it starts deciding things (a resource type, an
+// overwrite rule, a folder) it becomes a second Cloudinary client that can drift from the first.
+
+/** How long to wait on a delivery request before giving up. Matches `fetchFirstBytes`. */
+const DELIVERY_TIMEOUT_MS = 10_000;
+
+/**
+ * Which account-side preset an upload is signed against.
+ *
+ * Cloudinary-specific, so it is resolved HERE rather than carried on the neutral `SignUploadSpec` —
+ * a preset is the one part of a direct upload Cloudinary can refuse at its own edge, and no other
+ * provider has the concept. Split by resource type because that is exactly how the two allowlists
+ * differ. Blank means sign without one, which is the pre-preset behaviour.
+ */
+function uploadPresetFor(resourceType: "image" | "raw"): string | undefined {
+  const name = resourceType === "image" ? env.CLOUDINARY_UPLOAD_PRESET_IMAGE : env.CLOUDINARY_UPLOAD_PRESET_RAW;
+  return name.trim() || undefined;
+}
+
+/**
+ * The Cloudinary adapter.
+ *
+ * Credentials are passed IN rather than resolved here, exactly as the transport above does — so this
+ * stays a pure transport with no config source of its own, and a caller cannot accidentally get a
+ * provider built from credentials it did not intend.
+ */
+export function createCloudinaryProvider(creds: CloudinaryCreds): StorageProvider {
+  const urlFor = (r: AssetRef) => signedDeliveryUrl(r.publicId, r.resourceType, creds);
+
+  return {
+    id: "cloudinary",
+
+    /**
+     * TRUE, and it is not a formality: Cloudinary decodes an `image` upload and rejects anything it
+     * cannot read, which is why no magic-byte pass has ever run for photos on this provider. Reading
+     * the bytes back here would cost a request per upload to re-establish something already proven.
+     */
+    validatesImagesOnIngest: true,
+
+    /**
+     * TRUE. Transformations are URL parameters, computed on demand and cached by Cloudinary — which
+     * is why no derivative is ever stored for a Cloudinary asset and `logoPdfUrl` stays null for one.
+     */
+    transformsOnDelivery: true,
+
+    /**
+     * Store a file from a data URI.
+     *
+     * The two branches are the two transports above, and which one runs is decided by `kind` rather
+     * than inferred — see UploadOptions for why collapsing them changes behaviour. `immutable` is
+     * NOT consulted: Cloudinary invalidates its own CDN copy when it overwrites, so a cache policy
+     * chosen at write time has nothing to decide here.
+     */
+    async upload(source: string, publicId: string, opts: UploadOptions): Promise<StoredAsset> {
+      const asset =
+        opts.kind === "image"
+          ? await uploadToCloudinary(source, publicId, creds, opts.folder)
+          : await uploadFileToCloudinary(source, publicId, creds, opts.folder);
+      return { ...asset, provider: "cloudinary" };
+    },
+
+    /**
+     * Delete one stored asset. BEST-EFFORT CLEANUP — see the transport's own contract above, which
+     * this does not widen: an already-missing asset is still a success, and a caller must still have
+     * committed the database change that removed the last reference before calling it.
+     */
+    destroy(r: AssetRef): Promise<void> {
+      return destroyFromCloudinary(r.publicId, r.resourceType, creds);
+    },
+
+    /** Authorise one direct browser upload, reshaped into the neutral envelope. */
+    signUpload(spec: SignUploadSpec): SignedUpload {
+      // The resource type is Cloudinary's own vocabulary and the transport signs against it, so it
+      // is narrowed here rather than widened there.
+      const resourceType = spec.resourceType === "raw" ? "raw" : "image";
+      const uploadPreset = uploadPresetFor(resourceType);
+      const signed = signUploadParams(
+        { folder: spec.folder, publicId: spec.publicId, resourceType, ...(uploadPreset ? { uploadPreset } : {}) },
+        creds,
+      );
+
+      // EXACTLY the fields the browser posts today, with the same names and the same values — see
+      // frontend/src/lib/upload.ts. Cloudinary rebuilds its signature from what it receives, so a
+      // renamed or dropped field is a failed upload, not a cosmetic difference.
+      const fields: Record<string, string> = {
+        api_key: signed.apiKey,
+        timestamp: String(signed.timestamp),
+        signature: signed.signature,
+        folder: signed.folder,
+        public_id: signed.publicId,
+        overwrite: "false",
+      };
+      if (signed.uploadPreset) fields.upload_preset = signed.uploadPreset;
+
+      return {
+        method: "POST",
+        url: signed.uploadUrl,
+        fields,
+        // The full key, folder included — the form the PendingUpload ledger is keyed by.
+        publicId: `${signed.folder}/${signed.publicId}`,
+        resourceType,
+        provider: "cloudinary",
+      };
+    },
+
+    /**
+     * Is this really the asset we authorised, unedited?
+     *
+     * Cloudinary signs its upload response, so the check is real here and MUST refuse when the
+     * evidence is absent. `UploadEvidence` makes both fields optional because a provider with no
+     * signed response has nothing to put in them — if that optionality were allowed to mean "skip
+     * the check" for Cloudinary too, it would be a bypass rather than a shared type.
+     */
+    /**
+     * Identity. Cloudinary signs `overwrite: false`, so the permit it issues can be used exactly
+     * once — the asset is already beyond the reach of a replay the moment it is stored, and there
+     * is no staging key to move it out of.
+     */
+    promoteUpload(ref: AssetRef): Promise<AssetRef> {
+      return Promise.resolve(ref);
+    },
+
+    async confirmUpload(r: AssetRef, evidence: UploadEvidence): Promise<void> {
+      if (evidence.version === undefined || !evidence.signature) {
+        throw badRequest("That upload could not be verified.");
+      }
+      if (!verifyUploadResponse(r.publicId, evidence.version, evidence.signature, creds)) {
+        throw badRequest("That upload could not be verified.");
+      }
+    },
+
+    /**
+     * The stored size, read from the asset rather than from what the browser claimed.
+     *
+     * The status is checked BEFORE the header is believed. A non-2xx response still carries a
+     * `content-length` — of its own error body — so an unreadable asset would otherwise measure as
+     * however many bytes the CDN's "not found" page happens to be, and that tiny number would sail
+     * through the size cap this exists to feed.
+     */
+    async head(r: AssetRef): Promise<HeadResult> {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), DELIVERY_TIMEOUT_MS);
+      const res = await fetch(urlFor(r), { method: "HEAD", signal: controller.signal })
+        .catch((e: unknown) => {
+          // A refused, aborted or hung HEAD is not a size — refuse rather than fall through to a
+          // header that isn't there.
+          throw badRequest(`Could not verify the uploaded file (${e instanceof Error ? e.message : "read failed"}).`);
+        })
+        .finally(() => clearTimeout(timer));
+
+      if (!res.ok) throw badRequest(`Could not verify the uploaded file (HTTP ${res.status}).`);
+      const len = Number(res.headers.get("content-length"));
+      if (!Number.isFinite(len) || len <= 0) throw badRequest("Could not verify the uploaded file.");
+      return { sizeBytes: len, contentType: res.headers.get("content-type") };
+    },
+
+    /** The first bytes of a stored asset, for magic-byte validation. A cheap ranged CDN read. */
+    readRange(r: AssetRef, byteCount: number): Promise<Buffer> {
+      return fetchFirstBytes(urlFor(r), byteCount);
+    },
+
+    /** A delivery URL this server can fetch, whatever the asset's delivery type. */
+    deliveryUrl(r: AssetRef): string {
+      return urlFor(r);
+    },
+  };
 }

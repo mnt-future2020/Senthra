@@ -11,12 +11,22 @@ vi.mock("./upload.repository.js", () => ({
   remove: vi.fn(),
   findReapable: vi.fn(),
 }));
-vi.mock("../../lib/cloudinary.js", () => ({
-  signUploadParams: vi.fn(),
-  verifyUploadResponse: vi.fn(),
-  signedDeliveryUrl: vi.fn(),
-  fetchFirstBytes: vi.fn(),
-  destroyFromCloudinary: vi.fn(),
+// NO Cloudinary import. The service signs through whatever the ACTIVE provider is and verifies
+// through whatever the ROW names, so both halves are mocked as storage backends — which is exactly
+// the property under test: this file can no longer tell you which vendor is involved.
+const { confirmUpload, deliveryUrl, readRange, destroy, head, signUpload, promoteUpload } = vi.hoisted(() => ({
+  confirmUpload: vi.fn(),
+  promoteUpload: vi.fn(),
+  deliveryUrl: vi.fn(),
+  readRange: vi.fn(),
+  destroy: vi.fn(),
+  head: vi.fn(),
+  signUpload: vi.fn(),
+}));
+vi.mock("../../lib/storage/index.js", () => ({
+  getStorageFor: vi.fn(),
+  findActiveStorage: vi.fn(),
+  normalizeProviderId: (v: string | null | undefined) => (v === "spaces" ? "spaces" : "cloudinary"),
 }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
 // Deliberately NOT the real defaults. If the service ever hard-coded a preset name, these tests would
@@ -30,11 +40,10 @@ vi.mock("../../lib/prisma.js", () => ({
 }));
 
 import * as pendingRepo from "./upload.repository.js";
-import { fetchFirstBytes, signUploadParams, signedDeliveryUrl, verifyUploadResponse, destroyFromCloudinary } from "../../lib/cloudinary.js";
+import { findActiveStorage, getStorageFor } from "../../lib/storage/index.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
-import { env } from "../../config/env.js";
 import { commitAttachment, createSignature, verifyFinalize } from "./upload.service.js";
-import { UPLOAD_PURPOSES } from "./upload.catalog.js";
+import { CONTENT_PROBE_BYTES, UPLOAD_PURPOSES } from "./upload.catalog.js";
 
 const CREDS = { cloudName: "c", apiKey: "k", apiSecret: "s" };
 const ACTOR = { type: "user" as const, id: "u1", email: "buyer@x.co", permissions: ["purchase_orders.edit", "jobs.edit"] };
@@ -86,11 +95,10 @@ function installLedger(publicId = LEDGER_ID) {
   });
   return row;
 }
-const sign = vi.mocked(signUploadParams);
-const verifyResp = vi.mocked(verifyUploadResponse);
-const deliveryUrl = vi.mocked(signedDeliveryUrl);
-const firstBytes = vi.mocked(fetchFirstBytes);
-const destroy = vi.mocked(destroyFromCloudinary);
+const sign = signUpload; // the ACTIVE provider's signing call
+const firstBytes = readRange; // the provider's ranged read — same role the transport's had
+const storage = vi.mocked(getStorageFor);
+const activeStorage = vi.mocked(findActiveStorage);
 const creds = vi.mocked(getCloudinaryCreds);
 
 const pendingRow = (over: Record<string, unknown> = {}) => ({
@@ -101,30 +109,48 @@ const pendingRow = (over: Record<string, unknown> = {}) => ({
   actorId: "u1",
   createdAt: new Date(),
   claimExpiresAt: null,
+  // The provider the signature was minted against. Null is the legacy value — see the provider
+  // tests at the bottom of this file.
+  storageProvider: null,
   ...over,
 }) as never;
 
 // The stored size finalize reads back, rather than the one the browser claimed.
 //
-// `ok` is part of the stub because it is part of what the code reads: a HEAD that failed still
-// carries a content-length (its error body's), so finalize checks the status before believing the
-// header. A stub without `ok` is not a Response, and modelling it as one is what would let that
-// check regress unnoticed.
-const mockHead = (bytes: number, status = 200) =>
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () => ({
-      ok: status >= 200 && status < 300,
-      status,
-      headers: new Map([["content-length", String(bytes)]]) as never,
-    })),
-  );
+// It is the PROVIDER that reads it now. The rule that made this stub a Response — a failed HEAD
+// still carries a content-length, so the status must be checked before the header is believed —
+// moved with `measure()` into lib/storage/cloudinary.test.ts, where the reading actually happens.
+// What finalize still owns, and what is tested here, is what it does with the number it gets back.
+const mockHead = (bytes: number) => head.mockResolvedValue({ sizeBytes: bytes, contentType: null });
 
 beforeEach(() => {
   vi.clearAllMocks();
   creds.mockResolvedValue(CREDS);
-  sign.mockReturnValue({ cloudName: "c", apiKey: "k", timestamp: 1, signature: "sig", folder: "senthra/purchase-orders", publicId: "uuid.pdf", resourceType: "raw", uploadUrl: "https://api.cloudinary.com/v1_1/c/raw/upload" });
-  verifyResp.mockReturnValue(true);
+  storage.mockResolvedValue({
+    confirmUpload,
+    deliveryUrl,
+    readRange,
+    destroy,
+    head,
+    promoteUpload,
+    // The default provider here IS Cloudinary, which decodes an image as it arrives.
+    validatesImagesOnIngest: true,
+  } as never);
+  confirmUpload.mockResolvedValue(undefined);
+  // Cloudinary's promotion is an identity — it signs `overwrite: false`, so nothing is staged.
+  // Defaulting to that keeps every existing expectation in this file describing the same asset.
+  promoteUpload.mockImplementation(async (ref: unknown) => ref);
+  // What an adapter returns: a neutral envelope. The FIELDS are opaque to the service — these
+  // happen to be Cloudinary's, and the service neither reads nor reshapes them.
+  sign.mockResolvedValue({
+    method: "POST",
+    url: "https://api.cloudinary.com/v1_1/c/raw/upload",
+    fields: { api_key: "k", timestamp: "1", signature: "sig", folder: "senthra/purchase-orders", public_id: "uuid.pdf", overwrite: "false", upload_preset: "configured-raw" },
+    publicId: "senthra/purchase-orders/uuid.pdf",
+    resourceType: "raw",
+    provider: "cloudinary",
+  });
+  activeStorage.mockResolvedValue({ id: "cloudinary", signUpload } as never);
   deliveryUrl.mockReturnValue("https://res.cloudinary.com/c/raw/upload/s--x--/senthra/purchase-orders/uuid.pdf");
   firstBytes.mockResolvedValue(PDF);
   installLedger();
@@ -156,7 +182,7 @@ const finInput = (over: Record<string, unknown> = {}) => ({
 describe("createSignature — who may upload", () => {
   it("issues a signature for a permitted purpose", async () => {
     const r = await createSignature(sigInput(), ACTOR);
-    expect(r.signature).toBe("sig");
+    expect(r).toMatchObject({ method: "POST", url: expect.any(String), purpose: "po_attachment" });
     expect(create).toHaveBeenCalledTimes(1);
   });
 
@@ -298,32 +324,27 @@ describe("createSignature — the ledger row and the preset", () => {
     expect(create.mock.calls[0]![0]).toMatchObject({ actorId: "u1", purpose: "po_attachment", resourceType: "raw" });
   });
 
-  // Cloudinary can refuse a disallowed extension at its own edge, before the file is spent — but only
-  // against a preset, and the two allowlists differ by resource type. Picking the wrong one would send
-  // a PDF at the image allowlist and break every document upload.
-  it("signs a raw upload against the configured raw preset", async () => {
+  // The RESOURCE TYPE is still the service's decision — it comes from the declared media type and
+  // decides the delivery path. Which preset that maps to is the adapter's, and is asserted in
+  // lib/storage/cloudinary.test.ts, where the preset actually lives now.
+  it("asks the adapter to sign a document as raw", async () => {
     await createSignature(sigInput(), ACTOR);
-    expect(sign.mock.calls[0]![0].uploadPreset).toBe("configured-raw");
+    expect(sign.mock.calls[0]![0]).toMatchObject({ resourceType: "raw", mediaType: "application/pdf" });
   });
 
-  it("signs an image upload against the configured image preset", async () => {
+  it("asks the adapter to sign a photo as an image", async () => {
     await createSignature(sigInput({ purpose: "damage_photo", mediaType: "image/png", sizeBytes: 1000 }), {
       ...ACTOR,
       permissions: ["inventory.adjust"],
     });
-    expect(sign.mock.calls[0]![0].uploadPreset).toBe("configured-image");
+    expect(sign.mock.calls[0]![0]).toMatchObject({ resourceType: "image", mediaType: "image/png" });
   });
 
-  it("signs without a preset when the configured name is blank", async () => {
-    const mutable = env as { CLOUDINARY_UPLOAD_PRESET_RAW: string };
-    const configured = mutable.CLOUDINARY_UPLOAD_PRESET_RAW;
-    mutable.CLOUDINARY_UPLOAD_PRESET_RAW = "  ";
-    try {
-      await createSignature(sigInput(), ACTOR);
-      expect(sign.mock.calls[0]![0].uploadPreset).toBeUndefined();
-    } finally {
-      mutable.CLOUDINARY_UPLOAD_PRESET_RAW = configured;
-    }
+  // The purpose's own ceiling travels to the adapter, so a provider that can enforce a size limit at
+  // its edge (an S3 POST policy's content-length-range) has the number to do it with.
+  it("hands the purpose's byte ceiling to the adapter", async () => {
+    await createSignature(sigInput(), ACTOR);
+    expect(sign.mock.calls[0]![0]).toMatchObject({ maxBytes: UPLOAD_PURPOSES.po_attachment.maxBytes });
   });
 
   it("runs the module's pre-check and refuses when it throws", async () => {
@@ -341,6 +362,58 @@ describe("verifyFinalize — ownership", () => {
     const asset = await verifyFinalize(finInput(), ACTOR);
     expect(asset.publicId).toBe("senthra/purchase-orders/uuid.pdf");
     expect(asset.fileSizeBytes).toBe(2048);
+  });
+
+  // ── Promotion ───────────────────────────────────────────────────────────────────────────────
+  //
+  // A browser upload is authorised by a permit the client keeps, and that permit stays valid for
+  // its whole life rather than for a single use. So without this step the client can post AGAIN,
+  // after finalize has approved the bytes, and replace them: same URL, same row, different file.
+  // Cloudinary refuses that itself; an S3 POST policy has no such condition, so the object is
+  // instead MOVED out of the permit's reach once it has been checked.
+  describe("promotion out of the permit's reach", () => {
+    it("records the promoted identity, not the one the browser uploaded to", async () => {
+      findByPublicId.mockResolvedValue(pendingRow());
+      // A deliberately distinct key: if the row still took its identity from the browser's input,
+      // this assertion could not tell the difference.
+      promoteUpload.mockResolvedValue({
+        provider: "spaces",
+        publicId: "senthra/purchase-orders/promoted.pdf",
+        resourceType: "raw",
+      });
+      deliveryUrl.mockReturnValue("https://cdn.example.com/senthra/purchase-orders/promoted.pdf");
+
+      const asset = await verifyFinalize(finInput(), ACTOR);
+
+      expect(asset.publicId).toBe("senthra/purchase-orders/promoted.pdf");
+      // The stored URL must describe where the object ENDED UP, not where the browser put it.
+      expect(deliveryUrl).toHaveBeenLastCalledWith(
+        expect.objectContaining({ publicId: "senthra/purchase-orders/promoted.pdf" }),
+      );
+      expect(asset.url).toBe("https://cdn.example.com/senthra/purchase-orders/promoted.pdf");
+    });
+
+    // Ordering is the guarantee. Promote anything before it has been checked and the object under
+    // the served key is one nobody has looked inside.
+    it("promotes only AFTER the content and size checks", async () => {
+      findByPublicId.mockResolvedValue(pendingRow());
+      const order: string[] = [];
+      readRange.mockImplementation(async () => { order.push("content"); return PDF; });
+      head.mockImplementation(async () => { order.push("size"); return { sizeBytes: 2048 }; });
+      promoteUpload.mockImplementation(async (ref: unknown) => { order.push("promote"); return ref; });
+
+      await verifyFinalize(finInput(), ACTOR);
+
+      expect(order).toEqual(["content", "size", "promote"]);
+    });
+
+    it("promotes nothing when the size check rejects the upload", async () => {
+      findByPublicId.mockResolvedValue(pendingRow());
+      head.mockResolvedValue({ sizeBytes: 999 * 1024 * 1024 });
+
+      await expect(verifyFinalize(finInput(), ACTOR)).rejects.toThrow(/MB or smaller/i);
+      expect(promoteUpload).not.toHaveBeenCalled();
+    });
   });
 
   // THE control. Cloudinary's response signature proves the asset is real and in our cloud — every
@@ -371,7 +444,7 @@ describe("verifyFinalize — ownership", () => {
 
   it("refuses a response signature that does not verify", async () => {
     findByPublicId.mockResolvedValue(pendingRow());
-    verifyResp.mockReturnValue(false);
+    confirmUpload.mockRejectedValue(new Error("That upload could not be verified."));
     await expect(verifyFinalize(finInput(), ACTOR)).rejects.toThrow(/could not be verified/i);
   });
 });
@@ -412,7 +485,7 @@ describe("verifyFinalize — content", () => {
 
   // Images are decoded by Cloudinary on the way in, so its acceptance IS the content check and no
   // byte read is needed — which is what keeps the common, high-volume path free of extra calls.
-  it("does not read bytes for an image upload", async () => {
+  it("does not read bytes for an image upload on a provider that decodes on ingest", async () => {
     findByPublicId.mockResolvedValue(pendingRow({ resourceType: "image", purpose: "damage_photo" }));
     await verifyFinalize(finInput({ purpose: "damage_photo", mediaType: "image/png" }), { ...ACTOR, permissions: ["inventory.adjust"] });
     expect(firstBytes).not.toHaveBeenCalled();
@@ -637,13 +710,11 @@ describe("verifyFinalize — content", () => {
    * asset we could not read into a plausible small size, which then sails through the ceiling check
    * directly above. The status has to be tested before the header is used.
    */
-  it("refuses a size read from a non-2xx delivery response", async () => {
-    mockHead(71, 404);
-    await expect(verifyFinalize(finInput(), ACTOR)).rejects.toThrow(/could not verify the uploaded file \(http 404\)/i);
-  });
-
-  it("refuses when the size probe fails outright", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("aborted"); }));
+  // The status-before-header rule these used to pin now lives with the read itself, in
+  // lib/storage/cloudinary.test.ts. What finalize owns is the consequence: a size it cannot read is
+  // a refusal, never an attachment.
+  it("refuses when the size probe fails", async () => {
+    head.mockRejectedValue(new Error("Could not verify the uploaded file (HTTP 404)."));
     await expect(verifyFinalize(finInput(), ACTOR)).rejects.toThrow(/could not verify/i);
   });
 });
@@ -660,7 +731,7 @@ describe("verifyFinalize — the lease", () => {
   it("refuses when the lease is already held", async () => {
     claim.mockResolvedValue(null);
     await expect(verifyFinalize(finInput(), ACTOR)).rejects.toThrow(/already being processed/i);
-    expect(verifyResp).not.toHaveBeenCalled();
+    expect(confirmUpload).not.toHaveBeenCalled();
   });
 
   // The write needs to prove it holds the lease the verification took, so the lease has to travel.
@@ -720,5 +791,287 @@ describe("commitAttachment", () => {
     const write = vi.fn();
     await expect(commitAttachment(asset, write)).rejects.toThrow(/no longer available/i);
     expect(write).not.toHaveBeenCalled();
+  });
+});
+
+// ── Finalize resolves the provider from the LEDGER ROW ────────────────────────────────────────
+//
+// An upload is authorised against one provider and finalized moments later. If an administrator
+// switches provider in between, finalize must still verify the object where it was actually
+// written — otherwise a perfectly good upload is refused because it was looked for on a backend it
+// never touched. The active Settings provider has no say here; the row does.
+//
+// The Spaces adapter does not exist yet, so what these pin is the RESOLUTION: `getStorageFor` is
+// asked for the provider the row names.
+describe("verifyFinalize — the provider comes from the pending row", () => {
+  beforeEach(() => {
+    // The ACTIVE provider is deliberately the opposite of what each row says, so a test can only
+    // pass by reading the row.
+    activeStorage.mockResolvedValue({ id: "spaces", signUpload } as never);
+  });
+
+  it("finalizes a Cloudinary-signed upload against Cloudinary while Spaces is active", async () => {
+    findByPublicId.mockResolvedValue(pendingRow({ storageProvider: "cloudinary" }));
+    await verifyFinalize(finInput(), ACTOR);
+    expect(storage).toHaveBeenCalledWith(expect.objectContaining({ provider: "cloudinary" }));
+  });
+
+  it("finalizes a Spaces-signed upload against Spaces while Cloudinary is active", async () => {
+    activeStorage.mockResolvedValue({ id: "cloudinary", signUpload } as never);
+    findByPublicId.mockResolvedValue(pendingRow({ storageProvider: "spaces" }));
+    await verifyFinalize(finInput(), ACTOR);
+    expect(storage).toHaveBeenCalledWith(expect.objectContaining({ provider: "spaces" }));
+  });
+
+  it("finalizes a legacy null-provider row against Cloudinary while Spaces is active", async () => {
+    findByPublicId.mockResolvedValue(pendingRow({ storageProvider: null }));
+    await verifyFinalize(finInput(), ACTOR);
+    expect(storage).toHaveBeenCalledWith(expect.objectContaining({ provider: "cloudinary" }));
+  });
+
+  // A row written before the column existed has the field ABSENT, not null.
+  it("finalizes a row with a MISSING provider field against Cloudinary", async () => {
+    const row = pendingRow() as unknown as Record<string, unknown>;
+    delete row.storageProvider;
+    findByPublicId.mockResolvedValue(row as never);
+    await verifyFinalize(finInput(), ACTOR);
+    expect(storage).toHaveBeenCalledWith(expect.objectContaining({ provider: "cloudinary" }));
+  });
+
+  // Every asset the finalize touches — the delivery URL, the byte probe, the size read — is
+  // addressed on the row's provider, not just the first call.
+  it("addresses the asset on the row's provider throughout", async () => {
+    findByPublicId.mockResolvedValue(pendingRow({ storageProvider: "spaces" }));
+    await verifyFinalize(finInput(), ACTOR);
+    for (const call of storage.mock.calls) expect(call[0]).toMatchObject({ provider: "spaces" });
+    expect(deliveryUrl).toHaveBeenCalledWith(expect.objectContaining({ provider: "spaces" }));
+  });
+});
+
+// The signature stamps the ACTIVE provider onto the ledger row — that is the only place the active
+// provider legitimately decides anything, because this is where a NEW upload is being authorised.
+describe("createSignature — stamps the active provider on the ledger row", () => {
+  it("records where the upload was authorised to go", async () => {
+    activeStorage.mockResolvedValue({ id: "cloudinary", signUpload } as never);
+    await createSignature(sigInput(), ACTOR);
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ storageProvider: "cloudinary" }));
+  });
+});
+
+// ── The neutral browser envelope ──────────────────────────────────────────────────────────────
+//
+// What crosses to the browser, and what must NOT. The client performs the protocol it is handed; if
+// it could tell which backend was on the other end it would eventually branch on it, and then every
+// new provider would mean a frontend change.
+describe("createSignature — the envelope handed to the browser", () => {
+  it("returns the adapter's method, url and fields untouched", async () => {
+    const r = await createSignature(sigInput(), ACTOR);
+    expect(r.method).toBe("POST");
+    expect(r.url).toBe("https://api.cloudinary.com/v1_1/c/raw/upload");
+    // Forwarded verbatim — the service does not read, rename, reorder or re-stringify a signed field.
+    expect(r.fields).toEqual({
+      api_key: "k",
+      timestamp: "1",
+      signature: "sig",
+      folder: "senthra/purchase-orders",
+      public_id: "uuid.pdf",
+      overwrite: "false",
+      upload_preset: "configured-raw",
+    });
+  });
+
+  // The identity finalize will look up, so a provider that answers 204 with no body still leaves the
+  // browser able to name what it uploaded.
+  it("returns the full key, folder included", async () => {
+    const r = await createSignature(sigInput(), ACTOR);
+    expect(r.publicId).toBe("senthra/purchase-orders/uuid.pdf");
+  });
+
+  // THE property of this task. Every provider-specific concept lives inside `fields`, which is
+  // opaque; none of it is a named part of the contract, and neither is the provider itself.
+  it("names no provider-specific concept at the top level", async () => {
+    const r = (await createSignature(sigInput(), ACTOR)) as unknown as Record<string, unknown>;
+    expect(Object.keys(r).sort()).toEqual(["fields", "method", "publicId", "purpose", "url"]);
+    for (const leaked of ["provider", "cloudName", "apiKey", "timestamp", "signature", "uploadPreset", "resourceType", "uploadUrl"]) {
+      expect(r, leaked).not.toHaveProperty(leaked);
+    }
+  });
+
+  // The upload URL necessarily names the destination host, and that is not a leak — it is where the
+  // file has to go. What must not cross is a provider IDENTIFIER: a value the client could compare
+  // against to decide what to do differently.
+  it("carries no provider identifier the client could branch on", async () => {
+    const r = (await createSignature(sigInput(), ACTOR)) as unknown as Record<string, unknown>;
+    for (const [key, value] of Object.entries(r)) {
+      if (key === "url" || key === "fields") continue;
+      expect(String(value), key).not.toMatch(/^(cloudinary|spaces)$/i);
+    }
+  });
+});
+
+// The ledger records the provider that SIGNED, at signing time — never a second lookup that could
+// disagree, and never deferred to finalize.
+describe("createSignature — the provider is stamped at signing time", () => {
+  it("records the id of the provider that actually signed", async () => {
+    activeStorage.mockResolvedValue({ id: "cloudinary", signUpload } as never);
+    await createSignature(sigInput(), ACTOR);
+    expect(create.mock.calls[0]![0]).toMatchObject({ storageProvider: "cloudinary" });
+  });
+
+  // Proves the stamp follows the SIGNER rather than a separately-read setting: a provider whose
+  // adapter signs the upload is the one recorded, whatever else is going on.
+  it("records whichever provider signed, not a hard-coded default", async () => {
+    activeStorage.mockResolvedValue({ id: "spaces", signUpload } as never);
+    await createSignature(sigInput(), ACTOR);
+    expect(create.mock.calls[0]![0]).toMatchObject({ storageProvider: "spaces" });
+  });
+
+  it("records the FULL key the adapter minted, so finalize can find the row", async () => {
+    await createSignature(sigInput(), ACTOR);
+    expect(create.mock.calls[0]![0]).toMatchObject({ publicId: "senthra/purchase-orders/uuid.pdf" });
+  });
+
+  // The existing message, preserved: a configuration problem, naming no provider internals.
+  it("refuses with the configuration message when no provider is active", async () => {
+    activeStorage.mockResolvedValue(null);
+    await expect(createSignature(sigInput(), ACTOR)).rejects.toThrow(/uploads aren't configured/i);
+    expect(create).not.toHaveBeenCalled();
+  });
+});
+
+// ── Image validation on a provider that does not decode ───────────────────────────────────────
+//
+// Cloudinary refuses an image it cannot read, so its acceptance has always been the content check
+// for photos. An object store accepts any bytes at all — so a file of arbitrary content uploaded as
+// `image/png` would be stored, finalized and attached with nothing ever having looked at it.
+//
+// These pin the restored invariant, and pin that it is driven by the provider's CAPABILITY rather
+// than by its name: a provider is asked what it does, not recognised by who it is.
+describe("verifyFinalize — image content is checked when the provider does not decode", () => {
+  /** A provider that stores opaque bytes, i.e. what Spaces is. */
+  const opaque = () =>
+    storage.mockResolvedValue({
+      confirmUpload,
+      deliveryUrl,
+      readRange,
+      destroy,
+      head,
+      promoteUpload,
+      validatesImagesOnIngest: false,
+    } as never);
+
+  const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
+  const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+  const GIF_BYTES = Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]);
+  const WEBP_BYTES = Buffer.concat([
+    Buffer.from("RIFF", "ascii"),
+    Buffer.from([0x24, 0x00, 0x00, 0x00]), // length — varies, not checked
+    Buffer.from("WEBP", "ascii"),
+  ]);
+  /** A RIFF container that is NOT a WebP: a WAV. Passes the first anchor, fails the second. */
+  const WAV_BYTES = Buffer.concat([
+    Buffer.from("RIFF", "ascii"),
+    Buffer.from([0x24, 0x00, 0x00, 0x00]),
+    Buffer.from("WAVE", "ascii"),
+  ]);
+  const JUNK = Buffer.from([0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b]);
+
+  const photo = (mediaType: string) =>
+    verifyFinalize(finInput({ purpose: "damage_photo", mediaType }), {
+      ...ACTOR,
+      permissions: ["inventory.adjust"],
+    });
+
+  beforeEach(() => {
+    opaque();
+    findByPublicId.mockResolvedValue(pendingRow({ resourceType: "image", purpose: "damage_photo" }));
+  });
+
+  it.each([
+    ["image/png", PNG_BYTES],
+    ["image/jpeg", JPEG_BYTES],
+    ["image/gif", GIF_BYTES],
+    ["image/webp", WEBP_BYTES],
+  ])("accepts a real %s", async (mediaType, bytes) => {
+    firstBytes.mockResolvedValue(bytes);
+    await expect(photo(mediaType)).resolves.toMatchObject({ publicId: expect.any(String) });
+  });
+
+  it.each(["image/png", "image/jpeg", "image/gif", "image/webp"])(
+    "refuses arbitrary bytes labelled %s",
+    async (mediaType) => {
+      firstBytes.mockResolvedValue(JUNK);
+      await expect(photo(mediaType)).rejects.toThrow(/isn't a valid/i);
+    },
+  );
+
+  it("refuses a truncated header", async () => {
+    // The first three bytes of a PNG signature and nothing else.
+    firstBytes.mockResolvedValue(Buffer.from([0x89, 0x50, 0x4e]));
+    await expect(photo("image/png")).rejects.toThrow(/isn't a valid/i);
+  });
+
+  // THE declared-vs-actual invariant, and it is the one this codebase already applies to documents:
+  // the bytes must match what the upload SAID it was, not merely be some recognised format. A JPEG
+  // attached as a PNG is a mislabelled file, and the label is what everything downstream trusts.
+  it("refuses JPEG bytes declared as image/png", async () => {
+    firstBytes.mockResolvedValue(JPEG_BYTES);
+    await expect(photo("image/png")).rejects.toThrow(/isn't a valid/i);
+  });
+
+  // `RIFF` alone is equally a WAV or an AVI, which is why the WEBP entry carries a second anchor.
+  it("refuses a RIFF container that is not a WebP", async () => {
+    firstBytes.mockResolvedValue(WAV_BYTES);
+    await expect(photo("image/webp")).rejects.toThrow(/isn't a valid/i);
+  });
+
+  it("reads only the probe window, never the whole object", async () => {
+    firstBytes.mockResolvedValue(PNG_BYTES);
+    await photo("image/png");
+    expect(firstBytes).toHaveBeenCalledTimes(1);
+    expect(firstBytes).toHaveBeenCalledWith(expect.anything(), CONTENT_PROBE_BYTES);
+  });
+
+  // The file is already stored by the time anything can inspect it, so a rejection that only threw
+  // would leave proven-invalid bytes sitting in a public bucket until the reaper's next pass.
+  it("destroys the invalid object through the provider that holds it", async () => {
+    firstBytes.mockResolvedValue(JUNK);
+    await expect(photo("image/png")).rejects.toThrow(/isn't a valid/i);
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(destroy).toHaveBeenCalledWith(expect.objectContaining({ publicId: "senthra/purchase-orders/uuid.pdf" }));
+    expect(remove).toHaveBeenCalledWith("senthra/purchase-orders/uuid.pdf");
+  });
+
+  it("keeps a valid image, destroying nothing", async () => {
+    firstBytes.mockResolvedValue(PNG_BYTES);
+    await photo("image/png");
+    expect(destroy).not.toHaveBeenCalled();
+  });
+
+  // A read that FAILED is not a verdict on the bytes — the file may be fine and the next attempt may
+  // succeed — so the ledger row is left for the reaper rather than destroying something unproven.
+  it("does not destroy when the probe itself could not be read", async () => {
+    firstBytes.mockRejectedValue(new Error("connection reset"));
+    await expect(photo("image/png")).rejects.toThrow(/could not verify/i);
+    expect(destroy).not.toHaveBeenCalled();
+  });
+
+  // Non-image uploads are unaffected: they were always checked, on every provider.
+  it("still checks a document the same way", async () => {
+    findByPublicId.mockResolvedValue(pendingRow());
+    firstBytes.mockResolvedValue(PDF);
+    await expect(verifyFinalize(finInput(), ACTOR)).resolves.toMatchObject({ fileType: "pdf" });
+  });
+
+  // THE ASYMMETRY, stated so it cannot be "tidied up" by accident. The document path has always left
+  // a rejected upload for the reaper, and that behaviour predates the image check. Adding immediate
+  // cleanup to the NEW check is one decision; changing the OLD one is a different decision, and this
+  // pins that it was not silently made.
+  it("does NOT destroy a rejected document — that path still leaves it for the reaper", async () => {
+    findByPublicId.mockResolvedValue(pendingRow());
+    firstBytes.mockResolvedValue(JUNK);
+    await expect(verifyFinalize(finInput(), ACTOR)).rejects.toThrow(/isn't a valid/i);
+    expect(destroy).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
   });
 });

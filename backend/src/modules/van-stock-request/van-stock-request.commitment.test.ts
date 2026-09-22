@@ -33,7 +33,6 @@ vi.mock("../../lib/realtime.js", () => ({
   emitAttentionChanged: vi.fn(), emitToUser: vi.fn(), emitToRoom: vi.fn(),
   VAN_STOCK_REVIEWERS_ROOM: "vsr:reviewers", OFFICE_JOBS_ROOM: "jobs:office", RENTAL_WATCHERS_ROOM: "rental:watchers",
 }));
-vi.mock("../../lib/cloudinary.js", () => ({ uploadToCloudinary: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({
   getCloudinaryCreds: vi.fn(), getCompanyTimezone: vi.fn(async () => "Europe/London"), getOverdueAfterDays: vi.fn(async () => 14),
 }));

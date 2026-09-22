@@ -28,13 +28,15 @@ export type SignatureRequestInput = z.infer<typeof signatureRequestSchema>;
 
 export const finalizeRequestSchema = z.object({
   purpose: z.string().trim().min(1, "Upload type is required."),
-  // The FULL public id Cloudinary returned, folder included. Looked up in the pending ledger — an id
-  // this server never issued has no row, and finalize refuses it.
+  // The FULL public id of the uploaded object, folder included. Looked up in the pending ledger —
+  // an id this server never issued has no row, and finalize refuses it.
   publicId: z.string().trim().min(1).max(300),
-  // Both are needed to check Cloudinary's own response signature, whose payload is exactly
-  // `public_id` + `version`.
-  version: z.union([z.string().trim().min(1), z.number()]),
-  signature: z.string().trim().min(1).max(200),
+  // The provider's own receipt for the upload, when it issues one. Cloudinary signs its upload
+  // response over exactly `public_id` + `version`, and its adapter REQUIRES both — optional here
+  // does not mean optional there. A provider that answers 204 with no body (an S3 presigned POST)
+  // has nothing to put in them and proves the object exists by reading it back instead.
+  version: z.union([z.string().trim().min(1), z.number()]).optional(),
+  signature: z.string().trim().min(1).max(200).optional(),
   fileName: z.string().trim().min(1, "File name is required.").max(200),
   mediaType: z.string().trim().min(1).max(120),
   label: z.string().trim().max(80).optional(),

@@ -20,7 +20,6 @@ vi.mock("../../lib/realtime.js", () => ({
   // posting announces the hire counters it moved.
   RENTAL_WATCHERS_ROOM: "rental:watchers",
 }));
-vi.mock("../../lib/cloudinary.js", () => ({ uploadToCloudinary: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({
   getCloudinaryCreds: vi.fn(), getCompanyTimezone: vi.fn(async () => "Europe/London"),
 }));

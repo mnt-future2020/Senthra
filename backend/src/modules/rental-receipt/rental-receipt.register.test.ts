@@ -15,7 +15,16 @@ vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({
 }));
 vi.mock("#modules/purchase-order/purchase-order.service.js", () => ({ recomputeRentalReceiptStatus: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
-vi.mock("#modules/attachment/attachment.service.js", () => ({ releaseAsset: vi.fn() }));
+vi.mock("#modules/attachment/attachment.service.js", () => ({
+  releaseAsset: vi.fn(),
+  // The REAL mapping, not a stub: these tests assert the identity that reaches releaseAsset,
+  // and the provider is now part of it.
+  refFromAttachment: (row: { storageProvider: string | null; publicId: string | null; resourceType: string | null }) => ({
+    provider: row.storageProvider,
+    publicId: row.publicId,
+    resourceType: row.resourceType,
+  }),
+}));
 vi.mock("#modules/settings/settings.service.js", () => ({
   getRegionalSettings: vi.fn().mockResolvedValue({ dateFormat: "DD/MM/YYYY", timezone: "Europe/London" }),
 }));

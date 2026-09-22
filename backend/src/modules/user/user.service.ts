@@ -2,8 +2,9 @@ import crypto from "node:crypto";
 
 import type { Prisma } from "@prisma/client";
 
-import { uploadToCloudinary } from "../../lib/cloudinary.js";
-import type { CloudinaryImageAsset } from "../../lib/cloudinary.js";
+import { findActiveStorage } from "../../lib/storage/index.js";
+import { derivativeKey, generateDerivatives } from "../../lib/storage/derivatives.js";
+import type { StoredAsset } from "../../lib/storage/index.js";
 import * as roleRepo from "#modules/role/role.repository.js";
 import * as adminRepo from "#modules/auth/admin.repository.js";
 import * as sessionService from "#modules/auth/session.service.js";
@@ -27,7 +28,7 @@ import { hashPassword } from "../../utils/password.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
-import { getCloudinaryCreds, getEmployeeIdPrefix, getRegionalSettings } from "#modules/settings/settings.service.js";
+import { getEmployeeIdPrefix, getRegionalSettings } from "#modules/settings/settings.service.js";
 import { formatDate } from "#modules/document/document.formatter.js";
 import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
@@ -273,14 +274,16 @@ function auditWarehouseAssignmentChanges(
 
 // Upload a profile image to Cloudinary (random public id, "users" folder) and
 // return its secure URL. Reuses the same credential resolution as branding.
-async function uploadAvatar(image: string): Promise<CloudinaryImageAsset> {
-  const creds = await getCloudinaryCreds();
-  if (!creds) {
+async function uploadAvatar(image: string): Promise<StoredAsset> {
+  const storage = await findActiveStorage();
+  if (!storage) {
     throw badRequest(
-      "Cloudinary isn't configured. Add your credentials in Settings → Integrations to upload profile images.",
+      "File storage isn't configured. Set up a storage provider in Settings → Storage to upload profile images.",
     );
   }
-  return uploadToCloudinary(image, crypto.randomUUID(), creds, "senthra/users");
+  // A random public id, so a replacement does NOT overwrite the old asset — which is why the caller
+  // releases the one it replaces, and why this is `immutable`.
+  return storage.upload(image, crypto.randomUUID(), { folder: "senthra/users", kind: "image", immutable: true });
 }
 
 /**
@@ -297,10 +300,16 @@ async function uploadAvatar(image: string): Promise<CloudinaryImageAsset> {
  */
 async function applyAvatarChange(
   data: Prisma.UserUpdateInput,
-  current: { profileImagePublicId: string | null; profileImageResourceType: string | null },
+  current: {
+    profileImagePublicId: string | null;
+    profileImageResourceType: string | null;
+    profileImageProvider: string | null;
+  },
   input: { removeProfileImage?: boolean; profileImage?: string },
 ): Promise<attachmentService.AssetRef | null> {
+  // The provider that stored THIS avatar, read off the row it came from.
   const previous: attachmentService.AssetRef = {
+    provider: current.profileImageProvider,
     publicId: current.profileImagePublicId,
     resourceType: current.profileImageResourceType,
   };
@@ -314,6 +323,8 @@ async function applyAvatarChange(
   const asset = await uploadAvatar(input.profileImage);
   data.profileImageUrl = asset.url;
   data.profileImagePublicId = asset.publicId;
+  // Recorded at WRITE time, so the release path reads it rather than assuming the active provider.
+  data.profileImageProvider = asset.provider;
   data.profileImageResourceType = asset.resourceType;
   // Only when the id actually moved. A legacy row has no stored id and is skipped — the same
   // conservative direction the attachment path takes.
@@ -339,24 +350,69 @@ const signatureAssetName = (userId: string): string => `signature-${userId}`;
  * NOT the URL-parsing guess `releaseAsset` warns about — nothing is read back out of a delivery URL
  * (where versions, transformations and folders all live in one string). This reconstructs the exact
  * `folder` + `public_id` pair that was passed to the upload, both of which are the literals directly
- * above. `resource_type` is `image` because `uploadToCloudinary` is image-only.
+ * above. `resource_type` is `image` because the signature is always uploaded with `kind: "image"`.
+ *
+ * The PROVIDER is the one thing reconstruction cannot recover, which is why it is passed in from
+ * `User.signatureProvider`. The key is derivable from a constant; where that key was written is not.
+ * Without it a signature stored on a second provider would be released against Cloudinary, answer
+ * "not found", and survive forever with nothing reporting a problem.
  */
-function signatureAssetRef(userId: string): attachmentService.AssetRef {
-  return {
-    publicId: `${SIGNATURE_FOLDER}/${signatureAssetName(userId)}`,
-    resourceType: "image",
-  };
+function signatureAssetRef(userId: string, provider: string | null): attachmentService.AssetRef {
+  return { provider, publicId: signatureKey(userId), resourceType: "image" };
+}
+
+/** The signature's own object key — the exact `folder/publicId` pair the upload was given. */
+const signatureKey = (userId: string): string => `${SIGNATURE_FOLDER}/${signatureAssetName(userId)}`;
+
+/**
+ * The pdfkit-safe DERIVATIVE of a user's signature, rebuilt the same way the original is.
+ *
+ * Derived from the original's key through `derivativeKey` — the very function that named it at
+ * upload time — so the two can never drift into addressing different objects. `resourceType` is
+ * `image` because the derivative is a PNG uploaded with `kind: "image"`, exactly like its source;
+ * addressing it as anything else would simply fail to find it on a provider that types its assets.
+ */
+function signatureDerivativeRef(userId: string, provider: string | null): attachmentService.AssetRef {
+  return { provider, publicId: derivativeKey(signatureKey(userId), "pdf"), resourceType: "image" };
 }
 
 // Reuses the same credential resolution as branding/avatar.
-async function uploadSignatureImage(image: string, userId: string): Promise<string> {
-  const creds = await getCloudinaryCreds();
-  if (!creds) {
+async function uploadSignatureImage(
+  image: string,
+  userId: string,
+): Promise<{ url: string; provider: string; pdfUrl: string | null }> {
+  const storage = await findActiveStorage();
+  if (!storage) {
     throw badRequest(
-      "Cloudinary isn't configured. Add your credentials in Settings → Integrations to upload a signature.",
+      "File storage isn't configured. Set up a storage provider in Settings → Storage to upload a signature.",
     );
   }
-  return (await uploadToCloudinary(image, signatureAssetName(userId), creds, SIGNATURE_FOLDER)).url;
+  // `signature-${userId}` is DETERMINISTIC and overwritten in place, so a replacement lands on the
+  // same asset and there is nothing to release — hence `immutable: false`.
+  const asset = await storage.upload(image, signatureAssetName(userId), {
+    folder: SIGNATURE_FOLDER,
+    kind: "image",
+    immutable: false,
+  });
+  // A signature is printed on issued documents, so it needs the same pdfkit-safe rasterisation the
+  // letterhead logo does — and for the same reason: a two-tone signature is a low-bit-depth PNG,
+  // which pdfkit draws as scrambled blocks. Nothing is generated when the provider can do it at
+  // delivery, which leaves the Cloudinary path untouched.
+  //
+  // DEGRADED, NEVER FAILED. The signature is already stored by the time this can throw, so a
+  // rejection would report failure for an upload that succeeded — and `sharp` throws on IMPORT when
+  // its prebuilt binary does not match the host, which would make signatures impossible to set on
+  // that machine. A null derivative costs the PDF its rasterised variant and nothing else. Scoped
+  // to the generation call alone: a failure to store the ORIGINAL must still surface.
+  let derivatives: { pdf?: string } = {};
+  if (!storage.transformsOnDelivery) {
+    try {
+      derivatives = await generateDerivatives(image, signatureAssetName(userId), SIGNATURE_FOLDER, ["pdf"], storage);
+    } catch (e) {
+      console.error(`[signature] could not generate the PDF derivative for ${userId}:`, e instanceof Error ? e.message : e);
+    }
+  }
+  return { url: asset.url, provider: asset.provider, pdfUrl: derivatives.pdf ?? null };
 }
 
 // Derive the mime type + byte size from a base64 image data URI (data:image/png;base64,XXXX),
@@ -379,6 +435,14 @@ export interface UserSignature {
   signerName: string;
   jobTitle: string | null;
   url: string;
+  /**
+   * The stored pdfkit-safe variant, when there is one.
+   *
+   * Read straight off the user row, so the provider that actually stored the signature decides —
+   * `signatureProvider` is what generated it, and neither this nor the renderer ever consults the
+   * currently-selected provider.
+   */
+  pdfUrl: string | null;
   mimeType: string | null;
 }
 export async function getSignatureForEmail(
@@ -392,6 +456,7 @@ export async function getSignatureForEmail(
     signerName: `${u.firstName} ${u.lastName}`.trim(),
     jobTitle: u.jobTitle,
     url: u.signatureUrl,
+    pdfUrl: u.signaturePdfUrl,
     mimeType: u.signatureMimeType,
   };
 }
@@ -670,6 +735,7 @@ export async function createUser(
     notes: trimToNull(input.notes),
     profileImageUrl: avatar?.url ?? null,
     profileImagePublicId: avatar?.publicId ?? null,
+    profileImageProvider: avatar?.provider ?? null,
     profileImageResourceType: avatar?.resourceType ?? null,
     jobTitle: trimToNull(input.jobTitle),
     department: trimToNull(input.department),
@@ -690,7 +756,11 @@ export async function createUser(
   // one, and releasing it then would delete a live avatar.
   const replacedAvatar: attachmentService.AssetRef | null =
     existing?.profileImagePublicId && avatar && existing.profileImagePublicId !== avatar.publicId
-      ? { publicId: existing.profileImagePublicId, resourceType: existing.profileImageResourceType }
+      ? {
+          provider: existing.profileImageProvider,
+          publicId: existing.profileImagePublicId,
+          resourceType: existing.profileImageResourceType,
+        }
       : null;
 
   let created: UserWithRole;
@@ -1103,11 +1173,17 @@ export async function uploadMySignature(
   const user = await userRepo.findById(actor.id);
   if (!user) throw notFound("User not found.");
 
-  const url = await uploadSignatureImage(input.signature, user.id);
+  const { url, provider: signatureProvider, pdfUrl: signaturePdfUrl } = await uploadSignatureImage(input.signature, user.id);
   const { mimeType, sizeBytes } = parseImageDataUri(input.signature);
   const now = new Date();
   const updated = await userRepo.update(user.id, {
     signatureUrl: url,
+    // Recorded at WRITE time so the release path never has to guess. Without it a signature stored
+    // on a second provider would be released against Cloudinary and survive.
+    signatureProvider,
+    // Null on a provider that transforms at delivery — the renderer reads that as "use the URL
+    // transform", which is what it has always done.
+    signaturePdfUrl,
     signatureName: trimToNull(input.fileName),
     signatureMimeType: mimeType,
     signatureFileSize: sizeBytes,
@@ -1136,6 +1212,12 @@ export async function removeMySignature(actor?: AuditActor): Promise<PublicUser>
   // destroys the evidence — and it keeps "remove when nothing is set" a pure database no-op rather
   // than a pointless call to Cloudinary.
   const hadSignature = Boolean(user.signatureUrl);
+  // Read BEFORE the clear, for the same reason `hadSignature` is: the update below is what destroys
+  // the only record of where these two objects live. The PROVIDER is the coordinate reconstruction
+  // cannot recover, and `signaturePdfUrl` is the only thing that says a derivative was ever written
+  // at all — Cloudinary rasterises on delivery and stores none.
+  const storedProvider = user.signatureProvider;
+  const hadDerivative = Boolean(user.signaturePdfUrl);
 
   const updated = await userRepo.update(user.id, {
     signatureUrl: null,
@@ -1144,6 +1226,11 @@ export async function removeMySignature(actor?: AuditActor): Promise<PublicUser>
     signatureFileSize: null,
     signatureUploadedAt: null,
     signatureUpdatedAt: null,
+    // The derivative's URL and the provider that holds both objects. Left set, they would outlive
+    // the signature they describe: `pdfUrl` is preferred over the original by every renderer, so a
+    // stale one prints a signature the user has already removed.
+    signaturePdfUrl: null,
+    signatureProvider: null,
   });
 
   /*
@@ -1166,7 +1253,23 @@ export async function removeMySignature(actor?: AuditActor): Promise<PublicUser>
    * record can name it.
    */
   if (hadSignature) {
-    await attachmentService.releaseAsset(signatureAssetRef(user.id), `user ${updated.email} signature`);
+    // The provider comes off the USER ROW. It is the one coordinate reconstruction cannot derive.
+    const original = signatureAssetRef(user.id, storedProvider);
+    await attachmentService.releaseAsset(original, `user ${updated.email} signature`);
+
+    // The pdfkit-safe raster is a SECOND object, and just as much a signature as the first: its key
+    // is derived from the original's, so it is equally deterministic and equally fetchable by
+    // anyone who can guess a user id. Released on the SAME stored provider — it was written by the
+    // upload that wrote the original, never by whichever provider happens to be active now.
+    //
+    // Guarded on the column rather than the provider: a Cloudinary signature has no derivative at
+    // all, and a destroy for an object that was never written is a call this path has never made.
+    if (hadDerivative) {
+      await attachmentService.releaseAsset(
+        signatureDerivativeRef(user.id, storedProvider),
+        `user ${updated.email} signature (PDF derivative)`,
+      );
+    }
   }
 
   audit.record({

@@ -219,13 +219,29 @@ export function resourceTypeFor(mediaType: string): "image" | "raw" {
 /**
  * Leading bytes that identify each document type we accept, for the finalize check.
  *
- * Only `raw` uploads need this. Cloudinary stores a raw asset opaquely — its `allowed_formats`
- * restriction and the `format` it reports are both read from the extension in the public_id, which
- * for a PDF or DOCX is a label the caller chose. These bytes are the file itself.
+ * Needed whenever the STORAGE PROVIDER does not look inside the bytes itself.
+ *
+ * That used to mean `raw` uploads only: Cloudinary stores a raw asset opaquely — its
+ * `allowed_formats` restriction and the `format` it reports are both read from the extension in the
+ * public_id, which for a PDF or DOCX is a label the caller chose — while it decoded every image on
+ * the way in. An object store decodes nothing at all, so on that provider an IMAGE arrives just as
+ * unexamined as a document, and these bytes are the only thing that has looked at the file.
  */
 export type ContentSignature =
-  /** Positive test: these exact leading bytes must be present. */
-  | { mediaType: string; bytes: number[]; searchWindow?: number; text?: undefined }
+  /**
+   * Positive test: these exact leading bytes must be present.
+   *
+   * `at` moves the check off offset 0 — a second anchor for a format whose leading bytes are a
+   * shared container. WEBP is the only one: it opens with `RIFF`, which a WAV and an AVI also do,
+   * and is only identifiable by the `WEBP` four bytes further in.
+   */
+  | {
+      mediaType: string;
+      bytes: number[];
+      searchWindow?: number;
+      alsoBytes?: { at: number; bytes: number[] };
+      text?: undefined;
+    }
   /**
    * Negative test, for a format that HAS no signature: the probe must not look binary.
    *
@@ -261,6 +277,41 @@ export const CONTENT_SIGNATURES: ContentSignature[] = [
   { mediaType: "application/vnd.ms-excel", bytes: [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1] },
   // No signature exists. Checked by exclusion — see ContentSignature.
   { mediaType: "text/csv", text: true },
+
+  // ── Images ──────────────────────────────────────────────────────────────────────────────────
+  //
+  // Only ever consulted for a provider that does not decode on ingest — see
+  // StorageProvider.validatesImagesOnIngest. On Cloudinary these entries are inert, because its own
+  // decode already refused anything unreadable before finalize ran.
+  //
+  // Each one checks the FORMAT MARKER and deliberately nothing beyond it. Dimensions, colour type,
+  // bit depth, interlacing, EXIF, ICC profiles and comment blocks all vary enormously across
+  // legitimate files — a 1-bit black-and-white PNG and a 16-bit RGBA one share these eight bytes and
+  // nothing else — so reading further would start rejecting valid photographs for being unusual.
+  // What this refuses is a file that is not the format it claims to be at all.
+
+  // The 8-byte PNG signature. The trailing CRLF/EOF bytes are part of it and are there to detect
+  // transfer corruption, so all eight are checked.
+  { mediaType: "image/png", bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+
+  // JPEG's SOI marker plus the first byte of the next one. The FOURTH byte is deliberately NOT
+  // checked: it is 0xE0 for JFIF, 0xE1 for Exif, 0xDB for a bare quantisation table and 0xEE for
+  // Adobe, and pinning it would reject whole camera makes for writing a different valid header.
+  { mediaType: "image/jpeg", bytes: [0xff, 0xd8, 0xff] },
+
+  // "GIF8" — covers both 87a and 89a without caring which.
+  { mediaType: "image/gif", bytes: [0x47, 0x49, 0x46, 0x38] },
+
+  // A RIFF container with WEBP inside it. BOTH anchors are needed: `RIFF` alone is equally a WAV or
+  // an AVI, so a sound file renamed to .webp would otherwise pass as an image.
+  //   bytes 0–3  "RIFF"
+  //   bytes 4–7  the file length, which varies and is not checked
+  //   bytes 8–11 "WEBP"
+  {
+    mediaType: "image/webp",
+    bytes: [0x52, 0x49, 0x46, 0x46],
+    alsoBytes: { at: 8, bytes: [0x57, 0x45, 0x42, 0x50] },
+  },
 ];
 
 /**
