@@ -22,6 +22,27 @@ export function pdfSafeImageUrl(url: string): string {
   return url;
 }
 
+/**
+ * The URL a PDF should actually embed.
+ *
+ * TWO MECHANISMS, ONE INTENT. Cloudinary rasterises on delivery, so its asset needs nothing stored
+ * and gets a transformed URL. A provider that cannot transform had the same image rasterised at
+ * UPLOAD time and stored beside the original, so its asset gets that stored URL.
+ *
+ * Which one applies is decided by what is PERSISTED against the asset, never by whichever provider
+ * is currently selected: a Cloudinary logo keeps getting a Cloudinary transform after an
+ * administrator switches to Spaces, because it is still a Cloudinary logo.
+ *
+ * A null derivative therefore means "this asset has no stored variant", which is true of every
+ * Cloudinary asset and of anything uploaded before variants existed — and falls through to exactly
+ * the behaviour that has always applied.
+ */
+export function pdfImageUrl(originalUrl: string | null | undefined, derivativeUrl: string | null | undefined): string | null {
+  if (derivativeUrl) return derivativeUrl;
+  const original = originalUrl?.trim();
+  return original ? pdfSafeImageUrl(original) : null;
+}
+
 // Fetch a remote image (Cloudinary logo/signature) into a Buffer for pdfkit. Returns null on ANY
 // failure (network, non-OK, non-image) so document generation degrades gracefully — never throws.
 // Bounded by a 5s timeout and a size cap so a slow/huge asset can't stall every PDF render or

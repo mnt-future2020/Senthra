@@ -87,6 +87,18 @@ function emailLogoSrc(url: string): string {
   return url;
 }
 
+/**
+ * The URL an email header should use. The email twin of `pdfImageUrl` — see there for why the
+ * decision is made from what is persisted rather than from the active provider.
+ *
+ * Synchronous, and it has to stay that way: this is called inside a template literal while the HTML
+ * is being built, so making it async would turn the whole renderer and every one of its callers
+ * async to save storing one string.
+ */
+export function emailImageUrl(originalUrl: string, derivativeUrl: string | null | undefined): string {
+  return derivativeUrl || emailLogoSrc(originalUrl);
+}
+
 // Pick a legible text colour (near-black or white) to place ON the brand colour,
 // from its perceived luminance — so the header name stays readable whatever
 // accent the admin picks.
@@ -114,6 +126,11 @@ export function buildEmailHeaderRow(
   brandName: string,
   logoUrl: string,
   brandColor: string = DEFAULT_BRAND_COLOR,
+  /**
+   * The stored email-sized variant of `logoUrl`, when one exists. Optional so every existing caller
+   * keeps working unchanged and keeps getting the delivery-time transform.
+   */
+  logoEmailUrl: string | null = null,
 ): string {
   const bg = safeBrandColor(brandColor);
   const fg = readableTextOn(bg);
@@ -124,7 +141,7 @@ export function buildEmailHeaderRow(
     // blocked, so the brand name stays readable on the accent bar either way.
     return `<tr>
               <td style="background:${escapeHtml(bg)};padding:18px 32px;">
-                <img src="${escapeHtml(emailLogoSrc(logoUrl))}" alt="${escapeHtml(brandName)}" height="34" style="max-height:34px;width:auto;border:0;outline:none;text-decoration:none;display:block;color:${fg};font-size:16px;font-weight:800;" />
+                <img src="${escapeHtml(emailImageUrl(logoUrl, logoEmailUrl))}" alt="${escapeHtml(brandName)}" height="34" style="max-height:34px;width:auto;border:0;outline:none;text-decoration:none;display:block;color:${fg};font-size:16px;font-weight:800;" />
               </td>
             </tr>`;
   }

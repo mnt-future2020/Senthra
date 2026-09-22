@@ -1,6 +1,15 @@
 // Public branding (brand name, logo/favicon URLs, footer + login copy).
 export interface Branding {
   brandName: string;
+  /**
+   * Hostnames that serve files this app uploaded, so a stored attachment can be told apart from a
+   * link somebody pasted.
+   *
+   * Public delivery hostnames only — no credential of any kind. It lives on BRANDING rather than
+   * Settings because the engineer and customer portals render attachments and cannot read Settings.
+   * Both providers are always listed: an asset stays on whichever one stored it.
+   */
+  uploadHosts: string[];
   // Brand accent (hex). Drives the dashboard accent and the branding of sent emails.
   brandColor: string;
   logoUrl: string;
@@ -28,6 +37,16 @@ export interface Settings extends Branding {
   cloudinaryApiKey: string;
   cloudinaryApiSecretSet: boolean;
   cloudinaryConfigured: boolean;
+  // Which provider NEW uploads go to. Existing files stay where they were stored.
+  storageProvider: "cloudinary" | "spaces";
+  spacesEndpoint: string;
+  spacesRegion: string;
+  spacesBucket: string;
+  spacesAccessKeyId: string;
+  spacesCdnUrl: string;
+  // Whether a secret is stored — never the secret itself.
+  spacesSecretKeySet: boolean;
+  spacesConfigured: boolean;
   // Code prefixed to new staff IDs (e.g. "SNT" → SNT-0007). Effective value
   // (default-filled by the backend). Only affects newly-created staff.
   employeeIdPrefix: string;

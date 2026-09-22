@@ -12,6 +12,7 @@ import { formatCalendarDay } from "@/lib/formatDate";
 import { listEngineerOptions } from "@/services/warehouse.service";
 import type { WarehouseManager } from "@/types/warehouse";
 import { useAuth } from "@/hooks/useAuth";
+import { useBranding } from "@/hooks/useBranding";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { Select } from "@/components/ui/Select";
@@ -55,6 +56,10 @@ export function JobDetail({ idOrCode }: { idOrCode: string }) {
 }
 
 function JobView({ initial }: { initial: Job }) {
+  // Which hosts serve OUR uploads, so a stored attachment is not mistaken for a pasted link.
+  // From the PUBLIC branding payload — the two portal surfaces below cannot read Settings.
+  const { uploadHosts } = useBranding();
+
   const router = useRouter();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
@@ -324,7 +329,7 @@ function JobView({ initial }: { initial: Job }) {
           <Card title={`Attachments (${job.attachments.length})`}>
             <ul className="space-y-2 text-sm">
               {job.attachments.map((a, i) => {
-                const meta = parseJobAttachment(a);
+                const meta = parseJobAttachment(a, uploadHosts);
                 if (!meta) return null;
                 const { rawUrl, name, isImg, isPdf, isDoc, isInternal } = meta;
 

@@ -4,7 +4,7 @@
 // even keeps the name when the image can't be fetched, so generation NEVER fails on the signature.
 
 import { getSignatureForEmail, type DocumentPerson } from "#modules/user/user.service.js";
-import { fetchImageBuffer, pdfSafeImageUrl } from "./document.utils.js";
+import { fetchImageBuffer, pdfImageUrl } from "./document.utils.js";
 import type { DocumentSignatureBlock } from "./document.types.js";
 
 export async function resolveSignatureBlock(
@@ -13,7 +13,7 @@ export async function resolveSignatureBlock(
 ): Promise<DocumentSignatureBlock | null> {
   const sig = await getSignatureForEmail(signerEmail);
   if (sig) {
-    const image = await fetchImageBuffer(pdfSafeImageUrl(sig.url));
+    const image = await fetchImageBuffer(pdfImageUrl(sig.url, sig.pdfUrl));
     return { signerName: sig.signerName, jobTitle: sig.jobTitle, image, mimeType: sig.mimeType };
   }
   // No signature graphic on file — the COMMON case, since uploading one is optional. Keep naming

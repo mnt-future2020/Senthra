@@ -17,7 +17,6 @@ vi.mock("#modules/auth/auth.service.js", () => ({ issueResetEmail: vi.fn() }));
 vi.mock("#modules/auth/session.service.js", () => ({}));
 vi.mock("./customer.stock.service.js", () => ({ getCustomerStock: vi.fn() }));
 vi.mock("#modules/warehouse/warehouse.repository.js", () => ({}));
-vi.mock("../../lib/cloudinary.js", () => ({ uploadToCloudinary: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn(), getStockCodePrefix: vi.fn() }));
 vi.mock("../../lib/warehouse-access.js", () => ({ assertWarehouseAccess: vi.fn() }));
 vi.mock("#modules/email/email.service.js", () => ({ sendTemplatedEmail: vi.fn() }));

@@ -6,6 +6,7 @@ import { ArrowLeftRight, CalendarClock, CheckCircle2, ExternalLink, FileText, Im
 import * as engineerService from "@/services/engineer.service";
 import { isStaleStateError } from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
+import { useBranding } from "@/hooks/useBranding";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useJobSocket } from "@/hooks/useJobSocket";
 import { useGoodsSocket } from "@/hooks/useGoodsSocket";
@@ -69,6 +70,10 @@ interface UsedRow {
 }
 
 export function EngineerJobDetail({ id }: { id: string }) {
+  // Which hosts serve OUR uploads, so a stored attachment is not mistaken for a pasted link.
+  // From the PUBLIC branding payload — the two portal surfaces below cannot read Settings.
+  const { uploadHosts } = useBranding();
+
   const { can } = useAuth();
   const { pushToast } = useDashboard();
   const [job, setJob] = React.useState<Job | null>(null);
@@ -525,7 +530,7 @@ export function EngineerJobDetail({ id }: { id: string }) {
           <Card title={`Attachments (${job.attachments.length})`}>
             <ul className="space-y-2 text-sm">
               {job.attachments.map((a, i) => {
-                const meta = parseJobAttachment(a);
+                const meta = parseJobAttachment(a, uploadHosts);
                 if (!meta) return null;
                 const { rawUrl, name, isImg, isPdf, isDoc } = meta;
 

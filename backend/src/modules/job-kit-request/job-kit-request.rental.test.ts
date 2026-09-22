@@ -27,7 +27,6 @@ vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findMany: vi.fn(a
 vi.mock("#modules/engineer-transfer/engineer-transfer.repository.js", () => ({ findHoldersForIrm: vi.fn(async () => []), findHoldersForCustomer: vi.fn(async () => []), findSourcesByIds: vi.fn(async () => []) }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn(), getCompanyTimezone: vi.fn(async () => "Europe/London") }));
 vi.mock("#modules/notification/notification.service.js", () => ({ notify: vi.fn() }));
-vi.mock("../../lib/cloudinary.js", () => ({ uploadToCloudinary: vi.fn() }));
 vi.mock("../../lib/realtime.js", () => ({ emitAttentionChanged: vi.fn(), emitToUser: vi.fn(), emitToRoom: vi.fn(), OFFICE_JOBS_ROOM: "office:jobs" }));
 vi.mock("./job-kit-request.repository.js", () => ({
   findById: vi.fn(), claimPending: vi.fn(async () => 1), revertToPending: vi.fn(), finalizeApproval: vi.fn(),

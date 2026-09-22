@@ -1,19 +1,18 @@
 import { randomUUID } from "node:crypto";
 
+// No Cloudinary import of any kind. Signing, verification, delivery URLs and deletion all go
+// through the provider abstraction now, which is what lets a second backend exist without this file
+// changing again.
 import {
-  fetchFirstBytes,
-  signUploadParams,
-  signedDeliveryUrl,
-  verifyUploadResponse,
-  destroyFromCloudinary,
-  type CloudinaryCreds,
-  type SignedUploadParams,
-} from "../../lib/cloudinary.js";
-import { env } from "../../config/env.js";
+  findActiveStorage,
+  getStorageFor,
+  normalizeProviderId,
+  type AssetRef,
+  type StorageProvider,
+} from "../../lib/storage/index.js";
 import { withTransaction } from "../../lib/prisma.js";
 import { badRequest, conflict, forbidden } from "../../utils/http-error.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { ALL_PERMISSIONS } from "#modules/role/permissions.js";
 
 import * as pendingRepo from "./upload.repository.js";
@@ -144,10 +143,33 @@ function assertPermitted(purpose: UploadPurposeKey, actor?: AuditActor): void {
   if (!ok) throw forbidden("You don't have permission to upload here.");
 }
 
-async function requireCreds(): Promise<CloudinaryCreds> {
-  const creds = await getCloudinaryCreds();
-  if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
-  return creds;
+/**
+ * The provider a NEW upload should be signed against.
+ *
+ * Distinct from `requireStorage` below, and the distinction is the one this whole change is about:
+ * this asks "where should a new file go", that asks "where does this existing file already live".
+ * The message names no provider — it describes a configuration problem and points at the one screen
+ * where every provider is configured. Which backend is missing credentials is not something an
+ * upload form should disclose, and naming one would be wrong half the time.
+ */
+async function requireActiveStorage(): Promise<StorageProvider> {
+  const storage = await findActiveStorage();
+  if (!storage) throw badRequest("File uploads aren't configured. Set up a storage provider in Settings → Storage.");
+  return storage;
+}
+
+/**
+ * The provider that holds the asset being finalized.
+ *
+ * Resolved from the LEDGER ROW, never from whichever provider is currently selected. An upload
+ * authorised against one provider must be verified against that SAME one: if an administrator
+ * switches provider while a file is in flight, finalize would otherwise go looking for an object
+ * on a backend it was never written to, and refuse a perfectly good upload.
+ */
+async function requireStorage(ref: Pick<AssetRef, "provider">): Promise<StorageProvider> {
+  const storage = await getStorageFor(ref);
+  if (!storage) throw badRequest("File uploads aren't configured. Set up a storage provider in Settings → Storage.");
+  return storage;
 }
 
 // ── Signature ──────────────────────────────────────────────────────────────────────────────────
@@ -159,7 +181,31 @@ export interface SignatureInput {
   mediaType: string;
 }
 
-export interface SignatureResult extends SignedUploadParams {
+/**
+ * What the browser is told, and the whole of it.
+ *
+ * PROVIDER-NEUTRAL BY CONSTRUCTION: there is no Cloudinary cloud name, api key, timestamp, preset or
+ * resource type here, and no provider id either. The browser performs the protocol it is handed —
+ * POST these fields to this URL — and cannot tell which backend it is talking to. That is the point:
+ * a frontend that could tell would eventually branch on it.
+ *
+ * `fields` is OPAQUE. Whatever provider-specific values a signature needs travel inside it, already
+ * stringified, and the browser must post them verbatim: they are what the signature was computed
+ * over, so renaming, reordering, re-stringifying or dropping one invalidates the upload.
+ */
+export interface SignatureResult {
+  /** The HTTP method the upload itself uses. */
+  method: "POST";
+  /** Where to send it. */
+  url: string;
+  /** Posted verbatim, before the file. See the type doc — these are signed values. */
+  fields: Record<string, string>;
+  /**
+   * The full key this upload was authorised for, folder included — the identity finalize looks up
+   * in the pending ledger. Sent so a provider that returns no body still leaves the browser able to
+   * name what it uploaded.
+   */
+  publicId: string;
   /** Echoed so the caller knows what finalize will expect; not a value the client may change. */
   purpose: UploadPurposeKey;
 }
@@ -176,22 +222,6 @@ export interface SignatureResult extends SignedUploadParams {
  * courtesy: it fails the user before a 10 MB upload rather than after. Finalize runs the authoritative
  * one, because the record can change while the file is in flight.
  */
-/**
- * Which account-side preset this upload is signed against.
- *
- * Split by resource type because that is exactly how the two allowlists differ — an image may be a
- * png/jpg/gif/webp, a raw file may be a pdf/docx — and `resourceTypeFor` has already derived it from
- * the declared media type. The names live in config, never here, so a rename or a per-environment
- * account is a variable change.
- *
- * Signed, so the browser cannot swap it for a looser preset: Cloudinary rebuilds the signature from
- * the `upload_preset` it receives, and any other value fails the check. Blank means sign without one.
- */
-function uploadPresetFor(resourceType: "image" | "raw"): string | undefined {
-  const name = resourceType === "image" ? env.CLOUDINARY_UPLOAD_PRESET_IMAGE : env.CLOUDINARY_UPLOAD_PRESET_RAW;
-  return name.trim() || undefined;
-}
-
 export async function createSignature(
   input: SignatureInput,
   actor: AuditActor | undefined,
@@ -215,7 +245,10 @@ export async function createSignature(
 
   await preCheck?.();
 
-  const creds = await requireCreds();
+  // ONE resolution, used for BOTH the signing and the ledger stamp. Asking twice — once for
+  // credentials and once for "which provider is active" — would leave a window in which an upload
+  // could be signed by one provider and recorded against another.
+  const storage = await requireActiveStorage();
   const resourceType = resourceTypeFor(mediaType);
   // Server-minted. The browser never proposes a public id, which is what stops it finalizing an asset
   // it did not upload — see the PendingUpload comment in schema.prisma.
@@ -230,23 +263,43 @@ export async function createSignature(
   const ext = resourceType === "raw" ? FILE_TYPE_BY_MEDIA[mediaType] : null;
   const publicId = ext ? documentPublicId(input.fileName, ext) : imagePublicId(input.fileName);
 
-  const signed = signUploadParams(
-    { folder: spec.folder, publicId, resourceType, uploadPreset: uploadPresetFor(resourceType) },
-    creds,
-  );
+  // The adapter owns everything provider-specific from here: which fields exist, how they are
+  // named, what the signature covers, which URL to post to. This service never learns any of it.
+  const signed = await storage.signUpload({
+    folder: spec.folder,
+    publicId,
+    resourceType,
+    mediaType,
+    maxBytes: spec.maxBytes,
+  });
 
-  await pendingRepo.create({ publicId: `${spec.folder}/${publicId}`, resourceType, purpose, actorId: actor.id });
+  // Stamp the provider the signature was minted against — `storage.id`, not a second lookup — so
+  // finalize and the reaper resolve it from this row rather than from whatever Settings says by the
+  // time they run. A switch between here and finalize must not change where the file is looked for.
+  await pendingRepo.create({
+    publicId: signed.publicId,
+    resourceType,
+    storageProvider: storage.id,
+    purpose,
+    actorId: actor.id,
+  });
 
-  return { ...signed, purpose };
+  // Deliberately NOT `...signed`: that carries the provider id, and the browser has no business
+  // knowing which backend it is uploading to.
+  return { method: signed.method, url: signed.url, fields: signed.fields, publicId: signed.publicId, purpose };
 }
 
 // ── Finalize ───────────────────────────────────────────────────────────────────────────────────
 
 export interface FinalizeInput {
-  /** The FULL public id Cloudinary returned, folder included. */
+  /** The FULL public id of the uploaded object, folder included. */
   publicId: string;
-  version: number | string;
-  signature: string;
+  /**
+   * The provider's own receipt, when it issues one — see the validation schema. Optional in the
+   * TYPE, not in the Cloudinary adapter, which refuses a finalize that omits either.
+   */
+  version?: number | string;
+  signature?: string;
   purpose: string;
   fileName: string;
   mediaType: string;
@@ -256,6 +309,12 @@ export interface VerifiedAsset {
   url: string;
   publicId: string;
   resourceType: string;
+  /**
+   * The provider that actually stored this asset, taken from the ledger row the upload was signed
+   * against. It travels all the way to the attachment row so a later delete can resolve the backend
+   * from the record instead of assuming the one currently selected.
+   */
+  provider: string;
   fileName: string;
   fileType: string;
   fileSizeBytes: number;
@@ -303,10 +362,16 @@ export async function verifyFinalize(input: FinalizeInput, actor: AuditActor | u
   const lease = await pendingRepo.claim(input.publicId, LEASE_MS);
   if (!lease) throw conflict("That upload is already being processed. Try again in a moment.");
 
-  const creds = await requireCreds();
-  if (!verifyUploadResponse(input.publicId, input.version, input.signature, creds)) {
-    throw badRequest("That upload could not be verified.");
-  }
+  // THE ROW decides, not Settings. `normalizeProviderId` reads a null/missing column as Cloudinary,
+  // which is what every upload authorised before this column existed was signed against.
+  //
+  // Held in its own const because `AssetRef.provider` is nullable — this value is not, and the
+  // attachment row that eventually records it must not be handed a `null` it would then read back
+  // as "unknown, assume Cloudinary".
+  const provider = normalizeProviderId(pending.storageProvider);
+  const asset: AssetRef = { provider, publicId: input.publicId, resourceType: pending.resourceType };
+  const storage = await requireStorage(asset);
+  await storage.confirmUpload(asset, { version: input.version, signature: input.signature });
 
   const mediaType = input.mediaType.toLowerCase();
   if (!spec.mediaTypes.includes(mediaType)) throw badRequest("That file type isn't accepted here.");
@@ -332,27 +397,60 @@ export async function verifyFinalize(input: FinalizeInput, actor: AuditActor | u
     throw badRequest("That upload was authorised for a different file type.");
   }
 
-  const url = signedDeliveryUrl(input.publicId, pending.resourceType, creds);
-
-  // Cloudinary decodes an `image` on the way in and refuses what it cannot read, so its own acceptance
-  // IS the content check for photos. It stores a `raw` asset opaquely, so a document — PDF, DOCX,
-  // XLSX, XLS or CSV — has been checked by nobody until here.
-  if (pending.resourceType === "raw") {
-    await assertContentMatches(url, mediaType);
+  // WHO HAS ALREADY LOOKED INSIDE THIS FILE?
+  //
+  //   a `raw` upload — nobody. Every provider stores a document opaquely, so the bytes have been
+  //   checked by no one until this line.
+  //
+  //   an IMAGE — it depends on the provider, and that is the whole of what this flag answers.
+  //   Cloudinary decodes on ingest and refuses what it cannot read, so its acceptance IS the check
+  //   and a second read here would cost a request to re-prove it. An object store decodes nothing,
+  //   so on that provider an image arrives exactly as unexamined as a document.
+  //
+  // Reading the capability rather than the provider name is what keeps this correct for the next
+  // backend too: a provider is asked what it does, not recognised by who it is.
+  //
+  // `discardInvalid` is passed ONLY for the second case, and the asymmetry is deliberate rather than
+  // an oversight. The document path has always left a rejected upload for the reaper, and that is
+  // existing, working behaviour with its own tests; changing it is not what this validation is for.
+  // The IMAGE path is new, so it gets the stricter treatment from the start — proven-invalid bytes
+  // should not sit in a public bucket waiting for a daily sweep.
+  const isNewImageCheck = pending.resourceType !== "raw";
+  if (pending.resourceType === "raw" || !storage.validatesImagesOnIngest) {
+    await assertContentMatches(
+      storage,
+      asset,
+      mediaType,
+      isNewImageCheck ? () => discard(storage, asset) : null,
+    );
   }
 
-  const size = await measure(url);
+  const { sizeBytes: size } = await storage.head(asset);
   if (size > spec.maxBytes) {
     // Refuse AND remove it: the file is already in storage, and leaving an oversize asset behind
     // because the row is about to be deleted would be the leak this whole design exists to avoid.
-    await discard(input.publicId, pending.resourceType, creds);
+    await discard(storage, asset);
     throw badRequest(`File must be ${Math.floor(spec.maxBytes / (1024 * 1024))} MB or smaller.`);
   }
 
+  // EVERYTHING ABOVE INSPECTED THE UPLOADED OBJECT. Only now is it moved to the key this app will
+  // serve — because the permit the browser still holds authorises the staging key alone, and a
+  // permit stays valid for its whole life rather than for a single use. Without this step a client
+  // could post again, after approval, and replace the very bytes that were just validated: same
+  // URL, same row, different file. Cloudinary refuses that itself (`overwrite: false`) and its
+  // `promoteUpload` is an identity, so this line changes nothing there.
+  //
+  // Promotion is LAST among the checks and FIRST among the writes: nothing invalid is ever moved
+  // into place, and nothing is recorded until it has been.
+  const stored = await storage.promoteUpload(asset);
+  const url = storage.deliveryUrl(stored);
+
   return {
     url,
-    publicId: input.publicId,
+    publicId: stored.publicId,
     resourceType: pending.resourceType,
+    // Resolved from the PendingUpload row above, not from Settings.
+    provider,
     fileName: input.fileName.trim().slice(0, 200) || "attachment",
     fileType: FILE_TYPE_BY_MEDIA[mediaType] ?? "png",
     fileSizeBytes: size,
@@ -361,20 +459,44 @@ export async function verifyFinalize(input: FinalizeInput, actor: AuditActor | u
 }
 
 /** The first bytes really are the format the caller declared. Raw uploads only — see the catalog. */
-async function assertContentMatches(url: string, mediaType: string): Promise<void> {
+async function assertContentMatches(
+  storage: StorageProvider,
+  asset: AssetRef,
+  mediaType: string,
+  /**
+   * Remove the object whose bytes just failed — or NULL to leave it for the reaper.
+   *
+   * The file is already in storage by the time anything can look at it, so a rejection that only
+   * threw would leave it there: reachable at its URL, referenced by nothing, until the reaper's
+   * next pass.
+   *
+   * Passed for the IMAGE check, which is new — bytes proven to be something other than what they
+   * claim should not sit in a public bucket for a day. NOT passed for the document check, whose
+   * leave-it-for-the-reaper behaviour predates this and is relied upon by its own tests. Making the
+   * two the same is a separate decision from adding the image check, so it is not made here.
+   */
+  discardInvalid: (() => Promise<void>) | null,
+): Promise<void> {
   const spec = CONTENT_SIGNATURES.find((s) => s.mediaType === mediaType);
   // FAIL CLOSED. Every media type that reaches here as `raw` has an entry (verifyFinalize now
   // rejects a declaration whose resource type disagrees with the signed one, which leaves only PDF
   // and DOCX), so a miss means the catalog and this table have drifted apart — a new raw type added
   // without its magic bytes. Returning silently in that case is what made the bypass above possible
   // in the first place: it turns "I don't know how to check this" into "this passed".
-  if (!spec) throw badRequest("That file type isn't accepted here.");
+  if (!spec) {
+    await discardInvalid?.();
+    throw badRequest("That file type isn't accepted here.");
+  }
 
   let head: Buffer;
   try {
-    head = await fetchFirstBytes(url, CONTENT_PROBE_BYTES);
+    head = await storage.readRange(asset, CONTENT_PROBE_BYTES);
   } catch (e) {
     // Could not read it back. Refuse rather than assume: an unreadable upload is not one to attach.
+    //
+    // NOT discarded, deliberately: this is a transport failure, not a verdict on the bytes. The file
+    // may be perfectly valid and the read may succeed a moment later, so the ledger row is left for
+    // the reaper rather than destroying something that was never shown to be wrong.
     throw badRequest(`Could not verify the uploaded file (${e instanceof Error ? e.message : "read failed"}).`);
   }
 
@@ -382,7 +504,7 @@ async function assertContentMatches(url: string, mediaType: string): Promise<voi
   // ContentSignature. The two branches are alternatives, not a fallback: a `text` entry has no
   // `bytes` to test, and a `bytes` entry is never subjected to the binary sweep.
   if (spec.text) {
-    assertLooksLikeText(head);
+    await guard(discardInvalid, () => assertLooksLikeText(head));
     return;
   }
 
@@ -390,7 +512,28 @@ async function assertContentMatches(url: string, mediaType: string): Promise<voi
   const ok = spec.searchWindow
     ? head.subarray(0, spec.searchWindow).includes(needle)
     : head.subarray(0, needle.length).equals(needle);
-  if (!ok) throw badRequest("That file isn't a valid PDF, DOCX, XLSX, XLS, PNG or JPG.");
+  // A SECOND anchor, for a format whose leading bytes are a shared container — see ContentSignature.
+  // WEBP is the only one: `RIFF` alone is equally a WAV or an AVI.
+  const alsoOk =
+    !spec.alsoBytes ||
+    head
+      .subarray(spec.alsoBytes.at, spec.alsoBytes.at + spec.alsoBytes.bytes.length)
+      .equals(Buffer.from(spec.alsoBytes.bytes));
+
+  if (!ok || !alsoOk) {
+    await discardInvalid?.();
+    throw badRequest("That file isn't a valid PDF, DOCX, XLSX, XLS, PNG or JPG.");
+  }
+}
+
+/** Run a synchronous check, removing the stored object before letting its rejection through. */
+async function guard(discardInvalid: (() => Promise<void>) | null, check: () => void): Promise<void> {
+  try {
+    check();
+  } catch (e) {
+    await discardInvalid?.();
+    throw e;
+  }
 }
 
 /**
@@ -427,41 +570,21 @@ function assertLooksLikeText(head: Buffer): void {
   }
 }
 
-/**
- * The stored size, read from the asset rather than from what the browser claimed.
- *
- * The status is checked BEFORE the header is believed. A non-2xx response still carries a
- * `content-length` — of its own error body — so an unreadable asset used to measure as however many
- * bytes the CDN's "not found" page happens to be, and that tiny number then sailed through the size
- * cap this function exists to feed. The one reading that must never be accepted is a plausible-
- * looking size for a file we could not actually read.
- *
- * Timeout and abort for the same reason `fetchFirstBytes` has them: this runs inside a user's
- * request, and a delivery host that accepts the connection and then stalls would otherwise hold the
- * finalize open indefinitely.
+/*
+ * The stored size used to be measured here, by `measure(url)`. It now lives on the provider as
+ * `head()` — same HTTP HEAD, same "check the status before believing content-length" rule, same
+ * timeout — because reading an object's size is a storage concern and every provider answers it
+ * differently. Moved rather than duplicated: there is exactly one implementation.
  */
-async function measure(url: string, timeoutMs = 10_000): Promise<number> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const res = await fetch(url, { method: "HEAD", signal: controller.signal })
-    .catch((e: unknown) => {
-      // A refused, aborted or hung HEAD is not a size — refuse rather than fall through to a header
-      // that isn't there.
-      throw badRequest(`Could not verify the uploaded file (${e instanceof Error ? e.message : "read failed"}).`);
-    })
-    .finally(() => clearTimeout(timer));
 
-  if (!res.ok) throw badRequest(`Could not verify the uploaded file (HTTP ${res.status}).`);
-  const len = Number(res.headers.get("content-length"));
-  if (!Number.isFinite(len) || len <= 0) throw badRequest("Could not verify the uploaded file.");
-  return len;
-}
-
-async function discard(publicId: string, resourceType: string, creds: CloudinaryCreds): Promise<void> {
-  await destroyFromCloudinary(publicId, resourceType, creds).catch((e: unknown) =>
-    console.error(`[upload] could not discard ${resourceType}/${publicId}:`, e instanceof Error ? e.message : e),
+async function discard(storage: StorageProvider, asset: AssetRef): Promise<void> {
+  await storage.destroy(asset).catch((e: unknown) =>
+    console.error(
+      `[upload] could not discard ${asset.resourceType}/${asset.publicId}:`,
+      e instanceof Error ? e.message : e,
+    ),
   );
-  await pendingRepo.remove(publicId);
+  await pendingRepo.remove(asset.publicId);
 }
 
 /**
@@ -519,6 +642,8 @@ export async function stampPendingAsset(asset: VerifiedAsset): Promise<void> {
 export async function claimDeferredUpload(url: string): Promise<{
   publicId: string;
   resourceType: string;
+  /** The provider the upload was signed against — see VerifiedAsset.provider. */
+  provider: string;
   fileName: string;
   fileType: string;
   fileSizeBytes: number;
@@ -533,6 +658,7 @@ export async function claimDeferredUpload(url: string): Promise<{
   return {
     publicId: row.publicId,
     resourceType: row.resourceType,
+    provider: normalizeProviderId(row.storageProvider),
     fileName: row.fileName,
     fileType: row.fileType,
     fileSizeBytes: row.fileSizeBytes,

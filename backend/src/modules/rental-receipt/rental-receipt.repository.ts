@@ -607,6 +607,7 @@ export function addAttachment(
     url: string;
     publicId: string | null;
     resourceType: string | null;
+    storageProvider: string | null;
     uploadedBy: string | null;
   },
   // Passed by the direct-upload finalize, which commits this row and its pending-upload ledger

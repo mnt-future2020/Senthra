@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildEmailHeaderRow, DEFAULT_BRAND_COLOR, renderBodyToHtml } from "./email-html.js";
+import { buildEmailHeaderRow, DEFAULT_BRAND_COLOR, emailImageUrl, renderBodyToHtml } from "./email-html.js";
 import { renderEmail } from "./template-render.js";
 
 // The generated email HTML is what recipients actually see, and the account-creation
@@ -226,5 +226,34 @@ describe("buildEmailHeaderRow — text fallback", () => {
   it("picks a dark wordmark on a light bar and a light one on a dark bar", () => {
     expect(buildEmailHeaderRow("Senthra", "", "#ffffff")).toContain("color:#1a1a2e");
     expect(buildEmailHeaderRow("Senthra", "", "#101020")).toContain("color:#ffffff");
+  });
+});
+
+// ── Which mechanism an email header uses ──────────────────────────────────────────────────────
+//
+// The email twin of `pdfImageUrl`. Same rule: the decision comes from what is persisted against the
+// asset, not from whichever provider Settings currently names.
+describe("emailImageUrl — the source asset decides", () => {
+  const CLOUDINARY = "https://res.cloudinary.com/demo/image/upload/v1/senthra/branding/logo";
+  const SPACES = "https://senthra.ams3.digitaloceanspaces.com/senthra/branding/logo";
+  const SPACES_EMAIL = "https://senthra.ams3.digitaloceanspaces.com/senthra/branding/logo__email.png";
+
+  it("transforms a Cloudinary logo in its URL, at the EMAIL height", () => {
+    const url = emailImageUrl(CLOUDINARY, null);
+    expect(url).toContain("f_png,h_80,c_limit");
+    // Deliberately NOT the PDF height — 400 is for print, 80 is retina for a 34px mail header.
+    expect(url).not.toContain("h_400");
+  });
+
+  it("uses the STORED derivative for an asset that has one", () => {
+    expect(emailImageUrl(SPACES, SPACES_EMAIL)).toBe(SPACES_EMAIL);
+  });
+
+  it("keeps transforming a Cloudinary logo when no derivative is stored", () => {
+    expect(emailImageUrl(CLOUDINARY, null)).toContain("f_png,h_80");
+  });
+
+  it("leaves a non-Cloudinary URL with no derivative alone", () => {
+    expect(emailImageUrl(SPACES, null)).toBe(SPACES);
   });
 });

@@ -39,9 +39,17 @@ vi.mock("#modules/rental-item/rental-item.service.js", () => ({
 // heavy inventory-service import graph out of this unit-test module.
 vi.mock("#modules/inventory/inventory.service.js", () => ({ getReorderSuggestions: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
-vi.mock("#modules/attachment/attachment.service.js", () => ({ releaseAsset: vi.fn() }));
+vi.mock("#modules/attachment/attachment.service.js", () => ({
+  releaseAsset: vi.fn(),
+  // The REAL mapping, not a stub: these tests assert the identity that reaches releaseAsset,
+  // and the provider is now part of it.
+  refFromAttachment: (row: { storageProvider: string | null; publicId: string | null; resourceType: string | null }) => ({
+    provider: row.storageProvider,
+    publicId: row.publicId,
+    resourceType: row.resourceType,
+  }),
+}));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
-vi.mock("../../lib/cloudinary.js", () => ({ uploadFileToCloudinary: vi.fn() }));
 // Realtime is fire-and-forget; mock it so we can assert every transition fans a refetch signal out
 // to the watchers (a stale detail page is what lets a user act on an already-moved request).
 vi.mock("../../lib/realtime.js", () => ({
@@ -446,6 +454,9 @@ describe("convert — generate the PO from an approved PRF (one per PRF, transac
         // Cloudinary asset. That shared identity is what the delete path counts.
         publicId: "senthra/purchase-orders/quote-abc.pdf",
         resourceType: "raw",
+        // Part of that shared identity: the copy must carry the provider across too, or the two
+        // rows would name the same key on two different backends.
+        storageProvider: "cloudinary",
         uploadedBy: "requester@x.co",
       },
       // A SUPPORTING document, so the conversion is exercised on a request that holds both groups —
@@ -500,6 +511,9 @@ describe("convert — generate the PO from an approved PRF (one per PRF, transac
       url: "https://cdn/q.pdf",
       publicId: "senthra/purchase-orders/quote-abc.pdf",
       resourceType: "raw",
+      // Copied verbatim too: the PO row points at the SAME object, so it must name the same
+      // provider or the delete path would look for it on the wrong backend.
+      storageProvider: "cloudinary",
     });
     expect(mockSetConvertedTx).toHaveBeenCalledWith({}, PRF_ID, "fin@x.co");
     expect(auditActions()).toEqual(expect.arrayContaining(["purchase_request.converted", "purchase_order.created"]));
@@ -548,6 +562,10 @@ describe("convert — generate the PO from an approved PRF (one per PRF, transac
     "url",
     "publicId",
     "resourceType",
+    // The provider is part of the identity being copied: the PO row points at the SAME stored
+    // object, so it has to name the same backend. Omitting it would make a Spaces-stored quote read
+    // as Cloudinary on the order.
+    "storageProvider",
     "uploadedBy",
   ] as const;
 
@@ -898,12 +916,16 @@ describe("PRF attachments — Cloudinary cleanup", () => {
       url: "https://cdn/q.pdf",
       publicId: "senthra/purchase-orders/q.pdf",
       resourceType: "raw",
+      provider: "cloudinary",
     });
-    // Identity, not just the URL. A row with only a URL can never have its file destroyed.
+    // Identity, not just the URL. A row with only a URL can never have its file destroyed — and
+    // the provider is part of that identity now: without it the delete path cannot tell which
+    // backend holds the file.
     expect(mockAddAtt.mock.calls[0][0]).toMatchObject({
       url: "https://cdn/q.pdf",
       publicId: "senthra/purchase-orders/q.pdf",
       resourceType: "raw",
+      storageProvider: "cloudinary",
     });
   });
 
@@ -923,6 +945,7 @@ describe("PRF attachments — Cloudinary cleanup", () => {
         url: "https://cdn/spec.pdf",
         publicId: "senthra/purchase-orders/spec.pdf",
         resourceType: "raw",
+        provider: "cloudinary",
       });
       expect(mockAddAtt.mock.calls[0][0]).toMatchObject({ documentType: "other" });
     });
@@ -938,6 +961,7 @@ describe("PRF attachments — Cloudinary cleanup", () => {
         url: "https://cdn/q.pdf",
         publicId: "senthra/purchase-orders/q.pdf",
         resourceType: "raw",
+        provider: "cloudinary",
       });
       expect(mockAddAtt.mock.calls[0][0]).toMatchObject({ documentType: "quote" });
     });

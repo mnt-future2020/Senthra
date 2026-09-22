@@ -26,7 +26,16 @@ vi.mock("#modules/purchase-order/purchase-order.service.js", () => ({
 }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("../../lib/warehouse-access.js", () => ({ assertWarehouseAccess: vi.fn() }));
-vi.mock("#modules/attachment/attachment.service.js", () => ({ releaseAsset: vi.fn() }));
+vi.mock("#modules/attachment/attachment.service.js", () => ({
+  releaseAsset: vi.fn(),
+  // The REAL mapping, not a stub: these tests assert the identity that reaches releaseAsset,
+  // and the provider is now part of it.
+  refFromAttachment: (row: { storageProvider: string | null; publicId: string | null; resourceType: string | null }) => ({
+    provider: row.storageProvider,
+    publicId: row.publicId,
+    resourceType: row.resourceType,
+  }),
+}));
 // Realtime is fire-and-forget and must never affect the caller — mocked so a test can assert every
 // movement fans a refetch signal out to the rental watchers. A stale receiving row is how the same
 // delivery gets booked in twice.
@@ -68,6 +77,7 @@ import * as attachmentService from "#modules/attachment/attachment.service.js";
 import { emitAttentionChanged, emitToRoom } from "../../lib/realtime.js";
 import {
   assertCanAttach,
+  attachUploadedAsset,
   createRentalReceipt,
   createRentalReturn,
   listForPurchaseOrder,
@@ -1826,5 +1836,47 @@ describe("chargeCustodyExit", () => {
       vi.mocked(custodyExitRepo.findById).mockResolvedValue(exit({ custodyState: state }) as never);
       await expect(charge()).rejects.toThrow(/withdrawn/i);
     }
+  });
+});
+
+// ── The stored provider reaches the row ───────────────────────────────────────────────────────
+//
+// TWO DIFFERENT THINGS, and confusing them is the bug this exists to prevent:
+//
+//   ACTIVE provider  — where a NEW upload should go. Read from Settings.
+//   STORED provider  — where THIS asset actually is. Carried on the verified upload.
+//
+// Nothing in this path reads Settings; the provider arrives as part of the input. These pin that it
+// is written to the row rather than dropped — a dropped value reads back as `null`, i.e. Cloudinary,
+// and a Spaces-stored condition photo would then never be deletable.
+describe("hire delivery photos — the provider is persisted on the row", () => {
+  const attach = (provider: string) =>
+    attachUploadedAsset(RECEIPT_ID, {
+      fileName: "cond.jpg",
+      fileType: "jpg",
+      fileSizeBytes: 2048,
+      url: "https://cdn/cond.jpg",
+      publicId: "senthra/hire-deliveries/cond-uuid",
+      resourceType: "image",
+      provider,
+    });
+
+  beforeEach(() => {
+    findReceipt.mockResolvedValue(receiptRow());
+    vi.mocked(receiptRepo.addAttachment).mockResolvedValue({ id: "a1" } as never);
+  });
+
+  it("persists a Cloudinary provider", async () => {
+    await attach("cloudinary");
+    expect(vi.mocked(receiptRepo.addAttachment).mock.calls[0]![0]).toMatchObject({
+      storageProvider: "cloudinary",
+    });
+  });
+
+  it("persists a Spaces provider rather than flattening it to null", async () => {
+    await attach("spaces");
+    expect(vi.mocked(receiptRepo.addAttachment).mock.calls[0]![0]).toMatchObject({
+      storageProvider: "spaces",
+    });
   });
 });

@@ -20,11 +20,11 @@ import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as jobRepo from "#modules/job/job.repository.js";
 import * as jobService from "#modules/job/job.service.js";
 import { withTransactionRetry } from "../../lib/prisma.js";
-import { uploadToCloudinary } from "../../lib/cloudinary.js";
-import type { CloudinaryImageAsset } from "../../lib/cloudinary.js";
+import { findActiveStorage } from "../../lib/storage/index.js";
+import type { StoredAsset } from "../../lib/storage/index.js";
 import { geocodePostcode, geocodePostcodesBulk, canonicalPostcode } from "../../lib/geocode.js";
 import { siteSchema } from "./customer.validation.js";
-import { getCloudinaryCreds, getRegionalSettings, getStockCodePrefix } from "#modules/settings/settings.service.js";
+import { getRegionalSettings, getStockCodePrefix } from "#modules/settings/settings.service.js";
 import { formatDate } from "#modules/document/document.formatter.js";
 import { assertWarehouseAccess } from "../../lib/warehouse-access.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
@@ -57,14 +57,20 @@ import { sendTemplatedEmail } from "#modules/email/email.service.js";
 
 // Upload a company logo to Cloudinary (random public id, "senthra/customers"
 // folder) and return its secure URL. Mirrors the staff avatar upload.
-async function uploadLogo(image: string): Promise<CloudinaryImageAsset> {
-  const creds = await getCloudinaryCreds();
-  if (!creds) {
+async function uploadLogo(image: string): Promise<StoredAsset> {
+  const storage = await findActiveStorage();
+  if (!storage) {
     throw badRequest(
-      "Cloudinary isn't configured. Add your credentials in Settings → Integrations to upload a logo.",
+      "File storage isn't configured. Set up a storage provider in Settings → Storage to upload a logo.",
     );
   }
-  return uploadToCloudinary(image, crypto.randomUUID(), creds, "senthra/customers");
+  // A random public id, so a replacement does NOT overwrite the old asset — which is why the caller
+  // releases the one it replaces, and why this is `immutable`.
+  return storage.upload(image, crypto.randomUUID(), {
+    folder: "senthra/customers",
+    kind: "image",
+    immutable: true,
+  });
 }
 
 const STATUSES = ["active", "inactive"] as const;
@@ -588,7 +594,7 @@ export interface CreateCustomerInput extends CustomerFieldsInput {
 
 // The optional company/contact/address columns (everything except name/email/auth),
 // trimmed to null. Shared by create + revive so the two stay in lockstep.
-function customerColumns(input: CustomerFieldsInput, logo: CloudinaryImageAsset | null) {
+function customerColumns(input: CustomerFieldsInput, logo: StoredAsset | null) {
   return {
     legalName: trimToNull(input.legalName),
     registrationNumber: trimToNull(input.registrationNumber),
@@ -598,6 +604,10 @@ function customerColumns(input: CustomerFieldsInput, logo: CloudinaryImageAsset 
     logoUrl: logo?.url ?? null,
     logoPublicId: logo?.publicId ?? null,
     logoResourceType: logo?.resourceType ?? null,
+    // WHERE it was stored, taken from the asset itself and never from the active setting. A delete
+    // resolves the provider from this column, so a logo written here without it is addressed
+    // against Cloudinary forever — the update path has always recorded it; this one had not.
+    logoProvider: logo?.provider ?? null,
     contactPerson: trimToNull(input.contactPerson),
     contactJobTitle: trimToNull(input.contactJobTitle),
     phone: trimToNull(input.phone),
@@ -845,12 +855,19 @@ export async function updateCustomer(
   // just stops being referenced. Changing a customer's logo is an ordinary success path, so the file it
   // replaces has to be released explicitly or it stays in the CDN forever.
   let staleLogo: attachmentService.AssetRef | null = null;
-  const previousLogo: attachmentService.AssetRef = { publicId: customer.logoPublicId, resourceType: customer.logoResourceType };
+  // The provider that stored THIS logo, not the one currently selected.
+  const previousLogo: attachmentService.AssetRef = {
+    provider: customer.logoProvider,
+    publicId: customer.logoPublicId,
+    resourceType: customer.logoResourceType,
+  };
   if (input.logo) {
     const logo = await uploadLogo(input.logo);
     data.logoUrl = logo.url;
     data.logoPublicId = logo.publicId;
     data.logoResourceType = logo.resourceType;
+    // Recorded at WRITE time — the release path reads this rather than the active provider.
+    data.logoProvider = logo.provider;
     // Only when the id actually moved; a legacy row has no stored id and is skipped.
     if (previousLogo.publicId && previousLogo.publicId !== logo.publicId) staleLogo = previousLogo;
   } else if (input.removeLogo) {

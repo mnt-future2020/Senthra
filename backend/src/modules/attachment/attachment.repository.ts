@@ -20,9 +20,31 @@ import { prisma } from "../../lib/prisma.js";
  * Identity is the PAIR. Matching `publicId` alone would treat an `image` and a `raw` asset that
  * happen to share an id as the same file, which is the one way this function could report a
  * reference that does not exist and let a live asset be destroyed.
+ *
+ * Identity is now a TRIPLE, not a pair: the same (publicId, resourceType) can exist on two
+ * providers at once, and a row on one must not protect an asset on the other. The provider is the
+ * coordinate that tells them apart.
+ *
+ * `null` MEANS CLOUDINARY, and matching it needs BOTH `null` and `isSet: false` — a row written
+ * before the column existed has the field ABSENT, not null, and in this Prisma+MongoDB setup a bare
+ * `{ field: null }` filter does not match an absent field. Getting that wrong here is the worst
+ * shape of bug available: legacy rows would count as zero references and their live files would be
+ * destroyed. See lib/__tests__/null-vs-absent.test.ts, which fails on an unpaired occurrence.
  */
-export async function countRefs(resourceType: string, publicId: string): Promise<number> {
-  const where = { resourceType, publicId };
+export async function countRefs(
+  provider: string | null,
+  resourceType: string,
+  publicId: string,
+): Promise<number> {
+  const where = {
+    resourceType,
+    publicId,
+    // Cloudinary is the legacy value, so it has to match rows that say so explicitly AND rows that
+    // never said anything. Any other provider was written by code that always sets the column.
+    ...(provider === null || provider === "cloudinary"
+      ? { OR: [{ storageProvider: null }, { storageProvider: { isSet: false } }, { storageProvider: "cloudinary" }] }
+      : { storageProvider: provider }),
+  };
   const [prf, po, grn, job, hire] = await Promise.all([
     prisma.purchaseRequestAttachment.count({ where }),
     prisma.purchaseOrderAttachment.count({ where }),

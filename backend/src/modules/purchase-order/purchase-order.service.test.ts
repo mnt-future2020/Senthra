@@ -35,8 +35,20 @@ vi.mock("#modules/rental-item/rental-item.service.js", () => ({
 }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
-vi.mock("#modules/attachment/attachment.service.js", () => ({ releaseAsset: vi.fn() }));
-vi.mock("../../lib/cloudinary.js", () => ({ uploadFileToCloudinary: vi.fn() }));
+vi.mock("#modules/attachment/attachment.service.js", () => ({
+  releaseAsset: vi.fn(),
+  // The REAL mapping, not a stub: these tests assert the identity that reaches releaseAsset,
+  // and the provider is now part of it.
+  refFromAttachment: (row: { storageProvider: string | null; publicId: string | null; resourceType: string | null }) => ({
+    provider: row.storageProvider,
+    publicId: row.publicId,
+    resourceType: row.resourceType,
+  }),
+}));
+// The issued-PO archive stores a PDF through the storage layer. `findActiveStorage` returning null
+// is the "not configured" branch the archive is required to survive without failing the send.
+const { mockUpload } = vi.hoisted(() => ({ mockUpload: vi.fn() }));
+vi.mock("../../lib/storage/index.js", () => ({ findActiveStorage: vi.fn() }));
 // Realtime is fire-and-forget; mock it so we can assert every transition fans a refetch signal out
 // to the procurement watchers (a stale detail page is what let a user re-send an already-sent PO).
 vi.mock("../../lib/realtime.js", () => ({
@@ -72,8 +84,7 @@ import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
 import * as rentalItemService from "#modules/rental-item/rental-item.service.js";
 import * as audit from "#modules/audit/audit.service.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
-import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
+import { findActiveStorage } from "../../lib/storage/index.js";
 import { PO_ATTACHMENT_MAX_COUNT, PO_ATTACHMENT_MAX_TOTAL_BYTES } from "./purchase-order.validation.js";
 import { PRF_ATTACHMENT_MAX_COUNT, PRF_ATTACHMENT_MAX_TOTAL_BYTES } from "#modules/purchase-request/purchase-request.validation.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
@@ -1222,8 +1233,7 @@ describe("cancellation matrix", () => {
 
 // ── Document of record: the issued PDF archived at send, undeletable, never blocking the send. ─
 describe("issued-PDF archive (document of record)", () => {
-  const mockCreds = getCloudinaryCreds as ReturnType<typeof vi.fn>;
-  const mockUpload = uploadFileToCloudinary as ReturnType<typeof vi.fn>;
+  const mockCreds = vi.mocked(findActiveStorage);
   const mockPdf = documentService.generatePurchaseOrderPdf as ReturnType<typeof vi.fn>;
   const mockAddAtt = poRepo.addAttachment as ReturnType<typeof vi.fn>;
   const mockFindAtt = poRepo.findAttachment as ReturnType<typeof vi.fn>;
@@ -1231,9 +1241,9 @@ describe("issued-PDF archive (document of record)", () => {
 
   it("send archives the generated PDF as the system attachment", async () => {
     mockFindById.mockResolvedValue(poRow({ status: "approved" }));
-    mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+    mockCreds.mockResolvedValue({ upload: mockUpload } as never);
     mockPdf.mockResolvedValue({ filename: "PO-0001.pdf", buffer: Buffer.from("pdf"), mimeType: "application/pdf" });
-    mockUpload.mockResolvedValue({ url: "https://cdn/po-0001.pdf", publicId: "senthra/purchase-orders/po1.pdf", resourceType: "raw" });
+    mockUpload.mockResolvedValue({ url: "https://cdn/po-0001.pdf", publicId: "senthra/purchase-orders/po1.pdf", resourceType: "raw", provider: "cloudinary" });
     await sendPurchaseOrder(PO_ID, { type: "user", id: "u1", email: "pm@x.co", permissions: [] });
     await flushAsync();
     expect(mockAddAtt).toHaveBeenCalledTimes(1);
@@ -1250,7 +1260,7 @@ describe("issued-PDF archive (document of record)", () => {
 
   it("an archive failure never rolls back the send", async () => {
     mockFindById.mockResolvedValue(poRow({ status: "approved" }));
-    mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+    mockCreds.mockResolvedValue({ upload: mockUpload } as never);
     mockPdf.mockRejectedValue(new Error("pdfkit exploded"));
     expect((await sendPurchaseOrder(PO_ID)).status).toBe("sent");
     await flushAsync();
@@ -1922,15 +1932,15 @@ describe("commerciallyMatchesPrf — hires are part of the commercial identity",
 describe("markPurchaseOrderSent — issuing an order that was sent outside Senthra", () => {
   const mockSent = poEmail.notifySupplierPoSent as ReturnType<typeof vi.fn>;
   const mockAddAtt = poRepo.addAttachment as ReturnType<typeof vi.fn>;
-  const mockCreds = getCloudinaryCreds as ReturnType<typeof vi.fn>;
+  const mockCreds = vi.mocked(findActiveStorage);
   const mockPdf = documentService.generatePurchaseOrderPdf as ReturnType<typeof vi.fn>;
-  const mockUpload = uploadFileToCloudinary as ReturnType<typeof vi.fn>;
+
   const SENDER = { type: "user" as const, id: "u1", email: "buyer@x.co", permissions: ["purchase_orders.send"] };
   // Everything the issued-PDF archive needs to actually run end to end.
   const withCloudinary = () => {
-    mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+    mockCreds.mockResolvedValue({ upload: mockUpload } as never);
     mockPdf.mockResolvedValue({ filename: "PO-0001.pdf", buffer: Buffer.from("pdf"), mimeType: "application/pdf" });
-    mockUpload.mockResolvedValue({ url: "https://cdn/po-0001.pdf", publicId: "senthra/po1.pdf", resourceType: "raw" });
+    mockUpload.mockResolvedValue({ url: "https://cdn/po-0001.pdf", publicId: "senthra/po1.pdf", resourceType: "raw", provider: "cloudinary" });
   };
 
   // --- the transition itself ---------------------------------------------------------------
@@ -2048,7 +2058,7 @@ describe("markPurchaseOrderSent — issuing an order that was sent outside Senth
 
   it("an archive failure never rolls back the manual issue", async () => {
     mockFindById.mockResolvedValue(poRow({ status: "approved" }));
-    mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+    mockCreds.mockResolvedValue({ upload: mockUpload } as never);
     mockPdf.mockRejectedValue(new Error("pdfkit exploded"));
     expect((await markPurchaseOrderSent(PO_ID, {}, SENDER)).status).toBe("sent");
     await flushAsync();
@@ -2259,5 +2269,48 @@ describe("concurrent issue: exactly one door opens", () => {
     mockUpdateStatusIf.mockResolvedValueOnce(null);
     await expect(markPurchaseOrderSent(PO_ID, {}, ACTOR)).rejects.toThrow(/already cancelled/i);
     expect(mockSent).not.toHaveBeenCalled();
+  });
+});
+
+// ── The stored provider reaches the row ───────────────────────────────────────────────────────
+//
+// TWO DIFFERENT THINGS, and confusing them is the bug this exists to prevent:
+//
+//   ACTIVE provider  — where a NEW upload should go. Read from Settings.
+//   STORED provider  — where THIS asset actually is. Carried on the verified upload.
+//
+// A file signed before an administrator switches provider is finalized after it, so the two can
+// legitimately disagree. The row must record the second. If it recorded the first — or recorded
+// nothing and let `null` mean Cloudinary — a Spaces-stored file would later be deleted from
+// Cloudinary, answer "not found", and survive forever with nothing reporting a problem.
+//
+// Nothing in this path reads Settings at all; the provider arrives as part of the input. These pin
+// that it is written rather than dropped.
+describe("PO attachments — the provider is persisted on the row", () => {
+  const mockAddAtt = poRepo.addAttachment as ReturnType<typeof vi.fn>;
+  const attach = (provider: string) =>
+    attachUploadedAsset(PO_ID, {
+      fileName: "q.pdf",
+      fileType: "pdf",
+      fileSizeBytes: 9,
+      url: "https://cdn/q.pdf",
+      publicId: "senthra/purchase-orders/q.pdf",
+      resourceType: "raw",
+      provider,
+    });
+
+  beforeEach(() => {
+    mockFindById.mockResolvedValue(poRow({ status: "draft" }));
+    mockAddAtt.mockResolvedValue({ id: "a1" });
+  });
+
+  it("persists a Cloudinary provider", async () => {
+    await attach("cloudinary");
+    expect(mockAddAtt.mock.calls[0][0]).toMatchObject({ storageProvider: "cloudinary" });
+  });
+
+  it("persists a Spaces provider rather than flattening it to null", async () => {
+    await attach("spaces");
+    expect(mockAddAtt.mock.calls[0][0]).toMatchObject({ storageProvider: "spaces" });
   });
 });

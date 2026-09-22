@@ -17,7 +17,6 @@ vi.mock("./settings.repository.js", () => ({
   count: vi.fn(),
 }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
-vi.mock("../../lib/cloudinary.js", () => ({ uploadToCloudinary: vi.fn() }));
 vi.mock("../../lib/mailer.js", () => ({ sendMail: vi.fn() }));
 vi.mock("../../utils/crypto.js", () => ({
   decryptSecret: vi.fn((v: string) => v),

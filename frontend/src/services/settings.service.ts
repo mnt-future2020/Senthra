@@ -19,6 +19,13 @@ export interface SettingsUpdate {
   cloudinaryCloudName?: string;
   cloudinaryApiKey?: string;
   cloudinaryApiSecret?: string;
+  storageProvider?: "cloudinary" | "spaces";
+  spacesEndpoint?: string;
+  spacesRegion?: string;
+  spacesBucket?: string;
+  spacesAccessKeyId?: string;
+  spacesSecretKey?: string;
+  spacesCdnUrl?: string;
   brandName?: string;
   brandColor?: string;
   logoUrl?: string;
@@ -107,4 +114,29 @@ export function sendTestEmail(
     body: payload,
     timeout: 45_000,
   });
+}
+
+/** What a storage connection test reports back. Never carries configuration or credentials. */
+export interface StorageTestResult {
+  ok: boolean;
+  message: string;
+}
+
+/**
+ * Ask the server to prove a storage configuration works.
+ *
+ * Sends the values CURRENTLY ON SCREEN, which may not be saved yet — testing the stored ones would
+ * confirm a configuration the administrator is not about to use. A blank secret means "use the one
+ * already stored", matching how the field itself behaves.
+ */
+export function testStorage(payload: {
+  provider: "cloudinary" | "spaces";
+  spacesEndpoint?: string;
+  spacesRegion?: string;
+  spacesBucket?: string;
+  spacesAccessKeyId?: string;
+  spacesSecretKey?: string;
+  spacesCdnUrl?: string;
+}): Promise<StorageTestResult> {
+  return api<StorageTestResult>("/settings/storage/test", { method: "POST", body: payload });
 }

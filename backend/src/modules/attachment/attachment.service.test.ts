@@ -4,25 +4,38 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // can this destroy a Cloudinary asset that a committed row still references? The required invariant
 // is that it cannot, and that when it can't prove safety it leaves an orphan instead.
 vi.mock("./attachment.repository.js", () => ({ countRefs: vi.fn() }));
-vi.mock("../../lib/cloudinary.js", () => ({ destroyFromCloudinary: vi.fn() }));
-vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
+// The STORAGE LAYER is mocked, not a vendor transport. `releaseAsset` now asks which provider holds
+// the asset and calls `destroy` on it — so what these tests pin is that it resolves the provider
+// from the ASSET and addresses the object by both halves of its identity, which is the same
+// invariant as before expressed through the abstraction.
+const { destroy } = vi.hoisted(() => ({ destroy: vi.fn() }));
+vi.mock("../../lib/storage/index.js", () => ({
+  getStorageFor: vi.fn(),
+  // The REAL convention, not a stub: these tests are about null meaning Cloudinary.
+  normalizeProviderId: (v: string | null | undefined) => (v === "spaces" ? "spaces" : "cloudinary"),
+}));
 
 import { countRefs } from "./attachment.repository.js";
-import { destroyFromCloudinary } from "../../lib/cloudinary.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
+import { getStorageFor } from "../../lib/storage/index.js";
 import { releaseAsset } from "./attachment.service.js";
 
 const refs = vi.mocked(countRefs);
-const destroy = vi.mocked(destroyFromCloudinary);
-const creds = vi.mocked(getCloudinaryCreds);
+const storage = vi.mocked(getStorageFor);
 
-const CREDS = { cloudName: "c", apiKey: "k", apiSecret: "s" };
-const RAW = { publicId: "senthra/purchase-orders/abc.pdf", resourceType: "raw" };
+const RAW = { provider: null, publicId: "senthra/purchase-orders/abc.pdf", resourceType: "raw" };
+/**
+ * The ref `releaseAsset` hands to the storage layer for a row with NO provider recorded.
+ *
+ * The row says `null`; what reaches `destroy` is the NORMALISED id, "cloudinary". That difference is
+ * the convention under test — null is not passed through as an absence, it is resolved to the
+ * provider every legacy asset actually lives on.
+ */
+const refOf = (publicId: string, resourceType: string) => ({ provider: "cloudinary", publicId, resourceType });
 
 beforeEach(() => {
   refs.mockReset().mockResolvedValue(0);
   destroy.mockReset().mockResolvedValue(undefined);
-  creds.mockReset().mockResolvedValue(CREDS);
+  storage.mockReset().mockResolvedValue({ destroy } as never);
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -32,17 +45,17 @@ describe("releaseAsset — the destroy decision", () => {
     expect(destroy).toHaveBeenCalledTimes(1);
     // resourceType is not decoration: `destroy` on the wrong type answers "not found" for a file
     // that is still there, which would look like a successful cleanup and leak silently.
-    expect(destroy).toHaveBeenCalledWith(RAW.publicId, RAW.resourceType, CREDS);
+    expect(destroy).toHaveBeenCalledWith(refOf(RAW.publicId, RAW.resourceType));
   });
 
   it("counts references using the PAIR, never publicId alone", async () => {
     await releaseAsset(RAW, "ctx");
-    expect(refs).toHaveBeenCalledWith(RAW.resourceType, RAW.publicId);
+    expect(refs).toHaveBeenCalledWith(RAW.provider, RAW.resourceType, RAW.publicId);
   });
 
   it("passes an image asset's own resourceType through", async () => {
-    await releaseAsset({ publicId: "senthra/goods-in/photo", resourceType: "image" }, "ctx");
-    expect(destroy).toHaveBeenCalledWith("senthra/goods-in/photo", "image", CREDS);
+    await releaseAsset({ provider: null, publicId: "senthra/goods-in/photo", resourceType: "image" }, "ctx");
+    expect(destroy).toHaveBeenCalledWith(refOf("senthra/goods-in/photo", "image"));
   });
 });
 
@@ -85,24 +98,24 @@ describe("releaseAsset — a surviving reference always wins", () => {
 // the wrong file. Leaving the asset is the conservative half of that trade.
 describe("releaseAsset — legacy rows without identity", () => {
   it("skips a row with no publicId, and says so", async () => {
-    await releaseAsset({ publicId: null, resourceType: "raw" }, "purchase_request PRF-0009");
+    await releaseAsset({ provider: null, publicId: null, resourceType: "raw" }, "purchase_request PRF-0009");
     expect(destroy).not.toHaveBeenCalled();
     expect(refs).not.toHaveBeenCalled();
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining("PRF-0009"));
   });
 
   it("skips a row with no resourceType — half an identity addresses nothing", async () => {
-    await releaseAsset({ publicId: "senthra/jobs/x.pdf", resourceType: null }, "ctx");
+    await releaseAsset({ provider: null, publicId: "senthra/jobs/x.pdf", resourceType: null }, "ctx");
     expect(destroy).not.toHaveBeenCalled();
   });
 
   it("skips a row with neither", async () => {
-    await releaseAsset({ publicId: null, resourceType: null }, "ctx");
+    await releaseAsset({ provider: null, publicId: null, resourceType: null }, "ctx");
     expect(destroy).not.toHaveBeenCalled();
   });
 
   it("never infers identity from anything — no destroy call is attempted at all", async () => {
-    await releaseAsset({ publicId: "", resourceType: "raw" }, "ctx");
+    await releaseAsset({ provider: null, publicId: "", resourceType: "raw" }, "ctx");
     expect(destroy).not.toHaveBeenCalled();
   });
 });
@@ -132,8 +145,8 @@ describe("releaseAsset — failure is never the caller's failure", () => {
     expect(destroy).not.toHaveBeenCalled();
   });
 
-  it("skips cleanly when Cloudinary isn't configured", async () => {
-    creds.mockResolvedValue(null);
+  it("skips cleanly when the asset's own provider isn't configured", async () => {
+    storage.mockResolvedValue(null);
     await expect(releaseAsset(RAW, "ctx")).resolves.toBeUndefined();
     expect(destroy).not.toHaveBeenCalled();
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining("not configured"));
@@ -155,7 +168,7 @@ describe("releaseAsset — concurrent removals of a shared asset", () => {
     // Two destroys of one id: the second is a no-op ("not found" is success). Idempotence is what
     // makes this safe without a lock.
     expect(destroy).toHaveBeenCalledTimes(2);
-    for (const call of destroy.mock.calls) expect(call).toEqual([RAW.publicId, RAW.resourceType, CREDS]);
+    for (const call of destroy.mock.calls) expect(call).toEqual([refOf(RAW.publicId, RAW.resourceType)]);
   });
 
   it("destroys exactly once when only the later side sees zero", async () => {
@@ -163,5 +176,60 @@ describe("releaseAsset — concurrent removals of a shared asset", () => {
     await releaseAsset(RAW, "purchase_order PO-1"); // committed first, still sees the PRF row
     await releaseAsset(RAW, "purchase_request PRF-1"); // last one out
     expect(destroy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Provider-from-row ─────────────────────────────────────────────────────────────────────────
+//
+// THE invariant of this change: which backend holds an EXISTING asset is decided by the row, never
+// by whichever provider Settings currently selects. Get it wrong and switching provider silently
+// stops every older file from being deletable — nothing errors, the files simply accumulate.
+//
+// The Spaces adapter does not exist yet, so what these pin is the RESOLUTION: `getStorageFor` is
+// asked for the provider the row names. That is the decision under test; which client comes back is
+// Task 5's concern.
+describe("releaseAsset — the provider comes from the row", () => {
+  const refWith = (provider: string | null) => ({
+    provider,
+    publicId: "senthra/purchase-orders/abc.pdf",
+    resourceType: "raw",
+  });
+
+  it('resolves a row stored on "cloudinary" to Cloudinary', async () => {
+    await releaseAsset(refWith("cloudinary"), "ctx");
+    expect(storage).toHaveBeenCalledWith({ provider: "cloudinary" });
+    expect(destroy).toHaveBeenCalledWith(refWith("cloudinary"));
+  });
+
+  it('resolves a row stored on "spaces" to Spaces — NOT to the active provider', async () => {
+    await releaseAsset(refWith("spaces"), "ctx");
+    expect(storage).toHaveBeenCalledWith({ provider: "spaces" });
+    expect(destroy).toHaveBeenCalledWith(refWith("spaces"));
+  });
+
+  // The legacy shape: every row written before the column existed. Null is a COMPLETE value here,
+  // not a missing one, so it must resolve rather than skip.
+  it("resolves a null provider to Cloudinary rather than skipping the asset", async () => {
+    await releaseAsset(refWith(null), "ctx");
+    expect(storage).toHaveBeenCalledWith({ provider: "cloudinary" });
+    expect(destroy).toHaveBeenCalledTimes(1);
+  });
+
+  // An unrecognised string is read as Cloudinary rather than throwing: a cleanup path must not be
+  // the thing that discovers a typo, and Cloudinary is where every legacy asset actually is.
+  it("falls back to Cloudinary for an unrecognised stored value", async () => {
+    await releaseAsset(refWith("s3-someday"), "ctx");
+    expect(storage).toHaveBeenCalledWith({ provider: "cloudinary" });
+  });
+
+  it("counts references scoped to the row's own provider", async () => {
+    await releaseAsset(refWith("spaces"), "ctx");
+    expect(refs).toHaveBeenCalledWith("spaces", "raw", "senthra/purchase-orders/abc.pdf");
+  });
+
+  // The whole point, stated once: nothing in this path reads Settings.
+  it("never consults the active provider", async () => {
+    await releaseAsset(refWith("spaces"), "ctx");
+    for (const call of storage.mock.calls) expect(call[0]).toEqual({ provider: "spaces" });
   });
 });

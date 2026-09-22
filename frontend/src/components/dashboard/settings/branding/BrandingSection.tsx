@@ -41,6 +41,9 @@ const ALLOWED_IMAGE_TYPES = new Set([
 function brandingFromSettings(s: Settings): Branding {
   return {
     brandName: s.brandName,
+    // Carried through unchanged: this rebuilds the live branding after a save, and dropping the
+    // host list would make every stored job attachment look like a pasted link until a reload.
+    uploadHosts: s.uploadHosts,
     brandColor: s.brandColor,
     logoUrl: s.logoUrl,
     faviconUrl: s.faviconUrl,

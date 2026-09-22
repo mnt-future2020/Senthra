@@ -1713,6 +1713,15 @@ export interface AttachAssetInput {
   url: string;
   publicId: string;
   resourceType: string;
+  /**
+   * WHERE THIS ASSET WAS ACTUALLY STORED — not where new uploads currently go.
+   *
+   * Carried from the verified upload rather than read from Settings, because the two can differ:
+   * a file signed before an administrator switched provider is finalized after it, and the row
+   * has to name the backend that really holds the bytes or the delete path will look in the wrong
+   * place and silently find nothing.
+   */
+  provider: string;
 }
 
 export async function attachUploadedAsset(
@@ -1732,6 +1741,9 @@ export async function attachUploadedAsset(
       url: input.url,
       publicId: input.publicId,
       resourceType: input.resourceType,
+      // The provider that stored THIS asset, straight off the verified upload. Never the active
+      // one — see AttachAssetInput.provider.
+      storageProvider: input.provider,
       uploadedBy: actor?.email ?? null,
     },
     tx,
@@ -1785,6 +1797,6 @@ export async function removePhoto(
     targetId: r.purchaseOrderId,
     targetLabel: r.code,
   });
-  await attachmentService.releaseAsset(att, `rental_receipt ${r.code}`);
+  await attachmentService.releaseAsset(attachmentService.refFromAttachment(att), `rental_receipt ${r.code}`);
   return getRentalReceipt(receiptId, actor);
 }

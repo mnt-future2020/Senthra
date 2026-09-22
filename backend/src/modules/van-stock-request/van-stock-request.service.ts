@@ -14,11 +14,11 @@ import * as custodyExitRepo from "#modules/purchase-order/hireCustodyExit.reposi
 import * as rentalPool from "#modules/purchase-order/rentalHire.pool.js";
 import { allocateFromHires } from "#modules/purchase-order/rentalHire.allocation.js";
 import { emitHireUpdated } from "#modules/purchase-order/rentalHire.realtime.js";
-import { getCloudinaryCreds, getCompanyTimezone } from "#modules/settings/settings.service.js";
+import { getCompanyTimezone } from "#modules/settings/settings.service.js";
 import { resolveInstantWindow, startOfDayIn } from "../../utils/filter-date.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
-import { uploadToCloudinary } from "../../lib/cloudinary.js";
+import { findActiveStorage } from "../../lib/storage/index.js";
 import { notify } from "#modules/notification/notification.service.js";
 import { emitAttentionChanged, emitToRoom, emitToUser, VAN_STOCK_REVIEWERS_ROOM } from "../../lib/realtime.js";
 import { assertWarehouseAccess, getAccessibleWarehouseIds, warehouseScopeFilter } from "../../lib/warehouse-access.js";
@@ -2440,11 +2440,15 @@ export async function availability(irmItemIds: string[], rentalItemIds: string[]
 }
 
 export async function uploadImage(image: string, kind: "attachment" | "damage"): Promise<{ url: string }> {
-  const creds = await getCloudinaryCreds();
-  if (!creds) throw badRequest("Cloudinary is not configured. Contact an administrator.");
+  const storage = await findActiveStorage();
+  if (!storage) throw badRequest("File storage is not configured. Contact an administrator.");
   const folder = kind === "damage" ? "senthra/damage-photos" : "senthra/van-stock-requests";
-  // Unique per upload: `uploadToCloudinary` overwrites on a repeated publicId, so a timestamp meant
+  // Unique per upload: the image transport overwrites on a repeated publicId, so a timestamp meant
   // two engineers photographing the same kind of evidence in the same millisecond kept one photo.
-  const { url } = await uploadToCloudinary(image, `vsr-${kind}-${randomUUID()}`, creds, folder);
+  const { url } = await storage.upload(image, `vsr-${kind}-${randomUUID()}`, {
+    folder,
+    kind: "image",
+    immutable: true,
+  });
   return { url };
 }

@@ -29,13 +29,13 @@ import * as attachmentService from "#modules/attachment/attachment.service.js";
 // The hire's movement notes, for the physical window on an on-hire row. The REPOSITORY, deliberately:
 // rental-receipt.service imports this file, so reaching for its service would make the cycle.
 import * as receiptRepo from "#modules/rental-receipt/rental-receipt.repository.js";
-import { getCloudinaryCreds, getCompanyTimezone, getRegionalSettings } from "#modules/settings/settings.service.js";
+import { getCompanyTimezone, getRegionalSettings } from "#modules/settings/settings.service.js";
 import { formatDate } from "#modules/document/document.formatter.js";
 import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import { publicLateHireDelivery } from "../../utils/hire-delivery.js";
 import { PO_ATTACHMENT_MAX_COUNT, PO_ATTACHMENT_MAX_TOTAL_BYTES } from "./purchase-order.validation.js";
 import { startOfDayIn } from "../../utils/filter-date.js";
-import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
+import { findActiveStorage } from "../../lib/storage/index.js";
 import { emitAttentionChanged, emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM } from "../../lib/realtime.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
@@ -1385,14 +1385,20 @@ export async function rejectPurchaseOrder(id: string, reason: string, actor?: Au
 // received, immune to later supplier-detail/branding changes. Fire-and-forget from send: an
 // archive failure must never fail or roll back the send (matches the email convention).
 async function archiveIssuedPdf(po: PurchaseOrderWithRelations, actor?: AuditActor): Promise<void> {
-  const creds = await getCloudinaryCreds();
-  if (!creds) {
+  const storage = await findActiveStorage();
+  if (!storage) {
     console.info(`PO ${po.code}: Cloudinary not configured — issued-PDF archive skipped.`);
     return;
   }
   const pdf = await documentService.generatePurchaseOrderPdf(po, actor?.email ?? po.sentBy);
   const dataUri = `data:application/pdf;base64,${pdf.buffer.toString("base64")}`;
-  const asset = await uploadFileToCloudinary(dataUri, randomUUID(), creds);
+  // `kind: "file"` — the resource type is derived from the MIME so the PDF is stored and delivered
+  // as an opaque `raw` asset, not misclassified as an image. A random id, so it is never rewritten.
+  const asset = await storage.upload(dataUri, randomUUID(), {
+    folder: "senthra/purchase-orders",
+    kind: "file",
+    immutable: true,
+  });
   await poRepo.addAttachment({
     purchaseOrderId: po.id,
     label: ISSUED_PO_ATTACHMENT_LABEL,
@@ -1404,6 +1410,8 @@ async function archiveIssuedPdf(po: PurchaseOrderWithRelations, actor?: AuditAct
     // removeAttachment is what protects it, not the absence of an identity.
     publicId: asset.publicId,
     resourceType: asset.resourceType,
+    // The provider that actually stored it, so a later release resolves from this row.
+    storageProvider: asset.provider,
     uploadedBy: "system",
   });
   audit.record({
@@ -1815,6 +1823,15 @@ export interface AttachAssetInput {
   url: string;
   publicId: string;
   resourceType: string;
+  /**
+   * WHERE THIS ASSET WAS ACTUALLY STORED — not where new uploads currently go.
+   *
+   * Carried from the verified upload rather than read from Settings, because the two can differ:
+   * a file signed before an administrator switched provider is finalized after it, and the row
+   * has to name the backend that really holds the bytes or the delete path will look in the wrong
+   * place and silently find nothing.
+   */
+  provider: string;
 }
 
 /**
@@ -1842,6 +1859,9 @@ export async function attachUploadedAsset(
       url: input.url,
       publicId: input.publicId,
       resourceType: input.resourceType,
+      // The provider that stored THIS asset, straight off the verified upload. Never the active
+      // one — see AttachAssetInput.provider.
+      storageProvider: input.provider,
       uploadedBy: actor?.email ?? null,
     },
     tx,
@@ -1878,7 +1898,7 @@ export async function removeAttachment(poId: string, attachmentId: string, actor
   // The PO side is where the shared-asset case actually bites: a PO converted from a PRF holds
   // COPIES of that PRF's attachment identities, and the PRF (now `converted`) still displays them.
   // releaseAsset counts the surviving references, so removing the copy here leaves the file alone.
-  await attachmentService.releaseAsset(att, `purchase_order ${po.code}`);
+  await attachmentService.releaseAsset(attachmentService.refFromAttachment(att), `purchase_order ${po.code}`);
   return getPurchaseOrder(poId, actor);
 }
 

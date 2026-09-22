@@ -14,12 +14,14 @@ import { getDisplayNamesForEmails } from "#modules/user/user.service.js";
 import { buildPurchaseOrderDocument } from "./document.builder.js";
 import { renderPurchaseOrderPdf } from "./document.renderer.js";
 import { resolveSignatureBlock } from "./document.signature.js";
-import { fetchImageBuffer, getDocumentFileName, joinAddressLines, pdfSafeImageUrl } from "./document.utils.js";
+import { fetchImageBuffer, getDocumentFileName, joinAddressLines, pdfImageUrl } from "./document.utils.js";
 import type { DocumentContext, DocumentMeta, RenderedDocument } from "./document.types.js";
 
 // A document type's own letterhead branding, where it has one. Absent = the app branding.
 interface LetterheadOverrides {
   logoUrl?: string;
+  /** The override logo's stored pdfkit-safe variant, paired with `logoUrl` above. */
+  logoPdfUrl?: string | null;
   brandColor?: string;
 }
 
@@ -35,8 +37,11 @@ async function resolveLetterhead(
     getRegionalSettings(),
     getBranding(),
   ]);
+  // The override's logo and ITS derivative move together: taking one from the override and the
+  // other from the company profile would rasterise a different image than the one being printed.
   const logoUrl = overrides.logoUrl ?? company.logoUrl;
-  const logo = await fetchImageBuffer(pdfSafeImageUrl(logoUrl));
+  const logoPdfUrl = overrides.logoUrl ? (overrides.logoPdfUrl ?? null) : company.logoPdfUrl;
+  const logo = await fetchImageBuffer(pdfImageUrl(logoUrl, logoPdfUrl));
   return {
     company: {
       legalName: company.legalName,
@@ -76,7 +81,15 @@ export async function generatePurchaseOrderPdf(
   // branding when unset. Resolved here, at the PO layer — every PO render goes through this function
   // (download, supplier email, issued archive), and no other document type sees the override.
   const poBranding = await getPurchaseOrderDocumentBranding();
-  const base = await resolveLetterhead({ logoUrl: poBranding.logoUrl, brandColor: poBranding.accentColor });
+  // `logoPdfUrl` travels WITH `logoUrl`, never separately: the reader already paired the derivative
+  // to whichever logo won (PO-specific or app), and dropping it here would send the letterhead the
+  // override logo with no derivative — silently printing the untransformed original on a provider
+  // that cannot rasterise at delivery, which is the whole failure the derivative exists to prevent.
+  const base = await resolveLetterhead({
+    logoUrl: poBranding.logoUrl,
+    logoPdfUrl: poBranding.logoPdfUrl,
+    brandColor: poBranding.accentColor,
+  });
   // ONE lookup for every person this document names — its raiser, its approver and its signer.
   const people = await getDisplayNamesForEmails([po.createdBy, po.approvedBy, po.sentBy]);
   const signature = await resolveSignatureBlock(po.sentBy, people);

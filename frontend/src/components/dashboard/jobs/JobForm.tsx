@@ -13,6 +13,7 @@ import { listIrmItems } from "@/services/irm.service";
 import { IrmItemPicker } from "@/components/dashboard/irm/IrmItemPicker";
 import { mergeIrmItems, missingIrmIds } from "@/components/dashboard/irm/irmItemPickerModel";
 import { useReferenceData } from "@/hooks/useReferenceData";
+import { useBranding } from "@/hooks/useBranding";
 import { useIrmItemsByIds } from "@/hooks/useIrmItemsByIds";
 import { useRentalItemsByIds } from "@/hooks/useRentalItemsByIds";
 import { RentalItemPicker } from "@/components/dashboard/rentals/RentalItemPicker";
@@ -135,6 +136,10 @@ function Step({ n, title, description, children }: { n: number; title: React.Rea
 }
 
 export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | null }) {
+  // Which hosts serve OUR uploads, so a stored attachment is not mistaken for a pasted link.
+  // From the PUBLIC branding payload — the two portal surfaces below cannot read Settings.
+  const { uploadHosts } = useBranding();
+
   const router = useRouter();
   const guard = useNavigationGuard();
   const { pushToast } = useDashboard();
@@ -1327,7 +1332,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                     already means "the attachments on this job". It adds no height of its own. */}
                 <div {...dropProps} className={`-m-2 space-y-2 rounded-xl p-2 ${dropRing(dragging, armed)}`}>
                   {attachments.map((a, i) => {
-                    const meta = parseJobAttachment(a);
+                    const meta = parseJobAttachment(a, uploadHosts);
                     // Only files WE uploaded render as a fixed row. A pasted link — whatever its
                     // extension — stays an editable text field, because correcting a mistyped URL
                     // must not mean deleting the row and re-entering it.

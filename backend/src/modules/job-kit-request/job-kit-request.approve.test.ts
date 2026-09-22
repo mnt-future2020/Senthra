@@ -25,7 +25,6 @@ vi.mock("#modules/engineer-transfer/engineer-transfer.repository.js", () => ({
   findSourcesByIds: vi.fn(),
 }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
-vi.mock("../../lib/cloudinary.js", () => ({ uploadToCloudinary: vi.fn() }));
 vi.mock("../../lib/realtime.js", () => ({ emitAttentionChanged: vi.fn(), emitToUser: vi.fn(), emitToRoom: vi.fn(), OFFICE_JOBS_ROOM: "office:jobs" }));
 vi.mock("./job-kit-request.repository.js", () => ({
   findById: vi.fn(),

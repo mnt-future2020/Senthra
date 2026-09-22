@@ -53,11 +53,38 @@ model Settings {
   cloudinaryApiKey    String?
   cloudinaryApiSecret String?  // never returned to the client
 
+  // --- Storage provider selection ---
+  // Which provider NEW uploads go to. NULL means "cloudinary", so an install that never
+  // touches this keeps behaving exactly as it does today.
+  //
+  // It decides NOTHING about assets that already exist. Every stored asset carries its own
+  // provider (see the `storageProvider` columns below), and finalize/delete/reaper resolve from
+  // THAT, never from here — otherwise switching provider would silently orphan every older file.
+  storageProvider String? // cloudinary | spaces
+
+  // --- DigitalOcean Spaces (S3-compatible) — UI-configurable; secret encrypted at rest ---
+  // Mirrors the Cloudinary block above, including which half is secret. Endpoint/region/bucket/
+  // CDN and the access key ID are public configuration; only the secret key is withheld.
+  spacesEndpoint    String? // e.g. https://ams3.digitaloceanspaces.com
+  spacesRegion      String? // e.g. ams3
+  spacesBucket      String?
+  spacesAccessKeyId String? // public by design, exactly like cloudinaryApiKey
+  spacesSecretKey   String? // never returned to the client — encryptSecret() at rest
+  spacesCdnUrl      String? // optional CDN origin; delivery URLs use it when set
+
   // --- Branding (all public; logo/favicon are Cloudinary URLs) ---
   brandName          String?
   brandColor         String?  // hex accent used across the app + sent emails
   logoUrl            String?
   faviconUrl         String?
+  // Rasterised variants of `logoUrl`, generated at UPLOAD time for a provider that cannot
+  // transform at delivery. NULL on Cloudinary, where the same thing is a URL parameter — so a
+  // null here means "use the original", which is today's behaviour unchanged.
+  //   ...PdfUrl   — 32-bit RGBA PNG, height-capped for pdfkit (which embeds only PNG/JPEG, and
+  //                 draws a low-bit-depth palette PNG as a scrambled strip).
+  //   ...EmailUrl — the same, sized for a mail client (Gmail/Outlook render no SVG).
+  logoPdfUrl         String?
+  logoEmailUrl       String?
   footerText         String?
   loginHeadline      String?
   loginSubtext       String?
@@ -87,6 +114,10 @@ model Settings {
   // that never sets them renders exactly as before. Never part of the public branding payload and never
   // read by the app shell or emails: changing them restyles the PO document and nothing else.
   poDocLogoUrl     String? // Cloudinary URL, written only by the branding upload (type "po_logo")
+  // The PO logo's pdfkit-safe variant. Same rule as logoPdfUrl. Follows the SAME read-time
+  // fallback the logo itself does: when poDocLogoUrl is null the document uses logoUrl, and must
+  // therefore use logoPdfUrl rather than this.
+  poDocLogoPdfUrl  String?
   poDocAccentColor String? // #RGB or #RRGGBB — pdfkit cannot parse the alpha forms brandColor accepts
 
   // --- Company profile (legal identity for official documents — PO PDF letterhead etc.) ---
@@ -868,6 +899,8 @@ model PurchaseRequestAttachment {
   // `image` and once as a `raw` asset, and Cloudinary's destroy API needs both to address one.
   publicId          String?
   resourceType      String? // "image" | "raw"
+  // Which provider holds it. NULL = "cloudinary", so every existing row is already correct.
+  storageProvider   String? // cloudinary | spaces
   uploadedBy        String?
   createdAt         DateTime @default(now())
 
@@ -1297,6 +1330,8 @@ model PurchaseOrderAttachment {
   // why removing a PO attachment must not assume it owns the asset.
   publicId        String?
   resourceType    String? // "image" | "raw"
+  // Which provider holds it. NULL = "cloudinary", so every existing row is already correct.
+  storageProvider String? // cloudinary | spaces
   uploadedBy      String?
   createdAt       DateTime @default(now())
 
@@ -1347,6 +1382,8 @@ model JobAttachment {
   url           String
   publicId      String?
   resourceType  String? // "image" | "raw"
+  // Which provider holds it. NULL = "cloudinary", so every existing row is already correct.
+  storageProvider String? // cloudinary | spaces
   // Whether the CUSTOMER may see this file on their portal. The job form already offers the
   // Customer/Internal toggle; it had nowhere to live while attachments were bare strings, so it was
   // encoded into the URL as a "#internal" fragment. A column ends that.
@@ -1471,6 +1508,8 @@ model GoodsReceiptAttachment {
   // relying on that — the next module to copy an attachment would otherwise inherit a silent bug.
   publicId       String?
   resourceType   String? // "image" | "raw"
+  // Which provider holds it. NULL = "cloudinary", so every existing row is already correct.
+  storageProvider String? // cloudinary | spaces
   uploadedBy     String?
   createdAt      DateTime @default(now())
 
@@ -1636,6 +1675,8 @@ model RentalReceiptAttachment {
   url             String
   publicId        String?
   resourceType    String? // "image" | "raw"
+  // Which provider holds it. NULL = "cloudinary", so every existing row is already correct.
+  storageProvider String? // cloudinary | spaces
   uploadedBy      String?
   createdAt       DateTime @default(now())
 
@@ -2634,6 +2675,9 @@ model User {
   // overwrites the same asset in place.)
   profileImagePublicId     String?
   profileImageResourceType String?
+  // Which provider holds the avatar object. NULL = "cloudinary" — every row written before
+  // multi-provider support, which is why no backfill is needed.
+  profileImageProvider     String? // cloudinary | spaces
   notes           String?
 
   // Personal signature — printed on documents the user issues (e.g. the Purchase Order PDF).
@@ -2644,6 +2688,16 @@ model User {
   signatureFileSize   Int?
   signatureUploadedAt DateTime?
   signatureUpdatedAt  DateTime?
+  // The signature's pdfkit-safe variant. Same rule as Settings.logoPdfUrl.
+  signaturePdfUrl     String?
+  // Which provider holds the signature object. NULL = "cloudinary".
+  //
+  // The signature is the ONE asset whose delete reference is RECONSTRUCTED rather than stored:
+  // `signatureAssetRef(userId)` rebuilds `senthra/signatures/signature-<id>` from the
+  // deterministic id, because there is no stored publicId to read. That reconstruction can
+  // rebuild the KEY but not the PROVIDER — so without this column a signature written to a
+  // second provider would be released against Cloudinary and survive forever.
+  signatureProvider   String? // cloudinary | spaces
 
   // Employment record.
   // Human staff reference, auto-generated (e.g. SNT-0007). NOT `@unique` — same reason as
@@ -2748,6 +2802,8 @@ model Customer {
   // uploads a fresh randomUUID asset rather than overwriting, so without these the old file leaked.
   logoPublicId       String?
   logoResourceType   String?
+  // Which provider holds the logo object. NULL = "cloudinary".
+  logoProvider       String? // cloudinary | spaces
   notes              String? // internal notes (never shown to the customer)
   status             String  @default("active") // active | inactive
 
@@ -3381,6 +3437,10 @@ model PendingUpload {
   // Server-minted, and the join key finalize looks up by — never a value the client chose.
   publicId     String  @unique
   resourceType String // image | raw — needed to address the asset for a destroy
+  // The provider this upload was SIGNED against. Finalize must verify the asset on that same
+  // provider: an upload in flight when an administrator switches provider would otherwise be
+  // looked for somewhere it was never written. NULL = "cloudinary".
+  storageProvider String? // cloudinary | spaces
   // Filled at FINALIZE, once the asset exists and has been measured. They are what lets a
   // `deferred-attach` purpose rebuild a full attachment row from nothing but the URL its form kept:
   // a job being created has no record to attach to yet, so the identity has to survive somewhere

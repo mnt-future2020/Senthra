@@ -1,5 +1,5 @@
-import { destroyFromCloudinary } from "../../lib/cloudinary.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
+import { getStorageFor, normalizeProviderId } from "../../lib/storage/index.js";
+import type { StorageProvider, StorageProviderId } from "../../lib/storage/index.js";
 
 import * as pendingRepo from "./upload.repository.js";
 
@@ -48,13 +48,26 @@ export async function reapAbandonedUploads(now = new Date()): Promise<ReapResult
   const result: ReapResult = { scanned: rows.length, destroyed: 0, skipped: 0, failed: 0 };
   if (rows.length === 0) return result;
 
-  const creds = await getCloudinaryCreds();
-  if (!creds) {
-    // Nothing to destroy with. Leave every row where it is — they will be reconsidered next pass, and
-    // deleting the ledger without deleting the asset would lose the only record that it exists.
-    console.error(`[upload-reaper] Cloudinary not configured — ${rows.length} abandoned uploads left in place`);
-    return { ...result, skipped: rows.length };
-  }
+  // A pass may span providers: rows signed before a switch, rows signed after, and legacy rows with
+  // no provider recorded at all. Resolving ONCE for the pass would destroy some of them through the
+  // WRONG backend — which answers "not found", counts as success, and leaves the real file behind
+  // forever with nothing reporting a problem.
+  //
+  // So there is deliberately no pass-level provider here. A single check would have to pick one
+  // provider to ask about, and picking Cloudinary would abandon a whole sweep of Spaces rows on an
+  // install where only Spaces is configured. Each row resolves its own, and an unconfigured one is
+  // skipped individually — which still leaves every row in place when NOTHING is configured, the
+  // behaviour this has always had.
+  // Resolved ONCE PER PROVIDER for the whole sweep, not once per row. `getStorageFor` reads the
+  // settings row and builds a provider every time it is called, so doing it inside the loop meant a
+  // database round trip and a fresh S3 client for every abandoned upload — a sweep over a backlog
+  // of a few hundred rows did a few hundred of each. There are exactly two providers, and neither
+  // can change while a single sweep is running.
+  const resolved = new Map<StorageProviderId, StorageProvider | null>();
+  const storageFor = async (provider: StorageProviderId): Promise<StorageProvider | null> => {
+    if (!resolved.has(provider)) resolved.set(provider, await getStorageFor({ provider }));
+    return resolved.get(provider) ?? null;
+  };
 
   for (const row of rows) {
     // Re-take the lease per row. Between the query above and this line a finalize may have started, and
@@ -64,7 +77,16 @@ export async function reapAbandonedUploads(now = new Date()): Promise<ReapResult
       continue;
     }
     try {
-      await destroyFromCloudinary(row.publicId, row.resourceType, creds);
+      const provider = normalizeProviderId(row.storageProvider);
+      const storage = await storageFor(provider);
+      if (!storage) {
+        // That row's provider is not configured. Leave the row — its lease expires and the next pass
+        // reconsiders it — rather than dropping the only record that the asset exists.
+        result.skipped++;
+        console.error(`[upload-reaper] ${provider} not configured — ${row.publicId} left in place`);
+        continue;
+      }
+      await storage.destroy({ provider, publicId: row.publicId, resourceType: row.resourceType });
       await pendingRepo.remove(row.publicId);
       result.destroyed++;
     } catch (e) {

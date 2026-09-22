@@ -6,6 +6,7 @@ import { testEmailLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   testEmailSchema,
+  testStorageSchema,
   updateSettingsSchema,
   uploadBrandingSchema,
 } from "./settings.validation.js";
@@ -27,6 +28,15 @@ router.post(
   testEmailLimiter,
   validateBody(testEmailSchema),
   settingsController.sendTestEmail,
+);
+// Same shape and same limiter as the email test: a privileged, network-touching probe that should
+// not be a way to hammer a third party from an authenticated session.
+router.post(
+  "/storage/test",
+  requirePermission("settings.manage"),
+  testEmailLimiter,
+  validateBody(testStorageSchema),
+  settingsController.testStorage,
 );
 router.post(
   "/branding/upload",

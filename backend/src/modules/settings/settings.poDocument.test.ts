@@ -4,11 +4,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // PO document branding — the purchase order PDF's OWN logo + accent colour (Settings → Purchase Orders).
 // Unset, the PDF falls back to the app branding, so an install that never configures them is unchanged.
 vi.mock("./settings.repository.js", () => ({ getOrCreate: vi.fn(), update: vi.fn() }));
-vi.mock("../../lib/cloudinary.js", () => ({ uploadToCloudinary: vi.fn() }));
+const { upload } = vi.hoisted(() => ({ upload: vi.fn() }));
+vi.mock("../../lib/storage/index.js", () => ({
+  // Cloudinary: it rasterises on delivery, so nothing is stored and the derivative columns stay null.
+  findActiveStorage: vi.fn(async () => ({ upload, transformsOnDelivery: true })),
+}));
 vi.mock("../../utils/crypto.js", () => ({ encryptSecret: (v: string) => v, decryptSecret: (v: string | null) => v }));
 
 import * as settingsRepo from "./settings.repository.js";
-import { uploadToCloudinary } from "../../lib/cloudinary.js";
+
 import {
   getBranding,
   getPurchaseOrderDocumentBranding,
@@ -30,19 +34,19 @@ beforeEach(() => {
 describe("getPurchaseOrderDocumentBranding", () => {
   it("falls back to the app logo and brand colour when nothing PO-specific is set", async () => {
     mockGet.mockResolvedValue(row({ logoUrl: "https://cdn/app.png", brandColor: "#123456" }));
-    await expect(getPurchaseOrderDocumentBranding()).resolves.toEqual({ logoUrl: "https://cdn/app.png", accentColor: "#123456" });
+    await expect(getPurchaseOrderDocumentBranding()).resolves.toEqual({ logoUrl: "https://cdn/app.png", logoPdfUrl: null, accentColor: "#123456" });
   });
 
   it("falls back to the default brand colour — and no logo — on a fresh install", async () => {
     mockGet.mockResolvedValue(row());
-    await expect(getPurchaseOrderDocumentBranding()).resolves.toEqual({ logoUrl: "", accentColor: "#7b6ef0" });
+    await expect(getPurchaseOrderDocumentBranding()).resolves.toEqual({ logoUrl: "", logoPdfUrl: null, accentColor: "#7b6ef0" });
   });
 
   it("uses the PO-specific logo and accent when they are set", async () => {
     mockGet.mockResolvedValue(
       row({ logoUrl: "https://cdn/app.png", brandColor: "#123456", poDocLogoUrl: "https://cdn/po.png", poDocAccentColor: "#0a0" }),
     );
-    await expect(getPurchaseOrderDocumentBranding()).resolves.toEqual({ logoUrl: "https://cdn/po.png", accentColor: "#0a0" });
+    await expect(getPurchaseOrderDocumentBranding()).resolves.toEqual({ logoUrl: "https://cdn/po.png", logoPdfUrl: null, accentColor: "#0a0" });
   });
 
   it("ignores a stored accent the PDF engine cannot draw", async () => {
@@ -73,10 +77,13 @@ describe("updateSettings — PO document branding", () => {
     expect(mockUpdate.mock.calls[1]![1]).toEqual({ poDocAccentColor: null });
   });
 
-  it("clears the PO logo with an empty string", async () => {
+  it("clears the PO logo with an empty string — and its stored derivative with it", async () => {
     mockGet.mockResolvedValue(row({ poDocLogoUrl: "https://cdn/po.png" }));
     await updateSettings({ poDocLogoUrl: "" });
-    expect(mockUpdate.mock.calls[0]![1]).toEqual({ poDocLogoUrl: null });
+    // The derivative describes the logo being cleared, and the PDF renderer PREFERS it over the
+    // original — so leaving it set would keep printing a logo that has just been removed. See
+    // settings.derivatives.test.ts for the full rule.
+    expect(mockUpdate.mock.calls[0]![1]).toEqual({ poDocLogoUrl: null, poDocLogoPdfUrl: null });
   });
 
   it("never touches the app's own brand colour or logo", async () => {
@@ -107,19 +114,30 @@ describe("uploadBrandingImage — the PO logo", () => {
 
   it("uploads to its OWN asset and saves only the PO logo", async () => {
     mockGet.mockResolvedValue(row(creds));
-    vi.mocked(uploadToCloudinary).mockResolvedValue({ url: "https://res.cloudinary.com/cloud/po-logo.png", publicId: "senthra/branding/po-logo", resourceType: "image" });
+    upload.mockResolvedValue({ url: "https://res.cloudinary.com/cloud/po-logo.png", publicId: "senthra/branding/po-logo", resourceType: "image", provider: "cloudinary" });
     const out = await uploadBrandingImage("po_logo", image);
-    expect(vi.mocked(uploadToCloudinary).mock.calls[0]![1]).toBe("po-logo");
-    expect(mockUpdate.mock.calls[0]![1]).toEqual({ poDocLogoUrl: "https://res.cloudinary.com/cloud/po-logo.png" });
+    expect(upload.mock.calls[0]![1]).toBe("po-logo");
+    // The derivative column is written EXPLICITLY null on this provider, not left absent: null is
+    // what the renderers read as "use the delivery transform".
+    expect(mockUpdate.mock.calls[0]![1]).toEqual({
+      poDocLogoUrl: "https://res.cloudinary.com/cloud/po-logo.png",
+      poDocLogoPdfUrl: null,
+    });
     expect(out.url).toBe("https://res.cloudinary.com/cloud/po-logo.png");
   });
 
   it("still writes the app logo for a plain logo upload", async () => {
     mockGet.mockResolvedValue(row(creds));
-    vi.mocked(uploadToCloudinary).mockResolvedValue({ url: "https://res.cloudinary.com/cloud/logo.png", publicId: "senthra/branding/logo", resourceType: "image" });
+    upload.mockResolvedValue({ url: "https://res.cloudinary.com/cloud/logo.png", publicId: "senthra/branding/logo", resourceType: "image", provider: "cloudinary" });
     await uploadBrandingImage("logo", image);
-    expect(vi.mocked(uploadToCloudinary).mock.calls[0]![1]).toBe("logo");
-    expect(mockUpdate.mock.calls[0]![1]).toEqual({ logoUrl: "https://res.cloudinary.com/cloud/logo.png" });
+    expect(upload.mock.calls[0]![1]).toBe("logo");
+    // Both of the app logo's derivative columns are written explicitly null on this provider —
+    // it rasterises on delivery, so there is nothing to store.
+    expect(mockUpdate.mock.calls[0]![1]).toEqual({
+      logoUrl: "https://res.cloudinary.com/cloud/logo.png",
+      logoPdfUrl: null,
+      logoEmailUrl: null,
+    });
   });
 });
 
@@ -142,5 +160,57 @@ describe("settings validation — PO document branding", () => {
       expect(uploadBrandingSchema.safeParse({ type, image: "data:image/png;base64,AAAA" }).success).toBe(true);
     }
     expect(uploadBrandingSchema.safeParse({ type: "po", image: "data:image/png;base64,AAAA" }).success).toBe(false);
+  });
+});
+
+// ── Derivatives are generated only where they are needed ──────────────────────────────────────
+//
+// A provider that transforms at delivery needs no stored variant, so nothing extra is uploaded and
+// the derivative columns stay null. That is not merely an optimisation: downloading and re-uploading
+// a Cloudinary logo to produce a copy of something Cloudinary already generates on demand would be
+// pure waste, and would leave a second object nothing tracks.
+describe("uploadBrandingImage — derivative generation is provider-driven", () => {
+  it("uploads ONLY the source when the provider transforms at delivery", async () => {
+    upload.mockResolvedValue({
+      url: "https://res.cloudinary.com/cloud/logo.png",
+      publicId: "senthra/branding/logo",
+      resourceType: "image",
+      provider: "cloudinary",
+    });
+
+    await uploadBrandingImage("logo", "data:image/png;base64,AAAA");
+
+    // One call: the logo. No __pdf.png, no __email.png.
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(upload.mock.calls[0]![1]).toBe("logo");
+  });
+
+  it("writes null derivatives rather than leaving the columns absent", async () => {
+    upload.mockResolvedValue({
+      url: "https://res.cloudinary.com/cloud/logo.png",
+      publicId: "senthra/branding/logo",
+      resourceType: "image",
+      provider: "cloudinary",
+    });
+
+    await uploadBrandingImage("logo", "data:image/png;base64,AAAA");
+
+    // Explicit null is what the renderers read as "use the delivery transform". An absent column
+    // would mean the same today and stop meaning it the moment a stale value survived a re-upload.
+    expect(mockUpdate.mock.calls[0]![1]).toMatchObject({ logoPdfUrl: null, logoEmailUrl: null });
+  });
+
+  it("never generates anything for the favicon, which no renderer rasterises", async () => {
+    upload.mockResolvedValue({
+      url: "https://res.cloudinary.com/cloud/favicon.png",
+      publicId: "senthra/branding/favicon",
+      resourceType: "image",
+      provider: "cloudinary",
+    });
+
+    await uploadBrandingImage("favicon", "data:image/png;base64,AAAA");
+
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(mockUpdate.mock.calls[0]![1]).toEqual({ faviconUrl: "https://res.cloudinary.com/cloud/favicon.png" });
   });
 });

@@ -23,6 +23,11 @@ export function defaultFooterText(brandName: string): string {
 // The fallback when the backend is unreachable.
 export const DEFAULT_BRANDING: Branding = {
   brandName: DEFAULT_BRAND_NAME,
+  // EMPTY when the backend is unreachable, and that is the right direction to fail in: an attachment
+  // then renders as a pasted link (editable, slightly wrong) rather than a stored one being shown as
+  // read-only against a host we could not confirm. Cloudinary is still recognised regardless — that
+  // check does not come from this list.
+  uploadHosts: [],
   brandColor: "#7b6ef0",
   logoUrl: "",
   faviconUrl: "",

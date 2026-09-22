@@ -42,6 +42,8 @@ const ASSET = {
   url: "https://res.cloudinary.com/c/raw/upload/s--x--/senthra/purchase-orders/quote.pdf",
   publicId: "senthra/purchase-orders/quote.pdf",
   resourceType: "raw",
+  // Where this asset was actually stored, carried from the verified upload — see VerifiedAsset.
+  provider: "cloudinary",
   fileName: "quote.pdf",
   fileType: "pdf",
   fileSizeBytes: 2048,
@@ -219,5 +221,38 @@ describe("preCheckFor", () => {
   // Nothing to guard before the upload — there is no record yet.
   it("has no guard for a return-url purpose", () => {
     expect(preCheckFor("job_attachment")).toBeNull();
+  });
+});
+
+// ── The stored provider reaches the row ───────────────────────────────────────────────────────
+//
+// TWO DIFFERENT THINGS, and confusing them is the bug this exists to prevent:
+//
+//   ACTIVE provider  — where a NEW upload should go. Read from Settings.
+//   STORED provider  — where THIS asset actually is. Carried on the verified upload.
+//
+// A file signed before an administrator switches provider is finalized after it, so the two can
+// legitimately disagree. The row must record the second. If it recorded the first — or recorded
+// nothing and let `null` mean Cloudinary — a Spaces-stored file would later be deleted from
+// Cloudinary, answer "not found", and survive forever with nothing reporting a problem.
+//
+// Nothing in this path reads Settings at all; the provider arrives as part of the input. These pin
+// that it is written rather than dropped.
+describe("attachTo — the verified asset's provider reaches every attach target", () => {
+  const targets = [
+    ["prf_attachment", () => vi.mocked(prfService.attachUploadedAsset)],
+    ["po_attachment", () => vi.mocked(poService.attachUploadedAsset)],
+    ["grn_attachment", () => vi.mocked(grnService.attachUploadedAsset)],
+  ] as const;
+
+  it.each(targets)("%s carries a Cloudinary provider through", async (purpose, attach) => {
+    await attachTo(purpose, "rec1", { ...ASSET, provider: "cloudinary" }, undefined, ACTOR);
+    expect(attach().mock.calls[0][1]).toMatchObject({ provider: "cloudinary" });
+  });
+
+  // THE regression case: the value that must not be flattened to null.
+  it.each(targets)("%s carries a Spaces provider through unchanged", async (purpose, attach) => {
+    await attachTo(purpose, "rec1", { ...ASSET, provider: "spaces" }, undefined, ACTOR);
+    expect(attach().mock.calls[0][1]).toMatchObject({ provider: "spaces" });
   });
 });

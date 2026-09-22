@@ -227,6 +227,72 @@ describe("generatePurchaseOrderPdf — PO document branding", () => {
     const content = pdfContent((await generatePurchaseOrderPdf(po(), null)).buffer);
     expect(content).toContain(fillOp("#00aa00"));
   });
+
+  // ── The stored pdfkit-safe derivative ────────────────────────────────────────────────────────
+  //
+  // A provider that cannot transform at delivery has the raster generated at UPLOAD time and stored
+  // beside the original, so the document must embed THAT object. These four fail the moment
+  // `logoPdfUrl` stops reaching the letterhead: the PDF silently falls back to the untransformed
+  // original, which on a flat two-colour logo is the scrambled-strip bug the derivative exists for.
+  it("embeds the stored PDF derivative instead of the original when one exists", async () => {
+    mockPoBranding.mockResolvedValue({
+      logoUrl: "https://files.example.com/senthra/branding/logo.svg",
+      logoPdfUrl: "https://files.example.com/senthra/branding/logo__pdf.png",
+      accentColor: "#7b6ef0",
+    });
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => pngResponse()));
+    await generatePurchaseOrderPdf(po(), null);
+    expect(fetchedUrls()).toEqual(["https://files.example.com/senthra/branding/logo__pdf.png"]);
+  });
+
+  // The derivative is already the finished raster, so it must arrive at pdfkit byte-for-byte as
+  // stored. This pairs the derivative with a Cloudinary-shaped original precisely because that is
+  // the one original a delivery transform WOULD rewrite — if the fallback ever won, the assertion
+  // sees the `fl_png32` URL rather than the stored one.
+  it("does not rewrite a stored derivative, and never falls back to transforming the original", async () => {
+    mockPoBranding.mockResolvedValue({
+      logoUrl: "https://res.cloudinary.com/demo/image/upload/v1/senthra/branding/logo.png",
+      logoPdfUrl: "https://files.example.com/senthra/branding/logo__pdf.png",
+      accentColor: "#7b6ef0",
+    });
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => pngResponse()));
+    await generatePurchaseOrderPdf(po(), null);
+    expect(fetchedUrls()).toEqual(["https://files.example.com/senthra/branding/logo__pdf.png"]);
+    expect(fetchedUrls().join()).not.toContain("fl_png32");
+  });
+
+  // Cloudinary stores no derivative — it rasterises on delivery instead — so a null here must keep
+  // producing exactly the transformed URL it always has.
+  it("keeps the Cloudinary delivery transform when no derivative is stored", async () => {
+    mockPoBranding.mockResolvedValue({
+      logoUrl: "https://res.cloudinary.com/demo/image/upload/v1/senthra/branding/logo.png",
+      logoPdfUrl: null,
+      accentColor: "#7b6ef0",
+    });
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => pngResponse()));
+    await generatePurchaseOrderPdf(po(), null);
+    expect(fetchedUrls()).toEqual([
+      "https://res.cloudinary.com/demo/image/upload/f_png,fl_png32,h_400,c_limit/v1/senthra/branding/logo.png",
+    ]);
+  });
+
+  // Override semantics: the PO logo and ITS derivative travel together. Pairing the app logo's
+  // derivative with the PO's original would rasterise an image that is not the one being printed.
+  it("uses the PO logo's own derivative, never the app logo's", async () => {
+    mockPoBranding.mockResolvedValue({
+      logoUrl: "https://files.example.com/senthra/branding/po-logo.svg",
+      logoPdfUrl: "https://files.example.com/senthra/branding/po-logo__pdf.png",
+      accentColor: "#0f766e",
+    });
+    (getCompanyProfile as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...company,
+      logoUrl: "https://files.example.com/senthra/branding/logo.svg",
+      logoPdfUrl: "https://files.example.com/senthra/branding/logo__pdf.png",
+    });
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => pngResponse()));
+    await generatePurchaseOrderPdf(po(), null);
+    expect(fetchedUrls()).toEqual(["https://files.example.com/senthra/branding/po-logo__pdf.png"]);
+  });
 });
 
 // ── Logo rendering — what the PDF actually paints ─────────────────────────────────────────────

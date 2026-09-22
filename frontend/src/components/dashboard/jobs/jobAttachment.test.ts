@@ -246,3 +246,81 @@ describe("upload suffix is hidden in both id shapes", () => {
     expect(parseJobAttachment(at("rams-rev-c-final-a3f91b2c-4d5e-6f70-8901-234567890abc.docx"))!.name).toBe("rams-rev-c-final.docx");
   });
 });
+
+// ── Recognising an upload on a second storage provider ────────────────────────────────────────
+//
+// `isUploaded` decides whether a row is READ-ONLY (a file we stored) or an editable free-text field
+// (a link somebody pasted). It was answered by one hostname, which was true while there was only one
+// provider — and silently wrong the moment a file lands anywhere else: an uploaded attachment would
+// render with the external-link affordance and become editable, on the office form, the engineer's
+// job page and the CUSTOMER PORTAL.
+//
+// The host list arrives from the PUBLIC branding payload rather than Settings, because two of the
+// four surfaces that render attachments belong to principals who cannot read Settings at all.
+describe("isUploaded — recognising a second provider's delivery host", () => {
+  const SPACES = "https://senthra-prod.ams3.digitaloceanspaces.com/senthra/jobs/uuid/Site_Survey.pdf";
+  const CDN = "https://files.senthra.co.uk/senthra/jobs/uuid/Site_Survey.pdf";
+  const HOSTS = ["res.cloudinary.com", "senthra-prod.ams3.digitaloceanspaces.com", "files.senthra.co.uk"];
+
+  it("classifies a Spaces URL as ours when its host is in the list", () => {
+    expect(parseJobAttachment(SPACES, HOSTS)!.isUploaded).toBe(true);
+  });
+
+  it("classifies a CDN-served URL as ours too", () => {
+    expect(parseJobAttachment(CDN, HOSTS)!.isUploaded).toBe(true);
+  });
+
+  // The argument is OPTIONAL so every existing caller keeps today's behaviour exactly. A surface
+  // that has not been given the list simply cannot recognise the newer host — which is the old
+  // behaviour, not a new bug.
+  it("does not recognise the same URL without the host list", () => {
+    expect(parseJobAttachment(SPACES)!.isUploaded).toBe(false);
+  });
+
+  // The whole point of matching on HOST rather than on shape: a pasted link must stay editable.
+  it("still treats a genuinely pasted link as not ours, even with the list supplied", () => {
+    expect(parseJobAttachment("https://example.com/file.pdf", HOSTS)!.isUploaded).toBe(false);
+    expect(parseJobAttachment("https://sharepoint.example.com/spec.pdf", HOSTS)!.isUploaded).toBe(false);
+  });
+
+  // A host list is not a substring rule. `evil-digitaloceanspaces.com.attacker.test` must not pass
+  // because it happens to contain a real host's characters.
+  it("matches the whole hostname, never a substring of one", () => {
+    expect(parseJobAttachment("https://notsenthra-prod.ams3.digitaloceanspaces.com.evil.test/x.pdf", HOSTS)!.isUploaded).toBe(false);
+    expect(parseJobAttachment("https://files.senthra.co.uk.evil.test/x.pdf", HOSTS)!.isUploaded).toBe(false);
+  });
+
+  it("is case-insensitive about the host, as hostnames are", () => {
+    expect(parseJobAttachment(SPACES.replace("ams3", "AMS3"), HOSTS)!.isUploaded).toBe(true);
+  });
+
+  it("keeps recognising Cloudinary whether or not the list mentions it", () => {
+    expect(parseJobAttachment(UPLOAD, HOSTS)!.isUploaded).toBe(true);
+    expect(parseJobAttachment(UPLOAD, ["only.spaces.example"])!.isUploaded).toBe(true);
+    expect(parseJobAttachment(UPLOAD, [])!.isUploaded).toBe(true);
+  });
+
+  it("survives an empty or malformed entry in the list", () => {
+    expect(parseJobAttachment(SPACES, ["", "   ", "senthra-prod.ams3.digitaloceanspaces.com"])!.isUploaded).toBe(true);
+    expect(parseJobAttachment("https://example.com/f.pdf", ["", "  "])!.isUploaded).toBe(false);
+  });
+
+  // Spaces keys keep their real extension, so nothing new is needed to classify the file ITSELF —
+  // and deliberately no Spaces path heuristic is added. The existing extension reading does it.
+  it("classifies type from the extension, with no provider-specific path rule", () => {
+    const pdf = parseJobAttachment(SPACES, HOSTS)!;
+    expect(pdf.isPdf).toBe(true);
+    expect(pdf.isImg).toBe(false);
+
+    const png = parseJobAttachment("https://senthra-prod.ams3.digitaloceanspaces.com/senthra/jobs/site.png", HOSTS)!;
+    expect(png.isImg).toBe(true);
+    expect(png.isPdf).toBe(false);
+  });
+
+  // The Cloudinary fallbacks are what classify a delivery URL whose path carries no usable
+  // extension. They must survive untouched.
+  it("keeps the Cloudinary /image/upload/ and /raw/upload/ fallbacks", () => {
+    expect(parseJobAttachment("https://res.cloudinary.com/d/image/upload/v1/x", HOSTS)!.isImg).toBe(true);
+    expect(parseJobAttachment("https://res.cloudinary.com/d/raw/upload/v1/x.pdf", HOSTS)!.isPdf).toBe(true);
+  });
+});

@@ -1,10 +1,18 @@
-import { destroyFromCloudinary } from "../../lib/cloudinary.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
+import { getStorageFor, normalizeProviderId } from "../../lib/storage/index.js";
 
 import * as attachmentRepo from "./attachment.repository.js";
 
-/** The identity as it comes off an attachment row — either half may be null on a legacy row. */
+/**
+ * The identity as it comes off an attachment row.
+ *
+ * `publicId`/`resourceType` may be null on a legacy row written before identity was persisted —
+ * that pair being incomplete is what makes an asset unaddressable, and the release path skips it.
+ *
+ * `provider` is different: null is a VALID, complete value meaning Cloudinary, because that is what
+ * every row written before multi-provider support is. It is never a reason to skip.
+ */
 export interface AssetRef {
+  provider: string | null;
   publicId: string | null;
   resourceType: string | null;
 }
@@ -47,8 +55,23 @@ export interface AssetRef {
  * @param ref     identity read off the row BEFORE it was deleted
  * @param context short label for the log line, e.g. `purchase_order PO-0042`
  */
+/**
+ * Build a release reference from an attachment row.
+ *
+ * The five attachment tables all name the column `storageProvider`; `AssetRef` calls it `provider`.
+ * One mapping in one place, so a call site cannot quietly drop the provider and fall back to the
+ * active one — which would look identical until somebody switched provider.
+ */
+export function refFromAttachment(row: {
+  storageProvider: string | null;
+  publicId: string | null;
+  resourceType: string | null;
+}): AssetRef {
+  return { provider: row.storageProvider, publicId: row.publicId, resourceType: row.resourceType };
+}
+
 export async function releaseAsset(ref: AssetRef, context: string): Promise<void> {
-  const { publicId, resourceType } = ref;
+  const { provider, publicId, resourceType } = ref;
 
   // A row written before identity was persisted. We know the URL but not the pair that addresses
   // the asset, and deriving it by parsing the URL is exactly the guess that could destroy the
@@ -59,16 +82,24 @@ export async function releaseAsset(ref: AssetRef, context: string): Promise<void
   }
 
   try {
-    const refs = await attachmentRepo.countRefs(resourceType, publicId);
+    const refs = await attachmentRepo.countRefs(provider, resourceType, publicId);
     if (refs > 0) return; // still referenced — the shared-asset case, and not an error
 
-    const creds = await getCloudinaryCreds();
-    if (!creds) {
-      console.error(`[attachment] Cloudinary not configured, asset ${publicId} left in place (${context})`);
+    // THE INVARIANT OF THIS WHOLE TASK: the provider comes off the ROW, never from whichever
+    // provider Settings currently selects. An administrator switching provider must not change
+    // where an existing file is looked for — do that and every older asset silently stops being
+    // deletable, with nothing erroring to say so.
+    // `normalizeProviderId` is the ONE place a stored string becomes a provider id, and it reads
+    // null/missing/unrecognised as Cloudinary — the value every legacy row carries.
+    const storage = await getStorageFor({ provider: normalizeProviderId(provider) });
+    if (!storage) {
+      console.error(
+        `[attachment] ${provider ?? "cloudinary"} not configured, asset ${publicId} left in place (${context})`,
+      );
       return;
     }
 
-    await destroyFromCloudinary(publicId, resourceType, creds);
+    await storage.destroy({ provider: normalizeProviderId(provider), publicId, resourceType });
   } catch (e) {
     console.error(
       `[attachment] cleanup failed for ${resourceType}/${publicId} (${context}):`,
