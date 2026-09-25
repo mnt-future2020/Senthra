@@ -44,7 +44,10 @@ const seed = readFileSync(join(SRC, "db", "seed.ts"), "utf8");
 
 const stripLineComments = (s: string) =>
   s
-    .split("\n")
+    // /\r?\n/, not "\n": a CRLF line keeps its "\r", and `.` cannot match "\r", so the
+    // `//…$` pattern below would never reach the line's end and would leave the comment in
+    // as if it were code.
+    .split(/\r?\n/)
     .map((l) => l.replace(/\/\/.*$/, ""))
     .join("\n");
 
@@ -57,7 +60,7 @@ function bundle(name: string): string[] {
 
 /** The literal SEED_ROLES row for a role key. */
 function roleRow(key: string): string {
-  const line = seed.split("\n").find((l) => l.includes(`key: "${key}"`) && l.includes("permissions:"));
+  const line = seed.split(/\r?\n/).find((l) => l.includes(`key: "${key}"`) && l.includes("permissions:"));
   if (!line) throw new Error(`no SEED_ROLES row for ${key}`);
   return line;
 }

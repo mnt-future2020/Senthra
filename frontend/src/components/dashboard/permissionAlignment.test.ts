@@ -17,7 +17,10 @@ const SRC = join(process.cwd(), "src");
 const stripComments = (s: string) =>
   s
     .replace(/\/\*[\s\S]*?\*\//g, "")
-    .split("\n")
+    // /\r?\n/, not "\n": a CRLF line keeps its "\r", and `.` cannot match "\r", so the
+    // `//…$` pattern below would never reach the line's end and would leave the comment in
+    // as if it were code.
+    .split(/\r?\n/)
     .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
     .join("\n");
 const read = (rel: string) => stripComments(readFileSync(join(SRC, rel), "utf8"));
