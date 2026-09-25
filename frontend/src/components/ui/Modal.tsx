@@ -23,6 +23,7 @@ export function Modal({
   footer,
   size = "lg",
   scrollBody = false,
+  busy = false,
 }: {
   open: boolean;
   title: string;
@@ -36,6 +37,16 @@ export function Modal({
   // portaled) dropdown rendered inside it — so only pass this on modals whose controls portal their
   // menus (the shared Select) or use inline lists, never ones containing e.g. StockItemPicker.
   scrollBody?: boolean;
+  /**
+   * While true, EVERY way out is locked — Escape, the backdrop, and the header X, which is rendered
+   * disabled so it no longer looks clickable. The same rule ConfirmDialog applies to its own action.
+   *
+   * Callers used to approximate this with `onClose={busy ? () => {} : onClose}`. That silenced the
+   * close but left the header X enabled and hoverable beside a footer Cancel that was visibly
+   * disabled — so it looked broken, and gave no hint why nothing happened. Optional and false by
+   * default: every existing caller behaves exactly as before.
+   */
+  busy?: boolean;
 }) {
   // The page behind a dialog must not scroll — see scrollLock.ts. Above `sm` the document is not
   // scrollable at all, so this is a no-op there.
@@ -45,9 +56,13 @@ export function Modal({
   // pass a changing onClose (e.g. `busy ? noop : onClose`), and re-running the effect
   // would otherwise clobber the captured trigger element and break focus restoration.
   const onCloseRef = React.useRef(onClose);
+  // Read LIVE by the Escape listener, for the same reason as onClose: the focus effect depends only
+  // on `open`, so capturing `busy` there would freeze whatever it was when the dialog opened.
+  const busyRef = React.useRef(busy);
   React.useEffect(() => {
     onCloseRef.current = onClose;
-  }, [onClose]);
+    busyRef.current = busy;
+  }, [onClose, busy]);
   const titleId = React.useId();
   const subtitleId = React.useId();
 
@@ -65,7 +80,7 @@ export function Modal({
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        onCloseRef.current();
+        if (!busyRef.current) onCloseRef.current();
         return;
       }
       if (e.key !== "Tab" || !panel) return;
@@ -106,7 +121,7 @@ export function Modal({
   return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 sm:items-center"
-      onClick={onClose}
+      onClick={busy ? undefined : onClose}
     >
       <div
         ref={panelRef}
@@ -141,7 +156,8 @@ export function Modal({
           <button
             type="button"
             onClick={onClose}
-            className="shrink-0 rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)]"
+            disabled={busy}
+            className="shrink-0 rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)] disabled:pointer-events-none disabled:opacity-60"
             aria-label="Close"
           >
             <X className="h-4.5 w-4.5" />
