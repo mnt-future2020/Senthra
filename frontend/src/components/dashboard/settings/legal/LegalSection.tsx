@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Copy, Eye, FileText, Loader2, RotateCcw, Send, X } from "lucide-react";
+import { Copy, Eye, FileText, Loader2, RotateCcw, Send } from "lucide-react";
 
 import * as policyService from "@/services/policy.service";
 import { useAuth } from "@/hooks/useAuth";
@@ -9,10 +9,119 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { SettingsCard } from "@/components/dashboard/settings/ui/SettingsCard";
 import { ReadOnlyNotice } from "@/components/dashboard/settings/ui/ReadOnlyNotice";
 import { PolicyBlocks } from "@/components/policy/PolicyBlocks";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { Modal } from "@/components/ui/Modal";
 import { Notice } from "@/components/ui/Notice";
+import { Skeleton } from "@/components/ui/Skeleton";
 import { inputCls, hintCls, primaryBtn, secondaryBtn } from "@/components/ui/styles";
 import type { AdminPolicy, PolicyBlock, PublishedVersionDetail } from "@/types/policy";
 import type { Msg } from "@/components/ui/types";
+
+/**
+ * The two cards this section ALWAYS renders, loaded or not.
+ *
+ * Declared once because both branches below use them. Their titles and descriptions are fixed
+ * copy — nothing here depends on the request — which is the whole reason the loading state can show
+ * the real thing rather than a grey rectangle where a heading will eventually be.
+ *
+ * Preview and Previous versions are deliberately absent: the first exists only once the user asks
+ * for a preview, the second only once a version has been superseded. Neither is knowable while the
+ * request is in flight, and a skeleton for a card that never arrives is a worse lie than no
+ * skeleton at all.
+ */
+const ALWAYS_SHOWN_CARDS = {
+  published: {
+    title: "Published policy",
+    desc: "What the public privacy notice shows today. Published versions are permanent and cannot be edited.",
+    icon: FileText,
+  },
+  draft: {
+    title: "Draft",
+    desc: "The working copy. Saving it never changes the published policy — only Publish does that.",
+    icon: FileText,
+  },
+} as const;
+
+/**
+ * The shape of this screen, before its content is known.
+ *
+ * Mirrors the real layout block for block — the status line, the tall draft textarea, the hint under
+ * it, the two buttons — because a skeleton that does not match what replaces it is just a slower
+ * spinner: the page still jumps, it simply jumps later.
+ *
+ * This replaced `if (loading) return <spinner>`, which collapsed all four cards into one line of
+ * text and left the screen empty until the request landed.
+ */
+function LegalSkeleton({ canEdit, canPublish }: { canEdit: boolean; canPublish: boolean }) {
+  return (
+    /* A skeleton is SILENT — it has no text for a screen reader to read. The spinner this replaced
+       carried the visible words "Loading policy…", so swapping one for the other removed the only
+       announcement this screen had and left a non-sighted user facing two apparently empty cards.
+
+       Two attributes on two elements, and the sentence is the busy container's SIBLING, not its
+       child:
+
+         aria-busy   on the cards — the content still arriving.
+         role=status on the sentence — a polite live region holding nothing but the words.
+
+       `aria-busy` marks an element AND ITS WHOLE SUBTREE as mid-update, and screen readers that
+       honour it (JAWS especially) hold back announcements anywhere inside. So the sentence must not
+       be inside it. It took two attempts to get this right: first both attributes were on one
+       element, which cancels them outright; then the sentence moved to its own element but stayed a
+       child, which is still inside the busy subtree. Only a sibling is outside it.
+
+       Where a screen reader does not announce a region that arrives with its text already in it,
+       the sentence is still in the page, so moving through the section reads it out. */
+    <div>
+      <span role="status" className="sr-only">
+        Loading the privacy policy…
+      </span>
+      <div className="space-y-6" aria-busy="true">
+        <SettingsCard {...ALWAYS_SHOWN_CARDS.published}>
+          {/* Sized for the PUBLISHED state: a version line and its timestamp.
+            
+              The card has a second, taller shape — the bordered "No policy published yet" strip,
+              around 40px more — and no skeleton can match both, because which one renders is the very
+              thing the request answers. Published wins because it is the steady state: once a policy
+              is live every subsequent load shows it, while the unpublished strip belongs to a screen
+              an install passes through once before launch. */}
+          <div className="space-y-3">
+            <Skeleton className="h-5 w-48" />
+            <Skeleton className="h-3.5 w-72 max-w-full" />
+          </div>
+        </SettingsCard>
+
+        <SettingsCard {...ALWAYS_SHOWN_CARDS.draft}>
+          {/* Rendered here too, because `canEdit` comes from the permission hook rather than the
+              request — it is known before the first paint. Omitting it meant a read-only viewer
+              watched a bordered banner appear on arrival and shove the entire draft card down, which
+              is the exact jump this skeleton exists to prevent. */}
+          {!canEdit && <ReadOnlyNotice />}
+          <div className="space-y-3">
+            {/* Same min-height as the real textarea, so the page below it does not move. */}
+            <Skeleton className="min-h-[22rem] w-full" />
+            <Skeleton className="h-3.5 w-full max-w-2xl" />
+            <Skeleton className="h-3.5 w-64 max-w-full" />
+            {/* The buttons this viewer will actually get. Preview is everyone's; Save needs edit;
+                Publish needs publish. All three are decided by permission, which is known before the
+                request — so drawing a fixed two made one placeholder vanish for a view-only user and
+                one appear for someone who can do both. (Discard is the exception: it depends on
+                whether the draft differs from the live policy, which is exactly what is loading.) */}
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <Skeleton className="h-9 w-24" />
+              {canEdit && <Skeleton className="h-9 w-28" />}
+              {canPublish && <Skeleton className="h-9 w-24" />}
+            </div>
+            {/* The real card explains to an editor who cannot publish why there is no Publish button.
+                Also permission-driven, so also known in advance; leaving it out pushed the page down
+                for that role the moment the data arrived. */}
+            {canEdit && !canPublish && <Skeleton className="h-3.5 w-full max-w-xl" />}
+          </div>
+        </SettingsCard>
+      </div>
+    </div>
+  );
+}
 
 /**
  * Privacy-policy management: edit the draft, preview it, publish it.
@@ -42,6 +151,39 @@ export function LegalSection() {
   const [preview, setPreview] = React.useState<PolicyBlock[] | null>(null);
   // Errors only — a failure stays until it is fixed; a success is a toast.
   const [msg, setMsg] = React.useState<Msg>(null);
+  /**
+   * The version viewer's OWN error line. The page-level notice above sits behind the viewer's
+   * backdrop, on a page whose scroll is locked while it is open, so an error sent there during a
+   * copy was invisible: the button re-enabled and nothing else happened.
+   */
+  const [viewerMsg, setViewerMsg] = React.useState<Msg>(null);
+  /**
+   * Which "View" request the viewer is currently waiting on. Every open, and every close, takes a
+   * new number; a response only lands if its number is still the current one. Without it, closing
+   * the viewer during loading reopened it the moment the response arrived, and a slow earlier
+   * version could replace one requested after it.
+   */
+  const viewRequest = React.useRef(0);
+
+  const draftRef = React.useRef<HTMLTextAreaElement>(null);
+  const publishedRef = React.useRef<HTMLDivElement>(null);
+  /**
+   * Somewhere to put focus once the next render has committed.
+   *
+   * A dialog hands focus back to the button that opened it. After a successful Discard that button
+   * has been removed, and after a successful Publish it is disabled — so focus fell to the top of
+   * the document and a keyboard or screen-reader user lost their place. The handlers name where it
+   * should go instead; this runs it after the DOM it points at exists.
+   *
+   * Runs after the dialog's own clean-up, because React runs every effect clean-up in a commit
+   * before any effect body — so this is the last word, not a race.
+   */
+  const afterCommit = React.useRef<(() => void) | null>(null);
+  React.useEffect(() => {
+    const run = afterCommit.current;
+    afterCommit.current = null;
+    run?.();
+  });
 
   // Initial load. Inline async IIFE with empty deps — the same shape every other settings section
   // uses, and the one the React-Compiler lint rule accepts (a hoisted callback invoked from the
@@ -105,6 +247,8 @@ export function LegalSection() {
       setDraft(updated.draftBody);
       setPreview(null);
       setDiscardOpen(false);
+      // The draft is what just changed — and discarding needs `policy.edit`, so it is editable.
+      afterCommit.current = () => draftRef.current?.focus();
       pushToast("Draft discarded. The published policy is unchanged.", "success");
     } catch (e) {
       setDiscardOpen(false);
@@ -137,17 +281,19 @@ export function LegalSection() {
     if (!policy || !viewing?.detail) return;
     setCopying(true);
     setMsg(null);
+    setViewerMsg(null);
     try {
       const updated = await policyService.saveDraft(viewing.detail.body, policy.draftRevision);
       setPolicy(updated);
       setDraft(updated.draftBody);
       setPreview(null);
       const from = viewing.version;
-      setViewing(null);
+      closeViewer();
       // Says what happened AND what has not: publishing stays a separate, deliberate act.
       pushToast(`Draft now holds version ${from}. Review it, then publish to make it live.`, "success");
     } catch (e) {
-      setMsg({ type: "error", text: e instanceof Error ? e.message : "Could not copy that version into the draft." });
+      // Into the viewer, which is still open and is where the user is looking.
+      setViewerMsg({ type: "error", text: e instanceof Error ? e.message : "Could not copy that version into the draft." });
     } finally {
       setCopying(false);
     }
@@ -155,13 +301,26 @@ export function LegalSection() {
 
   /** Fetch one historical body on demand — never shipped with the history list. */
   const viewVersion = async (id: string, version: number) => {
+    const ticket = ++viewRequest.current;
+    setViewerMsg(null);
     setViewing({ version, detail: null });
     try {
-      setViewing({ version, detail: await policyService.getPublishedVersion(id) });
+      const detail = await policyService.getPublishedVersion(id);
+      // Closed, or another version asked for, while this was in flight: the user has moved on.
+      if (ticket !== viewRequest.current) return;
+      setViewing({ version, detail });
     } catch (e) {
+      if (ticket !== viewRequest.current) return;
       setViewing(null);
       setMsg({ type: "error", text: e instanceof Error ? e.message : "Could not load that version." });
     }
+  };
+
+  /** The ONE way the viewer closes — Escape, backdrop, X, Close and a finished copy all use it. */
+  const closeViewer = () => {
+    viewRequest.current += 1; // anything still loading is now stale
+    setViewing(null);
+    setViewerMsg(null);
   };
 
   const runPreview = async () => {
@@ -182,6 +341,9 @@ export function LegalSection() {
       setPolicy(updated);
       setDraft(updated.draftBody);
       setConfirmOpen(false);
+      // The new live version — not the draft: Publish needs only `policy.publish`, and for someone
+      // without `policy.edit` the draft is disabled and cannot take focus at all.
+      afterCommit.current = () => publishedRef.current?.focus();
       pushToast(`Published version ${updated.published?.version}.`, "success");
     } catch (e) {
       setConfirmOpen(false);
@@ -191,13 +353,7 @@ export function LegalSection() {
     }
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center gap-2 p-6 text-sm text-[var(--muted)]">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading policy…
-      </div>
-    );
-  }
+  if (loading) return <LegalSkeleton canEdit={canEdit} canPublish={canPublish} />;
 
   const published = policy?.published ?? null;
 
@@ -205,13 +361,25 @@ export function LegalSection() {
     <div className="space-y-6">
       <Notice msg={msg} />
 
-      <SettingsCard
-        title="Published policy"
-        desc="What the public privacy notice shows today. Published versions are permanent and cannot be edited."
-        icon={FileText}
-      >
+      <SettingsCard {...ALWAYS_SHOWN_CARDS.published}>
         {published ? (
-          <div className="space-y-3">
+          /* Focusable from script only (tabIndex -1): where focus goes after a publish, so a
+             keyboard user lands on the version they just made live. Not a tab stop.
+
+             The ring is the app's own custom-focus style — `outline-2 outline-offset-2` in the
+             accent colour, the same classes RoleForm and PurchaseRequestDetail use — shown only for
+             keyboard users (`focus-visible`), never after a mouse click.
+
+             `p-2 -m-2` is what lets it match. Those other rings sit around PADDED buttons, so they
+             clear the text by the button's own padding. This block has none, and the browser's
+             default ring was drawn hard against the letters, square-cornered, with the second line
+             touching its bottom edge. The padding gives the ring room; the equal negative margin
+             cancels it, so the text itself does not move by a pixel. */
+          <div
+            ref={publishedRef}
+            tabIndex={-1}
+            className="-m-2 space-y-3 rounded-lg p-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+          >
             <p className="text-sm text-[var(--ink)]">
               <span className="font-bold">Version {published.version}</span>
               {policy?.hasUnpublishedChanges && (
@@ -243,14 +411,11 @@ export function LegalSection() {
         )}
       </SettingsCard>
 
-      <SettingsCard
-        title="Draft"
-        desc="The working copy. Saving it never changes the published policy — only Publish does that."
-        icon={FileText}
-      >
+      <SettingsCard {...ALWAYS_SHOWN_CARDS.draft}>
         {!canEdit && <ReadOnlyNotice />}
         <div className="space-y-3">
           <textarea
+            ref={draftRef}
             className={`${inputCls} min-h-[22rem] font-mono text-xs leading-relaxed`}
             value={draft}
             onChange={(e) => {
@@ -405,86 +570,83 @@ export function LegalSection() {
         </SettingsCard>
       )}
 
-      {/* Discard confirm. A confirm because it throws away work that is not recoverable, even though
-          it cannot touch anything public — the copy says so plainly so the risk is not overstated. */}
-      {discardOpen && policy && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div
-            className="w-full max-w-md border border-[var(--border)] bg-[var(--surface)] p-5 shadow-lg"
-            style={{ borderRadius: "var(--radius)" }}
-          >
-            <h3 className="text-sm font-extrabold text-[var(--ink)]">Discard draft changes?</h3>
-            <p className="mt-2 text-xs leading-relaxed text-[var(--muted)]">
+      {/* THE THREE DIALOGS ON THIS SCREEN USE THE APP'S OWN — ConfirmDialog and Modal.
+
+          They were hand-built overlays: a fixed <div> with a panel in it. They looked like dialogs
+          and were not ones. No role="dialog", so a screen reader was never told one had opened. No
+          Escape. No focus management, so focus stayed on the page button BEHIND the overlay and Tab
+          walked out through controls nobody could see. And Cancel stayed live while the action ran,
+          so it could "cancel" a publish that was already minting a permanent version.
+
+          The shared components already solve every one of those, and every other dialog in the app
+          inherits the fixes from them. Hand-rolling a third copy here is how a screen ends up the
+          one place those fixes never reached.
+
+          Discard is `danger`: it throws away draft work that cannot be recovered. Publish is NOT —
+          it is permanent, but it is the action this screen exists for, and painting the intended
+          outcome red would tell people it is the wrong thing to do. */}
+      <ConfirmDialog
+        open={discardOpen && policy !== null}
+        danger
+        busy={discarding}
+        title="Discard draft changes?"
+        confirmLabel={discarding ? "Discarding…" : "Discard draft"}
+        message={
+          <>
+            {/* A confirm because the work is unrecoverable, even though nothing public is touched —
+                so the copy says both, and the risk is neither hidden nor overstated. */}
+            <p>
               The draft will be replaced with the currently published policy
-              {policy.published ? ` (version ${policy.published.version})` : ""}. Anything written since
+              {policy?.published ? ` (version ${policy.published.version})` : ""}. Anything written since
               then is lost.
             </p>
-            <p className="mt-2 text-xs leading-relaxed text-[var(--muted)]">
-              The published policy does not change, and no new version is created.
-            </p>
-            <div className="mt-4 flex justify-end gap-2">
-              <button type="button" onClick={() => setDiscardOpen(false)} className={secondaryBtn}>
-                Cancel
-              </button>
-              <button type="button" onClick={discard} disabled={discarding} className={primaryBtn}>
-                {discarding ? "Discarding…" : "Discard draft"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+            <p className="mt-2">The published policy does not change, and no new version is created.</p>
+          </>
+        }
+        onConfirm={() => void discard()}
+        onClose={() => setDiscardOpen(false)}
+      />
 
       {/* A published version, READ ONLY.
           
           Rendered through the same PolicyBlocks the public page uses, so what is shown is what was
           served. No editor, no save, no restore — the only controls are Close, because the entire
           value of an immutable record is that looking at it cannot change it. */}
-      {viewing && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center">
-          <div
-            className="my-8 flex max-h-[calc(100dvh-4rem)] w-full max-w-2xl flex-col overflow-hidden border border-[var(--border)] bg-[var(--surface)] shadow-lg"
-            style={{ borderRadius: "var(--radius)" }}
-          >
-            <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--border-2)] p-5">
-              <div className="min-w-0">
-                <h3 className="text-sm font-extrabold text-[var(--ink)]">
-                  Version {viewing.version}
-                  <span className="ml-2 rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[var(--muted)]">
-                    Read only
-                  </span>
-                </h3>
-                {viewing.detail && (
-                  <p className="mt-0.5 text-xs text-[var(--muted)]">
-                    Published {new Date(viewing.detail.publishedAt).toLocaleString("en-GB")}
-                    {viewing.detail.publishedBy ? ` by ${viewing.detail.publishedBy}` : ""}
-                    {viewing.detail.isCurrent ? " · currently live" : " · superseded"}
-                  </p>
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={() => setViewing(null)}
-                aria-label="Close"
-                className="shrink-0 rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)]"
-              >
-                <X className="h-4.5 w-4.5" />
-              </button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto p-5">
-              {viewing.detail ? (
-                <PolicyBlocks blocks={viewing.detail.blocks} />
-              ) : (
-                <p className="flex items-center gap-2 py-8 text-sm text-[var(--muted)]">
-                  <Loader2 className="h-4 w-4 animate-spin" /> Loading version…
-                </p>
-              )}
-            </div>
-            {/* The viewer itself stays READ ONLY — this writes the DRAFT, never this version.
-                Labelled for what it does: not "Restore", not "Make live", not "Revert", none of
-                which would be true. Requires `policy.edit`; publishing remains separate and still
-                needs `policy.publish`. */}
-            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-[var(--border-2)] p-5">
-              {canEdit && viewing.detail && (
+      {/* Modal rather than ConfirmDialog: this is a document to READ, not a question to answer.
+          `scrollBody` keeps the header and footer fixed while a long policy scrolls between them,
+          which is the layout the hand-built version drew for itself.
+
+          "Read only" moves from a pill beside the title into the subtitle, because Modal's title
+          is plain text. It is still the first thing under the heading, and still always visible.
+
+          `busy` locks every way out while Copy to draft runs — Escape, backdrop AND the header X,
+          which Modal now renders disabled. The older `onClose={busy ? () => {} : onClose}` shape
+          left that X enabled and silently inert beside a visibly disabled Close. */}
+      <Modal
+        open={viewing !== null}
+        title={viewing ? `Version ${viewing.version}` : ""}
+        subtitle={
+          viewing?.detail
+            ? `Read only · Published ${new Date(viewing.detail.publishedAt).toLocaleString("en-GB")}` +
+              (viewing.detail.publishedBy ? ` by ${viewing.detail.publishedBy}` : "") +
+              (viewing.detail.isCurrent ? " · currently live" : " · superseded")
+            : "Read only"
+        }
+        onClose={closeViewer}
+        busy={copying}
+        scrollBody
+        footer={
+          /* The error sits in the FOOTER, directly above the button that caused it. The footer stays
+             fixed while the body scrolls, so it is visible however far down the policy the user
+             has read — the top of the body would not be. */
+          <div className="flex w-full flex-col gap-3">
+            <Notice msg={viewerMsg} />
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {/* The viewer itself stays READ ONLY — this writes the DRAFT, never this version.
+                  Labelled for what it does: not "Restore", not "Make live", not "Revert", none of
+                  which would be true. Requires `policy.edit`; publishing remains separate and
+                  still needs `policy.publish`. */}
+              {canEdit && viewing?.detail && (
                 <button
                   type="button"
                   onClick={copyToDraft}
@@ -496,44 +658,45 @@ export function LegalSection() {
                   {copying ? "Copying…" : "Copy to draft"}
                 </button>
               )}
-              <button type="button" onClick={() => setViewing(null)} className={primaryBtn}>
+              <button type="button" onClick={closeViewer} disabled={copying} className={primaryBtn}>
                 Close
               </button>
             </div>
           </div>
-        </div>
-      )}
+        }
+      >
+        {viewing?.detail ? (
+          <PolicyBlocks blocks={viewing.detail.blocks} />
+        ) : (
+          <p className="flex items-center gap-2 py-8 text-sm text-[var(--muted)]">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading version…
+          </p>
+        )}
+      </Modal>
 
-      {confirmOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div
-            className="w-full max-w-md border border-[var(--border)] bg-[var(--surface)] p-5 shadow-lg"
-            style={{ borderRadius: "var(--radius)" }}
-          >
-            <h3 className="text-sm font-extrabold text-[var(--ink)]">Publish this policy?</h3>
-            <p className="mt-2 text-xs leading-relaxed text-[var(--muted)]">
+      {/* `busy` locks the dialog for the length of the request: Escape, the backdrop and Cancel
+          all stop working. Once a permanent version is being minted there is nothing left to
+          cancel — closing would only hide the outcome and invite a second click on Publish. */}
+      <ConfirmDialog
+        open={confirmOpen}
+        busy={publishing}
+        title="Publish this policy?"
+        confirmLabel={publishing ? "Publishing…" : "Publish"}
+        message={
+          <>
+            <p>
               This saves a permanent version {(published?.version ?? 0) + 1} and makes it the policy
               shown at <code>/privacy</code>. Published versions cannot be edited or deleted.
             </p>
-            <p className="mt-2 text-xs leading-relaxed text-[var(--muted)]">
+            <p className="mt-2">
               The page stays hidden from search engines and unlinked from the sign-in screen until
               those are switched on separately.
             </p>
-            <div className="mt-4 flex justify-end gap-2">
-              {/* Same fix as Preview: primaryBtn's `text-white` wins on CSS source order, so
-                  overriding it in the class string left white text on a near-white surface. Worse
-                  here than there — this is the CANCEL on an irreversible publish, so the way out of
-                  the dialog was the control you could not see. */}
-              <button type="button" onClick={() => setConfirmOpen(false)} className={secondaryBtn}>
-                Cancel
-              </button>
-              <button type="button" onClick={publish} disabled={publishing} className={primaryBtn}>
-                {publishing ? "Publishing…" : "Publish"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+          </>
+        }
+        onConfirm={() => void publish()}
+        onClose={() => setConfirmOpen(false)}
+      />
     </div>
   );
 }
