@@ -25,7 +25,10 @@ const FORMS = join(process.cwd(), "src", "components", "dashboard");
 const stripComments = (s: string) =>
   s
     .replace(/\/\*[\s\S]*?\*\//g, "")
-    .split("\n")
+    // /\r?\n/, not "\n": a CRLF line keeps its "\r", and `.` cannot match "\r", so the
+    // `//…$` pattern below would never reach the line's end and would leave the comment in
+    // as if it were code.
+    .split(/\r?\n/)
     .map((l) => l.replace(/\/\/.*$/, ""))
     .join("\n");
 
@@ -33,7 +36,7 @@ const read = (rel: string) => stripComments(readFileSync(join(FORMS, rel), "utf8
 
 /** The one JSX line carrying this `ariaLabel`, so each field is asserted on its own. */
 function selectLine(src: string, ariaLabel: string): string {
-  const line = src.split("\n").find((l) => l.includes(`ariaLabel="${ariaLabel}"`));
+  const line = src.split(/\r?\n/).find((l) => l.includes(`ariaLabel="${ariaLabel}"`));
   if (!line) throw new Error(`no Select found with ariaLabel="${ariaLabel}"`);
   return line;
 }

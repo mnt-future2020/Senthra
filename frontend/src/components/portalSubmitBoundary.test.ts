@@ -41,7 +41,10 @@ function tsxFiles(dir: string): string[] {
 const stripComments = (src: string) =>
   src
     .replace(/\/\*[\s\S]*?\*\//g, "")
-    .split("\n")
+    // /\r?\n/, not "\n": a CRLF line keeps its "\r", and `.` cannot match "\r", so the
+    // `//…$` pattern below would never reach the line's end and would leave the comment in
+    // as if it were code.
+    .split(/\r?\n/)
     .map((l) => l.replace(/\/\/.*$/, ""))
     .join("\n");
 

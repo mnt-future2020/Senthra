@@ -30,7 +30,10 @@ function gateOf(route: string): string[] {
   const src = readFileSync(join(process.cwd(), "src", "app", route.replace(/^\//, ""), "page.tsx"), "utf8");
   const m = src.match(/<PermissionGate[\s\S]*?anyOf=\{\[([^\]]*)\]\}/);
   const code = (m?.[1] ?? "")
-    .split("\n")
+    // /\r?\n/, not "\n": a CRLF line keeps its "\r", and `.` cannot match "\r", so the
+    // `//…$` pattern below would never reach the line's end and would leave the comment in
+    // as if it were code.
+    .split(/\r?\n/)
     .map((l) => l.replace(/\/\/.*$/, ""))
     .join("\n");
   return [...code.matchAll(/["']([^"']+)["']/g)].map((x) => x[1]!).sort();
