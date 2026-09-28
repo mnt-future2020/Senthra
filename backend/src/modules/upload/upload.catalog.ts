@@ -216,6 +216,54 @@ export function resourceTypeFor(mediaType: string): "image" | "raw" {
   return mediaType.toLowerCase().startsWith("image/") ? "image" : "raw";
 }
 
+// ── What the Cloudinary upload presets must allow ──────────────────────────────────────────────
+//
+// Cloudinary's `allowed_formats` speaks in file EXTENSIONS, the catalog above in media types. This
+// is the one bridge between them, and it is deliberately a complete map rather than a best-effort
+// one: a media type added to a purpose without an entry here throws, so the preset can never be
+// silently narrower than what the server accepts (which would refuse the upload at Cloudinary's edge
+// with a message nobody here wrote). JPEG lists both spellings because Cloudinary treats them as
+// distinct formats in an allowlist.
+const MEDIA_TYPE_FORMATS: Record<string, readonly string[]> = {
+  "image/png": ["png"],
+  "image/jpeg": ["jpg", "jpeg"],
+  "image/gif": ["gif"],
+  "image/webp": ["webp"],
+  "application/pdf": ["pdf"],
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ["docx"],
+  "application/vnd.ms-excel": ["xls"],
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ["xlsx"],
+  "text/csv": ["csv"],
+};
+
+/** The Cloudinary format names for a set of media types — sorted, de-duplicated, and complete. */
+export function formatsForMediaTypes(mediaTypes: readonly string[]): string[] {
+  const out = new Set<string>();
+  for (const mediaType of mediaTypes) {
+    const formats = MEDIA_TYPE_FORMATS[mediaType.toLowerCase()];
+    if (!formats) throw new Error(`No Cloudinary format is mapped for media type "${mediaType}"`);
+    for (const f of formats) out.add(f);
+  }
+  return [...out].sort();
+}
+
+/**
+ * The allowlist each upload preset must carry: every format ANY purpose accepts, split by the
+ * resource type it is uploaded as. Derived from the purposes on every call so it cannot drift.
+ */
+export function uploadPresetFormats(): { image: string[]; raw: string[] } {
+  const byResource = { image: new Set<string>(), raw: new Set<string>() };
+  for (const purpose of Object.values(UPLOAD_PURPOSES)) {
+    for (const mediaType of purpose.mediaTypes) {
+      byResource[resourceTypeFor(mediaType)].add(mediaType);
+    }
+  }
+  return {
+    image: formatsForMediaTypes([...byResource.image]),
+    raw: formatsForMediaTypes([...byResource.raw]),
+  };
+}
+
 /**
  * Leading bytes that identify each document type we accept, for the finalize check.
  *

@@ -84,3 +84,27 @@ route → rateLimit → requireAuth (protected) → validateBody(zodSchema)
 See [`.env.example`](./.env.example). `config/env.ts` validates every variable with
 zod at startup and exits with a clear message if anything is missing or malformed
 (e.g. `ENCRYPTION_KEY` must be 64 hex characters).
+
+## Cloudinary account setup
+
+Attachments go straight from the browser to Cloudinary, signed by this server over two **upload
+presets** (`CLOUDINARY_UPLOAD_PRESET_IMAGE` / `CLOUDINARY_UPLOAD_PRESET_RAW`, default
+`senthra_image` / `senthra_raw`). The app manages those presets itself, so pointing it at a fresh
+Cloudinary account needs no manual preset work:
+
+- **Saving Cloudinary credentials** (Settings → Storage) creates or repairs both presets in the
+  account those credentials point at — signed, with the format allowlist derived from
+  `src/modules/upload/upload.catalog.ts`. Cloudinary rejecting the key or secret refuses the save,
+  which is the credentials check: nothing unusable is stored.
+- **Test connection** on the same card reads the presets back and reports each as ready, missing
+  or needing repair.
+- **Set up upload presets** on the same card creates or repairs them on demand — the path for a
+  deployment whose credentials come from the environment, where no save ever runs.
+
+Preset changes are recorded in the audit log (`settings.cloudinary_presets_configured`).
+
+One thing the app cannot do for you: **a new Cloudinary account blocks PDF (and ZIP) delivery by
+default**, answering 401 for any URL that ends in `.pdf`. Purchase-order PDFs and PDF attachments
+will not open until an account owner enables it in the Cloudinary console under Settings →
+Security → "PDF and ZIP files delivery" (paid plans have it on by default). See
+<https://support.cloudinary.com/hc/en-us/articles/360016480179>.

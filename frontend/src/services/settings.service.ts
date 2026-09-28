@@ -140,3 +140,15 @@ export function testStorage(payload: {
 }): Promise<StorageTestResult> {
   return api<StorageTestResult>("/settings/storage/test", { method: "POST", body: payload });
 }
+
+/**
+ * Ask the server to prepare the Cloudinary account the effective credentials point at — creating
+ * or repairing the upload presets file uploads are signed over.
+ *
+ * Saving credentials does this on its own. This is the explicit form for a deployment whose
+ * credentials come from the server environment (no save ever runs there), and the repair button
+ * for any account. It sends nothing: the server uses whatever credentials are in effect.
+ */
+export function setupCloudinaryPresets(): Promise<StorageTestResult> {
+  return api<StorageTestResult>("/settings/storage/cloudinary/presets", { method: "POST" });
+}

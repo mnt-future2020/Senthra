@@ -21,6 +21,7 @@ const h = vi.hoisted(() => ({
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
   testStorage: vi.fn(),
+  setupPresets: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -30,9 +31,11 @@ vi.mock("@/services/settings.service", () => ({
   getSettings: h.getSettings,
   updateSettings: h.updateSettings,
   testStorage: h.testStorage,
+  setupCloudinaryPresets: h.setupPresets,
 }));
 
 import { StorageSection } from "./StorageSection";
+import { primaryBtn, secondaryBtn } from "@/components/ui/styles";
 
 const SECRET = "typed-secret-should-never-render";
 
@@ -105,6 +108,9 @@ beforeEach(() => {
   h.getSettings.mockReset().mockResolvedValue(settings());
   h.updateSettings.mockReset().mockImplementation(async (p: Record<string, unknown>) => settings(p));
   h.testStorage.mockReset().mockResolvedValue({ ok: true, message: "Connected to senthra-prod (ams3)." });
+  h.setupPresets
+    .mockReset()
+    .mockResolvedValue({ ok: true, message: 'Cloudinary (cloud "senthra-media"): upload presets senthra_image and senthra_raw are already in place.' });
   h.toast.mockReset();
 });
 afterEach(cleanup);
@@ -582,5 +588,105 @@ describe("permissions", () => {
     const fieldsets = Array.from(document.querySelectorAll("fieldset"));
     expect(fieldsets).toHaveLength(3);
     for (const f of fieldsets) expect(f.disabled).toBe(true);
+  });
+});
+
+// ── Upload presets ────────────────────────────────────────────────────────────────────────────
+//
+// Saving credentials prepares the account on its own. This action exists for the deployment whose
+// credentials come from the environment — no save ever runs there — and as the repair button for
+// any account. It sends nothing: the server prepares whatever credentials are in effect.
+describe("the upload presets action", () => {
+  it("lives on the Cloudinary card and reports what the server did", async () => {
+    h.setupPresets.mockResolvedValue({
+      ok: true,
+      message: 'Cloudinary (cloud "senthra-media"): senthra_image created, senthra_raw already in place.',
+    });
+    await mounted();
+
+    await click(byTestId("cloudinary-presets-test"));
+
+    expect(h.setupPresets).toHaveBeenCalledTimes(1);
+    expect(h.setupPresets.mock.calls[0]).toEqual([]);
+    expect(testResult("cloudinary-presets")).toMatch(/senthra_image created/);
+  });
+
+  it("shows a refusal from the server as a failure on the card", async () => {
+    h.setupPresets.mockResolvedValue({ ok: false, message: "Cloudinary rejected the API key or secret." });
+    await mounted();
+
+    await click(byTestId("cloudinary-presets-test"));
+
+    expect(testResult("cloudinary-presets")).toMatch(/rejected the API key or secret/i);
+  });
+
+  it("surfaces a thrown error as a failure, not a silent no-op", async () => {
+    h.setupPresets.mockRejectedValue(new Error("Network unreachable"));
+    await mounted();
+
+    await click(byTestId("cloudinary-presets-test"));
+
+    expect(testResult("cloudinary-presets")).toMatch(/network unreachable/i);
+  });
+
+  it("is not offered to someone who cannot manage settings", async () => {
+    h.perms = new Set(["settings.view"]);
+    await mounted();
+
+    const action = byTestId("cloudinary-presets-test");
+    expect(action).toBeTruthy();
+    expect(action!.hasAttribute("disabled")).toBe(true);
+  });
+});
+
+// ── Button hierarchy and result hygiene on the Cloudinary card ────────────────────────────────
+describe("the Cloudinary card with the presets action", () => {
+  it("keeps Save as the only primary button — the probes are secondary", async () => {
+    await mounted();
+
+    expect(byTestId("cloudinary-test")!.className).toBe(secondaryBtn);
+    expect(byTestId("cloudinary-presets-test")!.className).toBe(secondaryBtn);
+    expect(byTestId("spaces-test")!.className).toBe(secondaryBtn);
+    expect(button("Save Cloudinary settings")!.className).toBe(primaryBtn);
+  });
+
+  // "Test connection" judges what is ON SCREEN; this action prepares the SAVED account. Sitting side
+  // by side, the difference has to be said, or an administrator who typed new credentials and clicked
+  // this would prepare the old account and not know why.
+  it("says the presets action uses the saved credentials", async () => {
+    await mounted();
+    expect(document.body.textContent).toMatch(/saved credentials/i);
+  });
+
+  it("clears the presets result when a credential is edited, like the connection test", async () => {
+    await mounted();
+    await click(byTestId("cloudinary-presets-test"));
+    expect(testResult("cloudinary-presets")).not.toBe("");
+
+    await typeInto(inputWithValue("senthra-media"), "other-cloud");
+
+    expect(testResult("cloudinary-presets")).toBe("");
+  });
+
+  // The save prepared the account, so a result that still reads "missing" would be describing a
+  // state the save just changed. A fresh read replaces it, and the administrator sees "ready" — or
+  // exactly what still needs doing — without another click.
+  it("re-checks the connection after a successful save, replacing stale results", async () => {
+    h.testStorage
+      .mockResolvedValueOnce({ ok: false, message: "Upload presets: senthra_raw missing." })
+      .mockResolvedValueOnce({ ok: true, message: "Upload presets: senthra_image ready, senthra_raw ready." });
+    await mounted();
+    await click(byTestId("cloudinary-test"));
+    await click(byTestId("cloudinary-presets-test"));
+    expect(testResult("cloudinary")).toMatch(/missing/);
+
+    await click(button("Save Cloudinary settings"));
+    await wait();
+
+    expect(h.testStorage).toHaveBeenCalledTimes(2);
+    expect(h.testStorage.mock.calls[1]![0]).toMatchObject({ provider: "cloudinary" });
+    expect(testResult("cloudinary")).toMatch(/ready/);
+    expect(testResult("cloudinary")).not.toMatch(/missing/);
+    expect(testResult("cloudinary-presets")).toBe("");
   });
 });

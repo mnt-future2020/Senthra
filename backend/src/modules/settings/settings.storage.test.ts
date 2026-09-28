@@ -16,6 +16,13 @@ const { probe, getOrCreate, update, record } = vi.hoisted(() => ({
 
 vi.mock("./settings.repository.js", () => ({ getOrCreate, update, findFirst: vi.fn(), create: vi.fn(), count: vi.fn() }));
 vi.mock("../../lib/storage/spaces.js", () => ({ probeSpacesConnection: probe }));
+// The account guard and the Cloudinary test now reach the Admin API; neither is under test here (see
+// settings.cloudinaryPresets.test.ts), so the transport answers "nothing to do" without a network.
+vi.mock("../../lib/storage/cloudinary.js", () => ({
+  ensureUploadPresets: vi.fn(async () => ({ ok: true, presets: [] })),
+  inspectUploadPresets: vi.fn(async () => ({ ok: true, presets: [] })),
+  uploadPresetNames: () => ({}),
+}));
 vi.mock("#modules/audit/audit.service.js", () => ({ record }));
 vi.mock("../../lib/mailer.js", () => ({ sendMail: vi.fn() }));
 vi.mock("../../lib/storage/index.js", () => ({ findActiveStorage: vi.fn() }));
@@ -139,7 +146,7 @@ describe("testStorageConnection", () => {
     expect(probe.mock.calls[0]![0]).toMatchObject({ secretAccessKey: SECRET });
   });
 
-  it("checks Cloudinary by whether its credentials resolve", async () => {
+  it("reports Cloudinary as configured without a network call when presets are disabled", async () => {
     await expect(testStorageConnection({ provider: "cloudinary" })).resolves.toMatchObject({ ok: true });
     expect(probe).not.toHaveBeenCalled();
   });

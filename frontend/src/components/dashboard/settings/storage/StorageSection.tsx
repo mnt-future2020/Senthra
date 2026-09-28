@@ -12,7 +12,7 @@ import { ReadOnlyNotice } from "@/components/dashboard/settings/ui/ReadOnlyNotic
 import { Notice } from "@/components/ui/Notice";
 import { PasswordInput } from "@/components/ui/PasswordInput";
 import { Field } from "@/components/ui/Field";
-import { inputCls, primaryBtn } from "@/components/ui/styles";
+import { hintCls, inputCls, primaryBtn, secondaryBtn } from "@/components/ui/styles";
 import type { Msg } from "@/components/ui/types";
 
 type Provider = "cloudinary" | "spaces";
@@ -63,6 +63,8 @@ export function StorageSection() {
   const [testingCloudinary, setTestingCloudinary] = React.useState(false);
   const [savingCloudinary, setSavingCloudinary] = React.useState(false);
   const [cloudinaryMsg, setCloudinaryMsg] = React.useState<Msg>(null);
+  const [presetsResult, setPresetsResult] = React.useState<settingsService.StorageTestResult | null>(null);
+  const [settingUpPresets, setSettingUpPresets] = React.useState(false);
 
   // ── Spaces ───────────────────────────────────────────────────────────────────────────────────
   const [endpoint, setEndpoint] = React.useState("");
@@ -137,7 +139,12 @@ export function StorageSection() {
     clear();
     set(v);
   };
-  const editCloudinary = (set: (v: string) => void) => onEdit(set, () => setCloudinaryTest(null));
+  /** Both Cloudinary results describe the credentials they were run against; an edit dates them. */
+  const clearCloudinaryResults = () => {
+    setCloudinaryTest(null);
+    setPresetsResult(null);
+  };
+  const editCloudinary = (set: (v: string) => void) => onEdit(set, clearCloudinaryResults);
   const editSpaces = (set: (v: string) => void) => onEdit(set, () => setSpacesTest(null));
 
   const runTest = async (
@@ -157,6 +164,25 @@ export function StorageSection() {
       setResult({ ok: false, message: err instanceof Error ? err.message : "The test could not be run." });
     } finally {
       setBusy(false);
+    }
+  };
+
+  /**
+   * The explicit "prepare the account" action. Saving credentials prepares the account on its own;
+   * this exists for credentials that come from the server environment (no save ever runs for
+   * them) and as the repair button for any account. Reported on the card, like a connection test.
+   */
+  const runPresetSetup = async () => {
+    setSettingUpPresets(true);
+    try {
+      setPresetsResult(await settingsService.setupCloudinaryPresets());
+    } catch (err) {
+      setPresetsResult({
+        ok: false,
+        message: err instanceof Error ? err.message : "The upload presets could not be set up.",
+      });
+    } finally {
+      setSettingUpPresets(false);
     }
   };
 
@@ -215,9 +241,17 @@ export function StorageSection() {
     busy: boolean,
     result: settingsService.StorageTestResult | null,
     onRun: () => void,
+    disabled = false,
   ) => (
     <div className="flex flex-wrap items-center gap-3">
-      <button type="button" onClick={onRun} disabled={busy} className={primaryBtn} data-testid={`${id}-test`}>
+      {/* Secondary on purpose: each card has ONE primary action, its Save. */}
+      <button
+        type="button"
+        onClick={onRun}
+        disabled={busy || disabled}
+        className={secondaryBtn}
+        data-testid={`${id}-test`}
+      >
         {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
         {label}
       </button>
@@ -323,7 +357,15 @@ export function StorageSection() {
           onSubmit={(e) => {
             e.preventDefault();
             void saveCard(cloudinaryFields(), setSavingCloudinary, setCloudinaryMsg, "Cloudinary settings saved.", {
-              after: () => setApiSecret(""),
+              // The save prepared the account (the server creates or repairs the upload presets before
+              // it stores anything), so the results on the card described the OLD credentials. Replace
+              // them with a fresh read: the administrator sees "ready" — or exactly what still needs
+              // doing — without another click.
+              after: () => {
+                setApiSecret("");
+                clearCloudinaryResults();
+                void runTest("cloudinary", setTestingCloudinary, setCloudinaryTest);
+              },
             });
           }}
           className="space-y-4"
@@ -372,6 +414,26 @@ export function StorageSection() {
             {testRow("cloudinary", "Test connection", testingCloudinary, cloudinaryTest, () =>
               void runTest("cloudinary", setTestingCloudinary, setCloudinaryTest),
             )}
+
+            {/* Uploads are signed over two presets that must exist in the account. Saving new
+                credentials creates them; this is the repair path, and the only path when the
+                credentials come from the server environment rather than this card. */}
+            <div className="space-y-2">
+              {testRow(
+                "cloudinary-presets",
+                "Set up upload presets",
+                settingUpPresets,
+                presetsResult,
+                () => void runPresetSetup(),
+                !canManage,
+              )}
+              <p className={hintCls}>
+                File uploads are signed over two upload presets in your Cloudinary account. Saving new
+                credentials creates them automatically. This checks and repairs them using the saved
+                credentials — for an account configured from the server environment, it is how they get
+                set up at all.
+              </p>
+            </div>
             <Notice msg={cloudinaryMsg} />
 
             <div className="flex justify-end">

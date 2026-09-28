@@ -143,6 +143,20 @@ export const testEmailLimiter = makeLimiter({
   message: json("Too many test emails. Please wait a few minutes."),
 });
 
+/**
+ * Storage probes — "Test connection" and "Set up upload presets". Privileged, network-touching
+ * actions against a third party, limited for the same reason as the test email but in their OWN
+ * bucket with their own wording. They once shared the email bucket: a first-time setup (test, save,
+ * test again, set up presets, test the other provider) hit "Too many test emails" on a storage
+ * button. Generous, because every request is an authenticated administrator's deliberate click.
+ */
+export const STORAGE_PROBE_RATE_LIMIT = { windowMs: 10 * 60 * 1000, limit: 30 } as const;
+export const STORAGE_PROBE_MESSAGE = "Too many storage checks. Please wait a few minutes and try again.";
+export const storageProbeLimiter = makeLimiter({
+  ...STORAGE_PROBE_RATE_LIMIT,
+  message: json(STORAGE_PROBE_MESSAGE),
+});
+
 // General throttle for admin write operations (create/update/delete of users,
 // roles, templates). Generous for normal admin use, but caps a runaway script
 // or a compromised session. Read endpoints are intentionally not limited.

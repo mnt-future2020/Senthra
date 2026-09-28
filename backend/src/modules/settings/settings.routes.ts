@@ -2,7 +2,7 @@ import { Router } from "express";
 
 import * as settingsController from "./settings.controller.js";
 import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
-import { testEmailLimiter } from "../../middleware/rateLimit.middleware.js";
+import { storageProbeLimiter, testEmailLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   testEmailSchema,
@@ -29,14 +29,22 @@ router.post(
   validateBody(testEmailSchema),
   settingsController.sendTestEmail,
 );
-// Same shape and same limiter as the email test: a privileged, network-touching probe that should
-// not be a way to hammer a third party from an authenticated session.
+// Same shape as the email test — a privileged, network-touching probe that should not be a way to
+// hammer a third party from an authenticated session — in the storage probes' own bucket.
 router.post(
   "/storage/test",
   requirePermission("settings.manage"),
-  testEmailLimiter,
+  storageProbeLimiter,
   validateBody(testStorageSchema),
   settingsController.testStorage,
+);
+// Writes into the Cloudinary account (creates or repairs the upload presets), so it is gated and
+// limited exactly like the probes above. No body: it prepares whatever credentials are in effect.
+router.post(
+  "/storage/cloudinary/presets",
+  requirePermission("settings.manage"),
+  storageProbeLimiter,
+  settingsController.setupCloudinaryPresets,
 );
 router.post(
   "/branding/upload",

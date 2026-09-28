@@ -49,6 +49,23 @@ export const testStorage = asyncHandler(async (req, res) => {
   res.json(result);
 });
 
+/**
+ * POST /settings/storage/cloudinary/presets  (protected) — prepare the Cloudinary account the
+ * effective credentials point at: create or repair the upload presets uploads are signed over.
+ *
+ * Attributed, because it WRITES into the client's account and the audit log says who asked. Same
+ * `{ ok, message }` shape as the connection test, for the same reason: a refusal is an answer for
+ * the administrator, and no configuration or SDK detail reaches the browser.
+ */
+export const setupCloudinaryPresets = asyncHandler(async (req, res) => {
+  const result = await settingsService.setupCloudinaryPresets({
+    id: req.principal?.id,
+    email: req.principal?.email,
+    type: req.principal?.type,
+  });
+  res.json(result);
+});
+
 // POST /settings/email/test  (protected) — send a test email.
 export const sendTestEmail = asyncHandler(async (req, res) => {
   const result = await settingsService.sendTestEmail(req.body as TestEmailInput);

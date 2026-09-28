@@ -2,7 +2,15 @@ import type { Prisma, Settings } from "@prisma/client";
 
 import { env } from "../../config/env.js";
 import { findActiveStorage } from "../../lib/storage/index.js";
-import type { CloudinaryCreds } from "../../lib/storage/cloudinary.js";
+import {
+  ensureUploadPresets,
+  inspectUploadPresets,
+  uploadPresetNames,
+  type CloudinaryCreds,
+  type UploadPresetOutcome,
+  type UploadPresetSpec,
+  type UploadPresetStatus,
+} from "../../lib/storage/cloudinary.js";
 import { probeSpacesConnection, type SpacesConfig } from "../../lib/storage/spaces.js";
 import { generateDerivatives, type DerivativeIntent } from "../../lib/storage/derivatives.js";
 import { sendMail } from "../../lib/mailer.js";
@@ -23,6 +31,7 @@ import { DEFAULT_BRAND_COLOR, safeBrandColor } from "../../utils/email-html.js";
 import { badRequest } from "../../utils/http-error.js";
 import * as auditService from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
+import { uploadPresetFormats } from "#modules/upload/upload.catalog.js";
 
 // Resolve Cloudinary credentials: UI-configured (DB) takes precedence, then env.
 // Returns null when neither is fully configured.
@@ -227,6 +236,114 @@ export async function getStoredProviderId(): Promise<string | null> {
   return (await settingsRepo.getOrCreate()).storageProvider;
 }
 
+// ── Cloudinary upload presets ─────────────────────────────────────────────────────────────────
+//
+// A direct browser upload is signed over an upload preset, so the preset must EXIST in the account
+// the credentials point at, carrying the catalog's format allowlist (see `ensureUploadPresets`).
+// Saving credentials prepares that account; the connection test reads it; `setupCloudinaryPresets`
+// is the explicit action for a deployment whose credentials come from the environment and so never
+// pass through a save — and the repair button for any account.
+
+/** The presets this deployment signs with: names from the environment, allowlists from the catalog. */
+function uploadPresetSpecs(): UploadPresetSpec[] {
+  const names = uploadPresetNames();
+  const formats = uploadPresetFormats();
+  const specs: UploadPresetSpec[] = [];
+  if (names.image) specs.push({ name: names.image, allowedFormats: formats.image });
+  if (names.raw) specs.push({ name: names.raw, allowedFormats: formats.raw });
+  return specs;
+}
+
+const NEED_CLOUDINARY_CREDS = "Add the Cloudinary cloud name, API key and API secret first.";
+
+/** Honest about what was NOT checked: with presets disabled there is nothing to read from the account. */
+function presetsDisabledMessage(cloudName: string): string {
+  return `Cloudinary is configured (cloud "${cloudName}"). Upload presets are disabled in this deployment (CLOUDINARY_UPLOAD_PRESET_IMAGE and CLOUDINARY_UPLOAD_PRESET_RAW are blank), so nothing was verified against the account.`;
+}
+
+const STATUS_WORD: Record<UploadPresetStatus, string> = {
+  ready: "ready",
+  missing: "missing",
+  drifted: "needs repair",
+};
+const OUTCOME_WORD: Record<UploadPresetOutcome, string> = {
+  created: "created",
+  updated: "repaired",
+  unchanged: "already in place",
+};
+
+function describePresetStatuses(cloudName: string, presets: { name: string; status: UploadPresetStatus }[]): string {
+  const list = presets.map((p) => `${p.name} ${STATUS_WORD[p.status]}`).join(", ");
+  const attention = presets.some((p) => p.status !== "ready");
+  return `Connected to Cloudinary (cloud "${cloudName}"). Upload presets: ${list}.${
+    attention ? " Saving the Cloudinary settings (or “Set up upload presets”) fixes this." : ""
+  }`;
+}
+
+function describePresetOutcomes(cloudName: string, presets: { name: string; outcome: UploadPresetOutcome }[]): string {
+  if (presets.every((p) => p.outcome === "unchanged")) {
+    const names = presets.map((p) => p.name).join(" and ");
+    return presets.length === 1
+      ? `Cloudinary (cloud "${cloudName}"): upload preset ${names} is already in place.`
+      : `Cloudinary (cloud "${cloudName}"): upload presets ${names} are already in place.`;
+  }
+  return `Cloudinary (cloud "${cloudName}"): ${presets.map((p) => `${p.name} ${OUTCOME_WORD[p.outcome]}`).join(", ")}.`;
+}
+
+interface PreparedPresets {
+  cloudName: string;
+  presets: { name: string; outcome: UploadPresetOutcome }[];
+}
+
+/**
+ * Only a CHANGE is audited — a save that found everything in place is not an event. The payload
+ * names the cloud and the presets, and nothing else: no key, and above all no secret.
+ */
+function recordPresetAudit(actor: AuditActor | undefined, prepared: PreparedPresets | null): void {
+  if (!prepared) return;
+  const created = prepared.presets.filter((p) => p.outcome === "created").map((p) => p.name);
+  const updated = prepared.presets.filter((p) => p.outcome === "updated").map((p) => p.name);
+  if (created.length === 0 && updated.length === 0) return;
+  auditService.record({
+    actor,
+    action: "settings.cloudinary_presets_configured",
+    targetType: "settings",
+    metadata: { cloudName: prepared.cloudName, created, updated },
+  });
+}
+
+/**
+ * The Cloudinary credentials a save LEAVES BEHIND in Settings — submitted values over stored ones,
+ * a blank secret meaning "keep the stored one", exactly as the Spaces guard reads its form. Null
+ * when the result is not a complete set: a cleared field falls the app back to the environment,
+ * and that account is not this save's to prepare.
+ */
+function cloudinaryCredsLeftBehind(input: UpdateSettingsParams, s: Settings): CloudinaryCreds | null {
+  const text = (submitted: string | undefined, stored: string | null) =>
+    (typeof submitted === "string" ? submitted.trim() : stored?.trim()) || "";
+  const cloudName = text(input.cloudinaryCloudName, s.cloudinaryCloudName);
+  const apiKey = text(input.cloudinaryApiKey, s.cloudinaryApiKey);
+  const submittedSecret = input.cloudinaryApiSecret?.trim();
+  const apiSecret = submittedSecret || (s.cloudinaryApiSecret ? String(decryptSecret(s.cloudinaryApiSecret)) : "");
+  return cloudName && apiKey && apiSecret ? { cloudName, apiKey, apiSecret } : null;
+}
+
+/**
+ * Prepare the account the EFFECTIVE credentials point at (Settings first, then the environment) —
+ * the explicit form of what a credentials save does on its own. Returns a result rather than
+ * throwing, like the connection test: a refusal is an answer for the administrator, not an error.
+ */
+export async function setupCloudinaryPresets(actor?: AuditActor): Promise<{ ok: boolean; message: string }> {
+  const creds = await getCloudinaryCreds();
+  if (!creds) return { ok: false, message: NEED_CLOUDINARY_CREDS };
+  const specs = uploadPresetSpecs();
+  if (specs.length === 0) return { ok: true, message: presetsDisabledMessage(creds.cloudName) };
+  const prepared = await ensureUploadPresets(specs, creds);
+  if (!prepared.ok) return prepared;
+  recordPresetAudit(actor, { cloudName: creds.cloudName, presets: prepared.presets });
+  return { ok: true, message: describePresetOutcomes(creds.cloudName, prepared.presets) };
+}
+
 /**
  * Prove a Spaces configuration actually works, before anything is allowed to depend on it.
  *
@@ -248,14 +365,22 @@ export async function getStoredProviderId(): Promise<string | null> {
 export async function testStorageConnection(
   input: SpacesTestParams & CloudinaryTestParams & { provider: "cloudinary" | "spaces" },
 ): Promise<{ ok: boolean; message: string }> {
-  // Cloudinary's own configuration check is the one this app has always had: whether a complete set
-  // of credentials resolves. It is deliberately not a network call — Cloudinary's Admin API is rate
-  // limited, and an upload proves far more than a ping would.
+  // Cloudinary is checked the way Spaces is: against the account, with the values on screen. The
+  // preset read is the smallest Admin API call that proves the credentials — a rejected key fails
+  // HERE rather than on the first upload — and it reports what a save would create or repair. It
+  // used to be a local completeness check that passed any three non-empty strings.
   if (input.provider === "cloudinary") {
     const creds = await resolveCloudinaryTestCreds(input);
-    return creds
-      ? { ok: true, message: `Cloudinary is configured (cloud "${creds.cloudName}").` }
-      : { ok: false, message: "Add the Cloudinary cloud name, API key and API secret first." };
+    if (!creds) return { ok: false, message: NEED_CLOUDINARY_CREDS };
+    const specs = uploadPresetSpecs();
+    if (specs.length === 0) return { ok: true, message: presetsDisabledMessage(creds.cloudName) };
+    const inspected = await inspectUploadPresets(specs, creds);
+    if (!inspected.ok) return inspected;
+    // Green means "uploads will work", exactly as it does for Spaces — not merely "the key was accepted".
+    return {
+      ok: inspected.presets.every((p) => p.status === "ready"),
+      message: describePresetStatuses(creds.cloudName, inspected.presets),
+    };
   }
   return testSpacesConnection(input);
 }
@@ -913,6 +1038,30 @@ export async function updateSettings(
     data.cloudinaryApiSecret = encryptSecret(input.cloudinaryApiSecret.trim());
   }
 
+  /**
+   * THE ACCOUNT GUARD. A save that touches the Cloudinary credentials prepares the account they
+   * point at — the upload presets uploads are signed over are created or repaired there — and a
+   * failure refuses the save. That is the first real check these credentials get: a wrong secret
+   * used to be stored with a green message and discovered by the first user whose attachment
+   * failed. It judges the credentials this save LEAVES BEHIND, exactly like the switch guard below,
+   * and runs BEFORE the write so nothing unusable is ever stored.
+   *
+   * Switching back to Cloudinary deliberately does NOT pass through here: the way back must always
+   * stay open (see the switch guard), and the presets were prepared when the credentials were saved.
+   */
+  let preparedPresets: PreparedPresets | null = null;
+  const cloudinaryTouched =
+    "cloudinaryCloudName" in data || "cloudinaryApiKey" in data || "cloudinaryApiSecret" in data;
+  if (cloudinaryTouched) {
+    const next = cloudinaryCredsLeftBehind(input, s);
+    const specs = uploadPresetSpecs();
+    if (next && specs.length > 0) {
+      const prepared = await ensureUploadPresets(specs, next);
+      if (!prepared.ok) throw badRequest(`${prepared.message} The Cloudinary settings were not saved.`);
+      preparedPresets = { cloudName: next.cloudName, presets: prepared.presets };
+    }
+  }
+
   // --- DigitalOcean Spaces (config plaintext; secret encrypted, blank-to-keep) ---
   if (typeof input.spacesEndpoint === "string") data.spacesEndpoint = input.spacesEndpoint.trim() || null;
   if (typeof input.spacesRegion === "string") data.spacesRegion = input.spacesRegion.trim() || null;
@@ -1075,6 +1224,9 @@ export async function updateSettings(
       metadata: { from: currentProvider, to: data.storageProvider as string },
     });
   }
+
+  // Recorded AFTER the write, so the log never claims a preparation whose save was then refused.
+  recordPresetAudit(actor, preparedPresets);
 
   return publicSettings(updated);
 }

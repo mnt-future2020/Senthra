@@ -323,6 +323,263 @@ function uploadPresetFor(resourceType: "image" | "raw"): string | undefined {
   return name.trim() || undefined;
 }
 
+// ── Upload presets, managed from here ──────────────────────────────────────────────────────────
+//
+// `signUpload` below signs over `upload_preset`, so the preset must EXIST in whichever account the
+// credentials point at, carrying the format allowlist the upload catalog expects. A fresh account
+// has neither, and the symptom is a Cloudinary 400 on every attachment upload — long after the
+// credentials were saved with a green "configured" message. `ensureUploadPresets` is what makes
+// saving credentials also mean "the account is ready", and it is idempotent: a preset that already
+// matches is left untouched, so a repeated save writes nothing.
+//
+// These are ADMIN API calls (rate-limited: 500/hour on the free plan). They belong on a save and on
+// an explicit action, never on the upload path — the same reasoning `fetchFirstBytes` gives for
+// reading through the CDN instead.
+
+/** One preset as the app requires it: signed, carrying exactly this allowlist. */
+export interface UploadPresetSpec {
+  name: string;
+  allowedFormats: readonly string[];
+}
+
+export type UploadPresetOutcome = "created" | "updated" | "unchanged";
+export type UploadPresetStatus = "ready" | "missing" | "drifted";
+
+/**
+ * Either every preset was handled, or the FIRST failure — worded for an administrator, and never
+ * carrying the secret. One failure ends the run: a rejected key is rejected for every preset.
+ */
+export type UploadPresetResult<T> = { ok: true; presets: T[] } | { ok: false; message: string };
+
+/** The preset names uploads are signed with, per resource type. Blank in the environment means none. */
+export function uploadPresetNames(): { image?: string; raw?: string } {
+  return { image: uploadPresetFor("image"), raw: uploadPresetFor("raw") };
+}
+
+/**
+ * The credentials as the SDK takes them ON EACH CALL.
+ *
+ * Never its global `config()`. The SDK reads that global at call time, and every other transport in
+ * this file sets it just before ONE synchronous call — safe. These functions await between calls,
+ * and a concurrent upload, finalize or delivery-URL signing sets the global to the STORED
+ * credentials in that gap. Relying on it would point the next call at the old account — during the
+ * very credential change this code exists for. Per-call credentials close that window entirely.
+ */
+type AdminAuth = { cloud_name: string; api_key: string; api_secret: string };
+function adminAuth(creds: CloudinaryCreds): AdminAuth {
+  return { cloud_name: creds.cloudName, api_key: creds.apiKey, api_secret: creds.apiSecret };
+}
+
+/**
+ * How long one run may wait on Cloudinary IN TOTAL. Under the browser's 20 s request timeout, so the
+ * administrator reads this message rather than a generic one; far above the few hundred ms these
+ * calls take. The SDK arms a 60 s socket timeout and never handles it, so this is the only bound.
+ */
+const ADMIN_BUDGET_MS = 15_000;
+
+export interface AdminCallOptions {
+  /** Total time the run may wait on Cloudinary. Defaults to ADMIN_BUDGET_MS. */
+  timeoutMs?: number;
+}
+
+class AdminTimeout extends Error {
+  constructor() {
+    super("Cloudinary did not answer in time");
+    this.name = "AdminTimeout";
+  }
+}
+
+/** A 404 that never reached Cloudinary's API — an empty or malformed cloud name, not a missing preset. */
+class RoutingFailure extends Error {
+  constructor() {
+    super("Cloudinary could not route the request");
+    this.name = "RoutingFailure";
+  }
+}
+
+/** One deadline for every call in a run, so the RUN is bounded rather than each call separately. */
+class Deadline {
+  private readonly at: number;
+
+  constructor(budgetMs: number) {
+    this.at = Date.now() + budgetMs;
+  }
+
+  /** Settles with the call, or with AdminTimeout when the budget runs out first (the call is abandoned). */
+  race<T>(call: Promise<T>): Promise<T> {
+    const remaining = this.at - Date.now();
+    if (remaining <= 0) return Promise.reject(new AdminTimeout());
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expiry = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new AdminTimeout()), remaining);
+    });
+    return Promise.race([call, expiry]).finally(() => clearTimeout(timer));
+  }
+}
+
+/** Cloudinary reports `allowed_formats` as an array or a comma string; order and case do not matter. */
+function normaliseFormats(value: unknown): string {
+  const list = Array.isArray(value) ? value.map(String) : typeof value === "string" ? value.split(",") : [];
+  return [...new Set(list.map((f) => f.trim().toLowerCase()).filter(Boolean))].sort().join(",");
+}
+
+/**
+ * "Already right" means SIGNED, overwrite-protected, with exactly the allowlist — every field
+ * `presetBody` writes. An unsigned preset under this name would let anyone upload into the account
+ * without a signature — a hole the app did not open but would be blamed for — so it counts as drift
+ * and is re-signed. An omitted `overwrite` is Cloudinary's default (off) and is not drift.
+ */
+function presetMatches(existing: Record<string, unknown>, spec: UploadPresetSpec): boolean {
+  const settings = (existing.settings ?? {}) as Record<string, unknown>;
+  const stored = normaliseFormats(settings.allowed_formats ?? existing.allowed_formats);
+  return (
+    existing.unsigned !== true &&
+    settings.overwrite !== true &&
+    stored === normaliseFormats(spec.allowedFormats)
+  );
+}
+
+/**
+ * What the SDK surfaces for an Admin API failure. A status answer arrives as
+ * `{ error: { message, http_code } }`; a socket-level failure as `{ error: <Error with code> }`;
+ * both are read the same way, with a bare Error tolerated for good measure.
+ */
+function adminFailure(e: unknown): { httpCode?: number; code?: string; message: string } {
+  const outer = (e ?? {}) as { error?: unknown; http_code?: unknown; code?: unknown; message?: unknown };
+  const inner = (outer.error ?? outer) as { http_code?: unknown; code?: unknown; message?: unknown };
+  const pick = <T,>(guard: (v: unknown) => v is T, ...values: unknown[]): T | undefined =>
+    values.find(guard) as T | undefined;
+  const isNumber = (v: unknown): v is number => typeof v === "number";
+  const isString = (v: unknown): v is string => typeof v === "string";
+  return {
+    httpCode: pick(isNumber, inner.http_code, outer.http_code),
+    code: pick(isString, inner.code, outer.code),
+    message: pick(isString, inner.message, outer.message) ?? "",
+  };
+}
+
+const NETWORK_CODES = /^(ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|EPIPE|EHOSTUNREACH|ENETUNREACH)$/;
+
+/** A sentence for an administrator. The secret is scrubbed from whatever Cloudinary echoed back. */
+function describeAdminFailure(e: unknown, creds: CloudinaryCreds): string {
+  if (e instanceof AdminTimeout) return "Cloudinary did not answer in time — try again in a moment.";
+  if (e instanceof RoutingFailure) return "Cloudinary could not route the request — check the cloud name.";
+  const { httpCode, code, message } = adminFailure(e);
+  if (httpCode === 401) {
+    // A well-formed but wrong cloud name is ALSO answered 401 ("api_secret mismatch"), so all three
+    // fields are named — pointing at the two that sound like credentials would send an administrator
+    // with a typo in the cloud name to regenerate a key that was never wrong.
+    return "Cloudinary rejected these credentials — check the cloud name, API key and API secret against the Cloudinary dashboard.";
+  }
+  if (httpCode === 403) {
+    return "Cloudinary accepted the credentials, but this API key is not allowed to manage upload presets.";
+  }
+  if (httpCode === 420 || httpCode === 429) {
+    return "Cloudinary's admin API rate limit was hit — wait a few minutes and try again.";
+  }
+  if (code && NETWORK_CODES.test(code)) {
+    return "Could not reach Cloudinary — check the network and try again.";
+  }
+  const detail = message || "no details were given";
+  const scrubbed = creds.apiSecret ? detail.split(creds.apiSecret).join("[secret]") : detail;
+  return `Cloudinary answered with an error — ${scrubbed}`;
+}
+
+/**
+ * The stored preset, or null when Cloudinary has none by that name. Anything else is thrown.
+ *
+ * Only Cloudinary's OWN "no such preset" answer — a 404 carrying its JSON error message — means
+ * missing. A 404 page for a request that never reached the API (an empty or malformed cloud name)
+ * arrives through the SDK as "invalid JSON response"; reading THAT as "missing" would go on to
+ * create presets in a cloud that does not exist, so it is a RoutingFailure instead. Only this read
+ * makes that distinction: a 404 Cloudinary returns to a later write is its own answer, and is
+ * passed through in its own words.
+ */
+async function fetchPreset(name: string, auth: AdminAuth, deadline: Deadline): Promise<Record<string, unknown> | null> {
+  try {
+    return (await deadline.race(cloudinary.api.upload_preset(name, auth))) as Record<string, unknown>;
+  } catch (e) {
+    const { httpCode, message } = adminFailure(e);
+    if (httpCode === 404) {
+      if (message !== "" && !/invalid JSON response/i.test(message)) return null;
+      throw new RoutingFailure();
+    }
+    throw e;
+  }
+}
+
+/**
+ * Every field the app's presets carry, on create AND on update. The update REPLACES the preset's
+ * settings object rather than merging into it, so a repair that sent only the allowlist would
+ * silently drop `overwrite: false` — the field that stops a replayed upload signature replacing the
+ * asset it already uploaded (the request signs it too; the preset is the account-side echo).
+ */
+function presetBody(spec: UploadPresetSpec): { unsigned: false; overwrite: false; allowed_formats: string } {
+  return { unsigned: false, overwrite: false, allowed_formats: [...spec.allowedFormats].join(",") };
+}
+
+/**
+ * Create or repair each preset so it is signed and carries exactly its allowlist.
+ *
+ * Idempotent, and cheap when nothing is wrong: one read per preset, and a write only for a preset
+ * that is missing or has drifted. Stops at the first failure — see UploadPresetResult.
+ */
+export async function ensureUploadPresets(
+  specs: readonly UploadPresetSpec[],
+  creds: CloudinaryCreds,
+  opts: AdminCallOptions = {},
+): Promise<UploadPresetResult<{ name: string; outcome: UploadPresetOutcome }>> {
+  if (specs.length === 0) return { ok: true, presets: [] };
+  const auth = adminAuth(creds);
+  const deadline = new Deadline(opts.timeoutMs ?? ADMIN_BUDGET_MS);
+  const presets: { name: string; outcome: UploadPresetOutcome }[] = [];
+  for (const spec of specs) {
+    try {
+      const existing = await fetchPreset(spec.name, auth, deadline);
+      if (!existing) {
+        await deadline.race(cloudinary.api.create_upload_preset({ name: spec.name, ...presetBody(spec), ...auth }));
+        presets.push({ name: spec.name, outcome: "created" });
+      } else if (presetMatches(existing, spec)) {
+        presets.push({ name: spec.name, outcome: "unchanged" });
+      } else {
+        await deadline.race(cloudinary.api.update_upload_preset(spec.name, { ...presetBody(spec), ...auth }));
+        presets.push({ name: spec.name, outcome: "updated" });
+      }
+    } catch (e) {
+      return { ok: false, message: describeAdminFailure(e, creds) };
+    }
+  }
+  return { ok: true, presets };
+}
+
+/**
+ * Read-only: what `ensureUploadPresets` WOULD do, for the connection test. It reads with the
+ * credentials it is handed, which makes it the first real check those credentials get — a rejected
+ * key fails here, not on the first upload.
+ */
+export async function inspectUploadPresets(
+  specs: readonly UploadPresetSpec[],
+  creds: CloudinaryCreds,
+  opts: AdminCallOptions = {},
+): Promise<UploadPresetResult<{ name: string; status: UploadPresetStatus }>> {
+  if (specs.length === 0) return { ok: true, presets: [] };
+  const auth = adminAuth(creds);
+  const deadline = new Deadline(opts.timeoutMs ?? ADMIN_BUDGET_MS);
+  const presets: { name: string; status: UploadPresetStatus }[] = [];
+  for (const spec of specs) {
+    try {
+      const existing = await fetchPreset(spec.name, auth, deadline);
+      presets.push({
+        name: spec.name,
+        status: !existing ? "missing" : presetMatches(existing, spec) ? "ready" : "drifted",
+      });
+    } catch (e) {
+      return { ok: false, message: describeAdminFailure(e, creds) };
+    }
+  }
+  return { ok: true, presets };
+}
+
 /**
  * The Cloudinary adapter.
  *
