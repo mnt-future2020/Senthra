@@ -1477,7 +1477,7 @@ export function HireMovementForm({ poId, direction }: { poId: string; direction:
           <FormAsideCard title={mode.asideTitle}>
             <div className="space-y-2.5 text-sm">
               {/* No "Purchase order" or "Supplier" row: the page header two inches above already reads
-                  "PO-0063 · kansha", and a summary that repeats the title says nothing. */}
+                  "PO-0063 · Acme Hire", and a summary that repeats the title says nothing. */}
               {/* WHERE THIS RECORD IS FILED — the order's warehouse, for every direction, because that
                   is what the note stores and whose queue this came off. It used to summarise the
                   lines' delivery ADDRESSES ("2 places"), which are the supplier's delivery instruction

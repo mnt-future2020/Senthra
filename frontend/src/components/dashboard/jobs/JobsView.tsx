@@ -432,7 +432,7 @@ export function JobsView() {
                       </div>
                     </td>
                     {/* One line each, with the full value in the title — see CELL_ONE_LINE. Before
-                        this the columns were squeezed enough that "ABC Company" and "Shahul FE" both
+                        this the columns were squeezed enough that "ABC Company" and "Jane Doe" both
                         wrapped, and every row stood two to three lines tall. */}
                     <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE}`} title={job.customerName ?? undefined}>{job.customerName ?? "—"}</td>
                     <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE} ${colClass("lg")}`} title={job.assignedEngineerName ?? undefined}>{job.assignedEngineerName ?? "—"}</td>

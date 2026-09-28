@@ -155,7 +155,7 @@ export interface KitLineVanSource {
 // A kit line fulfilled from another engineer's van still stores a warehouse (deriveHomeWarehouse
 // picks a nominal one so leftovers have a return location). Both kit lists render that warehouse as
 // the PICKUP location, which would send the engineer to collect stock a colleague already handed
-// them. This is what lets the UI say "from sahul FE" instead. Declined/cancelled transfers are
+// them. This is what lets the UI say "from Jane Doe" instead. Declined/cancelled transfers are
 // excluded — they never moved anything.
 export async function findVanSourcesByKitLines(jobKitLineIds: string[]): Promise<Map<string, KitLineVanSource[]>> {
   const out = new Map<string, KitLineVanSource[]>();

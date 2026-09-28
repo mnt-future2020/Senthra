@@ -148,7 +148,7 @@ export function FormAsideCard({
  * Every aside in the app hand-rolled `<div className="flex justify-between gap-3">` with two bare
  * spans, and none of them guarded the value. A flex item's default `min-width: auto` refuses to
  * shrink below its content, and an email or a warehouse code is a single unbreakable token — so
- * "shahul@mntfuture.com" under "Created by" rendered straight through the right edge of the card
+ * "jane.doe@example.com" under "Created by" rendered straight through the right edge of the card
  * and out over the page. It was invisible until a value happened to be long enough, which is why it
  * survived in six asides at once.
  *

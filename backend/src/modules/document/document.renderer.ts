@@ -533,10 +533,10 @@ function drawFooters(doc: Doc, data: PurchaseOrderDocumentData, regional: Docume
     doc.font("Helvetica").fontSize(FONT.small).fillColor(COLORS.faint);
     // The generating user is deliberately NOT printed — it is internal audit data the supplier has
     // no use for, and at A4 it cost ~88pt, which forced the company's own email to be truncated
-    // ("shahul@mnt…") on an outward-facing document. It remains recorded in the audit log.
+    // ("accounts@examp…") on an outward-facing document. It remains recorded in the audit log.
     const meta = `${data.meta.documentCode}   ·   Generated ${generatedAt}   ·   Page ${i + 1} of ${range.count}`;
     // `lineBreak: false` makes pdfkit ignore `width` for wrapping AND clipping, so a long left
-    // string silently overruns into the right-aligned meta block ("…@mntfuturePO-0031"). Measure
+    // string silently overruns into the right-aligned meta block ("…@example.comPO-0031"). Measure
     // the meta text and hand the left side only the space that is actually left over, ellipsizing
     // it if it still doesn't fit (a safety net — the two sides fit at A4 today).
     const rawMetaW = doc.widthOfString(meta);

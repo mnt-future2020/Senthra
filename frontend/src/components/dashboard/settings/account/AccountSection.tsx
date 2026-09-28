@@ -85,7 +85,7 @@ export function AccountSection() {
               value={name}
               onChange={(e) => setName(e.target.value)}
               maxLength={120}
-              placeholder="e.g. Shahul Hameed"
+              placeholder="e.g. Jane Doe"
               className={inputCls}
             />
           </Field>

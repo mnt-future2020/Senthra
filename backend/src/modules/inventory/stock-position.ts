@@ -208,7 +208,7 @@ export interface PositionFilters {
    * engineer lens's own search box matches it.
    *
    * ENGINEER-SCOPED BY DEFINITION, and named so you cannot miss it. A warehouse shelf, a customer
-   * site and a damage pool have no engineer, so "held by an engineer called Kansha" is false for
+   * site and a damage pool have no engineer, so "held by an engineer called Jane" is false for
    * every one of their rows and they are excluded — a narrowing, never a widening. Setting this
    * together with `locationType: "warehouse"` is a contradictory query and correctly returns
    * nothing; it is not rejected, because a filter that returns an empty set is honest and a 400

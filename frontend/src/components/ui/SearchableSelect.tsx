@@ -11,7 +11,7 @@ import type { SelectOption } from "./Select";
 // The searchable half of <Select> — same trigger, same value contract, plus a search box in the panel.
 //
 // It exists because a <select> answers "which of these?" and this control has to answer "where is
-// Kansha?". Base UI's Select has type-ahead, but type-ahead is invisible: nothing on screen says you
+// Jane?". Base UI's Select has type-ahead, but type-ahead is invisible: nothing on screen says you
 // may type, so nobody does. The client asked for search on the engineer picker for exactly that
 // reason, and every other picker over a list of PEOPLE, customers, suppliers or warehouses has the
 // same problem the moment the list outgrows a screen.
